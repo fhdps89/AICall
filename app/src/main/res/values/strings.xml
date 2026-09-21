@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">오늘도 한 통</string>
+    <string name="voice_label">지금 목소리</string>
+    <string name="fixed_voice_name">기본 한국어 음성</string>
+    <string name="call_button">통화하기</string>
+    <string name="settings_title">설정</string>
+    <string name="nickname_label">호칭 (AI가 부를 이름)</string>
+    <string name="nickname_hint">예: 민수, 엄마, 친구</string>
+    <string name="nickname_default">친구</string>
+    <string name="ai_voice_notice">AI 음성</string>
+    <string name="mute">음소거</string>
+    <string name="unmute">음소거 해제</string>
+    <string name="hang_up">끊기</string>
+    <string name="listening">듣는 중…</string>
+    <string name="speaking">말하는 중…</string>
+    <string name="permission_needed">마이크 권한이 필요합니다</string>
+    <string name="grant_permission">권한 허용</string>
+</resources>

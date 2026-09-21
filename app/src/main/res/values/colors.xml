@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="her_bg">#FF1A1210</color>
+    <color name="her_bg_soft">#FF241A17</color>
+    <color name="her_amber">#FFE8A87C</color>
+    <color name="her_amber_dim">#99E8A87C</color>
+    <color name="her_glow">#66FFB07A</color>
+    <color name="her_text">#FFF5EDE6</color>
+    <color name="her_text_dim">#99F5EDE6</color>
+    <color name="her_danger">#FFE07070</color>
+</resources>
