@@ -1,18 +1,23 @@
 package com.onecall.aivoice.ui.home
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -24,7 +29,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -124,6 +133,8 @@ fun HomeScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .imePadding()
+                    .verticalScroll(rememberScrollState())
                     .padding(horizontal = 24.dp, vertical = 8.dp)
                     .padding(bottom = 32.dp)
             ) {
@@ -172,6 +183,82 @@ fun HomeScreen(
                 }
                 TextButton(onClick = { viewModel.closeSettings() }) {
                     Text("닫기", color = HerTextDim)
+                }
+                Spacer(Modifier.height(12.dp))
+                HorizontalDivider(color = HerTextDim.copy(alpha = 0.2f))
+                ApiKeySection(state = state, viewModel = viewModel)
+            }
+        }
+    }
+}
+
+/** Subtle on-device Gemini key entry (test builds). The key never leaves the phone except to call Gemini. */
+@Composable
+private fun ApiKeySection(state: HomeUiState, viewModel: HomeViewModel) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(enabled = !state.apiKeyEditing) { viewModel.startApiKeyEdit() }
+                .padding(vertical = 12.dp)
+        ) {
+            Text(
+                text = stringResource(R.string.ai_key_label),
+                style = MaterialTheme.typography.bodyMedium,
+                color = HerTextDim
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = state.maskedApiKey.ifEmpty { stringResource(R.string.ai_key_not_set) },
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (state.maskedApiKey.isEmpty()) HerTextDim else HerAmber
+            )
+        }
+        if (state.apiKeyEditing) {
+            OutlinedTextField(
+                value = state.apiKeyDraft,
+                onValueChange = viewModel::updateApiKeyDraft,
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text(stringResource(R.string.ai_key_input_label)) },
+                visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = HerAmber,
+                    unfocusedBorderColor = HerTextDim,
+                    focusedLabelColor = HerAmber,
+                    cursorColor = HerAmber,
+                    focusedTextColor = HerText,
+                    unfocusedTextColor = HerText
+                )
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = stringResource(R.string.ai_key_notice),
+                style = MaterialTheme.typography.bodyMedium,
+                color = HerTextDim
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                TextButton(onClick = { viewModel.cancelApiKeyEdit() }) {
+                    Text(stringResource(R.string.ai_key_cancel), color = HerTextDim)
+                }
+                TextButton(
+                    onClick = { viewModel.saveApiKey() },
+                    enabled = state.apiKeyDraft.isNotBlank()
+                ) {
+                    Text(stringResource(R.string.ai_key_save), color = HerAmber)
+                }
+            }
+        } else if (state.maskedApiKey.isNotEmpty()) {
+            Row(modifier = Modifier.fillMaxWidth()) {
+                TextButton(onClick = { viewModel.startApiKeyEdit() }) {
+                    Text(stringResource(R.string.ai_key_replace), color = HerTextDim)
+                }
+                TextButton(onClick = { viewModel.clearApiKey() }) {
+                    Text(stringResource(R.string.ai_key_clear), color = HerTextDim)
                 }
             }
         }

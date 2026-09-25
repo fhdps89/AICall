@@ -6,6 +6,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.onecall.aivoice.data.UserPreferences
 import com.onecall.aivoice.voice.CallPhase
+import com.onecall.aivoice.voice.ReplyLatency
+import com.onecall.aivoice.voice.ReplySource
 import com.onecall.aivoice.voice.VoiceCallEngine
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -22,7 +24,11 @@ data class CallUiState(
     val elapsedMs: Long = 0L,
     val partialText: String = "",
     val errorMessage: String? = null,
-    val ended: Boolean = false
+    val ended: Boolean = false,
+    /** Small latency label, e.g. "응답 1.8초 · 모델 1.2초". */
+    val latencyText: String? = null,
+    /** True when no Gemini key is set (local fallback replies). */
+    val aiKeyMissing: Boolean = false
 )
 
 class CallViewModel(application: Application) : AndroidViewModel(application) {
@@ -39,13 +45,17 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         if (engine != null) return
         callStartedAt = SystemClock.elapsedRealtime()
         startTimer()
+        val apiKey = prefs.geminiApiKey
+        _ui.update { it.copy(aiKeyMissing = apiKey == null, latencyText = null) }
         engine = VoiceCallEngine(
             context = getApplication(),
             nicknameProvider = { prefs.nickname },
             onPhase = { phase -> _ui.update { it.copy(phase = phase) } },
             onPartialText = { text -> _ui.update { it.copy(partialText = text) } },
             onErrorMessage = { msg -> _ui.update { it.copy(errorMessage = msg) } },
-            isMuted = { _ui.value.muted }
+            isMuted = { _ui.value.muted },
+            apiKeyProvider = { apiKey },
+            onLatency = { latency -> _ui.update { it.copy(latencyText = formatLatency(latency)) } }
         ).also { it.start() }
     }
 
@@ -87,4 +97,13 @@ fun formatElapsed(ms: Long): String {
     val m = totalSec / 60
     val s = totalSec % 60
     return "%02d:%02d".format(m, s)
+}
+
+fun formatLatency(latency: ReplyLatency): String {
+    val total = "응답 %.1f초".format(latency.totalMs / 1000.0)
+    return when (latency.source) {
+        ReplySource.Ai -> latency.networkMs?.let { "$total · 모델 %.1f초".format(it / 1000.0) } ?: total
+        ReplySource.Local -> "$total · 기본 응답"
+        ReplySource.Fallback -> "$total · AI 응답 실패"
+    }
 }

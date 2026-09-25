@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -13,12 +14,28 @@ import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+
+/** Where a spoken reply came from. */
+enum class ReplySource { Ai, Local, Fallback }
+
+/**
+ * Time from the final STT result to the moment TTS starts speaking the reply.
+ * [networkMs] is the Gemini request time (null for local replies).
+ */
+data class ReplyLatency(
+    val totalMs: Long,
+    val networkMs: Long?,
+    val source: ReplySource
+)
 
 /**
  * Stage-1 realtime voice loop:
  * - Korean TTS (device default) + SpeechRecognizer
  * - Greets with nickname, listens, replies
+ * - Replies via Gemini API when an on-device key is set (in-call memory only),
+ *   otherwise via local [ReplyGenerator]; AI failures speak a retry prompt and keep listening
  * - Barge-in: while TTS speaking, restart listening; on partial/final speech stop TTS
  */
 class VoiceCallEngine(
@@ -27,7 +44,9 @@ class VoiceCallEngine(
     private val onPhase: (CallPhase) -> Unit,
     private val onPartialText: (String) -> Unit = {},
     private val onErrorMessage: (String) -> Unit = {},
-    private val isMuted: () -> Boolean = { false }
+    private val isMuted: () -> Boolean = { false },
+    private val apiKeyProvider: () -> String? = { null },
+    private val onLatency: (ReplyLatency) -> Unit = {}
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var tts: TextToSpeech? = null
@@ -42,22 +61,77 @@ class VoiceCallEngine(
     private var pendingAfterTts: (() -> Unit)? = null
     private var currentUtteranceId: String? = null
 
+    // Gemini (main-thread state). Memory lives only for this call.
+    private var aiKey: String? = null
+    private val history = mutableListOf<ChatTurn>()
+    private val netExecutor = Executors.newCachedThreadPool()
+    private var inFlight: GeminiRequest? = null
+    private var requestSeq = 0
+    private var greetingText: String? = null
+    private var ttsInitDone = false
+
+    private class LatencyMark(
+        val heardAt: Long,
+        val networkMs: Long?,
+        val source: ReplySource
+    )
+
+    private var pendingLatency: LatencyMark? = null
+    private var pendingLatencyUtteranceId: String? = null
+
+    private val aiEnabled: Boolean get() = aiKey != null
+
     fun start() {
         if (!running.compareAndSet(false, true)) return
         onPhase(CallPhase.Greeting)
-        initTts {
-            if (!running.get()) return@initTts
-            ensureRecognizer()
-            val nick = nicknameProvider()
-            speak(ReplyGenerator.greeting(nick)) {
-                if (running.get() && !isMuted()) startListening()
+        aiKey = apiKeyProvider()?.takeIf { it.isNotBlank() }
+        val nick = nicknameProvider()
+        if (aiKey == null) {
+            greetingText = ReplyGenerator.greeting(nick)
+        } else {
+            // Fetch the AI greeting in parallel with TTS init
+            history.add(ChatTurn(ChatTurn.ROLE_USER, PersonaPrompt.greetingRequest(nick)))
+            requestAi { result ->
+                val greeting = (result as? GeminiResult.Success)?.text
+                if (greeting == null) {
+                    Log.w(LOG_TAG, "AI greeting failed: ${(result as GeminiResult.Failure).reason} (${result.networkMs}ms)")
+                } else {
+                    Log.i(LOG_TAG, "AI greeting network=${result.networkMs}ms")
+                }
+                val text = greeting ?: ReplyGenerator.greeting(nick)
+                history.add(ChatTurn(ChatTurn.ROLE_MODEL, text))
+                greetingText = text
+                maybeSpeakGreeting()
             }
+        }
+        initTts {
+            mainHandler.post {
+                if (!running.get()) return@post
+                ensureRecognizer()
+                ttsInitDone = true
+                maybeSpeakGreeting()
+            }
+        }
+    }
+
+    private fun maybeSpeakGreeting() {
+        if (!running.get() || !ttsInitDone) return
+        val text = greetingText ?: return
+        greetingText = null
+        speak(text) {
+            if (running.get() && !isMuted()) startListening()
         }
     }
 
     fun stop() {
         if (!running.compareAndSet(true, false)) return
         bargeInArmed.set(false)
+        requestSeq++
+        inFlight?.cancel()
+        inFlight = null
+        history.clear()
+        pendingLatency = null
+        netExecutor.shutdownNow()
         stopListeningInternal()
         stopSpeakingInternal()
         pendingAfterTts = null
@@ -96,7 +170,9 @@ class VoiceCallEngine(
             engine.setPitch(1.0f)
             engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) {
+                    val startedAt = SystemClock.elapsedRealtime()
                     mainHandler.post {
+                        reportLatency(utteranceId, startedAt)
                         isSpeaking.set(true)
                         onPhase(CallPhase.Speaking)
                         // Arm barge-in shortly after TTS starts (avoid self-echo)
@@ -153,7 +229,24 @@ class VoiceCallEngine(
         }
     }
 
-    private fun speak(text: String, then: (() -> Unit)? = null) {
+    private fun reportLatency(utteranceId: String?, ttsStartedAt: Long) {
+        val mark = pendingLatency ?: return
+        if (utteranceId == null || utteranceId != pendingLatencyUtteranceId) return
+        pendingLatency = null
+        pendingLatencyUtteranceId = null
+        val latency = ReplyLatency(
+            totalMs = ttsStartedAt - mark.heardAt,
+            networkMs = mark.networkMs,
+            source = mark.source
+        )
+        Log.i(
+            LOG_TAG,
+            "reply latency total=${latency.totalMs}ms network=${latency.networkMs ?: "-"}ms source=${latency.source}"
+        )
+        onLatency(latency)
+    }
+
+    private fun speak(text: String, latency: LatencyMark? = null, then: (() -> Unit)? = null) {
         if (!running.get() || isMuted()) {
             then?.invoke()
             return
@@ -168,6 +261,8 @@ class VoiceCallEngine(
         pendingAfterTts = then
         val id = UUID.randomUUID().toString()
         currentUtteranceId = id
+        pendingLatency = latency
+        pendingLatencyUtteranceId = if (latency != null) id else null
         onPhase(CallPhase.Speaking)
         engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
     }
@@ -264,8 +359,9 @@ class VoiceCallEngine(
 
         onPartialText(cleaned)
 
-        // For partials during listening (not barge-in), wait for final unless substantial
-        if (fromPartial && !wasBargeInContext()) {
+        // For partials during listening (not barge-in), wait for final unless substantial.
+        // AI mode always waits for the final STT result (full sentence for the model).
+        if (fromPartial && (aiEnabled || !wasBargeInContext())) {
             // Keep listening; final will arrive
             return
         }
@@ -281,12 +377,84 @@ class VoiceCallEngine(
 
     private fun processUserUtterance(text: String) {
         if (!running.get() || isMuted()) return
+        val heardAt = SystemClock.elapsedRealtime()
         stopListeningInternal()
         onPhase(CallPhase.Thinking)
-        val nick = nicknameProvider()
-        val reply = ReplyGenerator.reply(text, nick)
-        speak(reply) {
+        if (!aiEnabled) {
+            val reply = ReplyGenerator.reply(text, nicknameProvider())
+            speakReply(reply, LatencyMark(heardAt, null, ReplySource.Local))
+            return
+        }
+        history.add(ChatTurn(ChatTurn.ROLE_USER, text))
+        while (history.size > MAX_HISTORY_TURNS) history.removeAt(0)
+        requestAi { result ->
+            when (result) {
+                is GeminiResult.Success -> {
+                    history.add(ChatTurn(ChatTurn.ROLE_MODEL, result.text))
+                    speakReply(result.text, LatencyMark(heardAt, result.networkMs, ReplySource.Ai))
+                }
+                is GeminiResult.Failure -> {
+                    Log.w(LOG_TAG, "AI reply failed: ${result.reason} (${result.networkMs}ms)")
+                    // Drop the unanswered user turn; the user is asked to repeat it.
+                    while (history.lastOrNull()?.role == ChatTurn.ROLE_USER) {
+                        history.removeAt(history.size - 1)
+                    }
+                    speakReply(
+                        PersonaPrompt.RETRY_FALLBACK,
+                        LatencyMark(heardAt, result.networkMs, ReplySource.Fallback)
+                    )
+                }
+            }
+        }
+    }
+
+    private fun speakReply(text: String, latency: LatencyMark) {
+        speak(text, latency) {
             if (running.get() && !isMuted()) startListening()
+        }
+    }
+
+    /**
+     * Sends the current in-call [history] to Gemini off the main thread.
+     * [onResult] runs on the main thread, only if the call is still active and no newer
+     * request superseded this one. Overall deadline: [GeminiClient.TIMEOUT_MS].
+     */
+    private fun requestAi(onResult: (GeminiResult) -> Unit) {
+        val key = aiKey ?: return
+        inFlight?.cancel()
+        val seq = ++requestSeq
+        val request = GeminiRequest(
+            apiKey = key,
+            systemInstruction = PersonaPrompt.systemInstruction(nicknameProvider()),
+            turns = history.toList()
+        )
+        inFlight = request
+        val startedAt = SystemClock.elapsedRealtime()
+        val delivered = AtomicBoolean(false)
+        val deliver: (GeminiResult) -> Unit = { result ->
+            if (delivered.compareAndSet(false, true)) {
+                mainHandler.post {
+                    if (running.get() && seq == requestSeq) {
+                        inFlight = null
+                        onResult(result)
+                    }
+                }
+            }
+        }
+        val deadline = Runnable {
+            request.cancel()
+            deliver(GeminiResult.Failure("timeout", SystemClock.elapsedRealtime() - startedAt))
+        }
+        mainHandler.postDelayed(deadline, GeminiClient.TIMEOUT_MS.toLong())
+        try {
+            netExecutor.execute {
+                val result = request.execute()
+                mainHandler.removeCallbacks(deadline)
+                deliver(result)
+            }
+        } catch (e: Exception) {
+            mainHandler.removeCallbacks(deadline)
+            deliver(GeminiResult.Failure("executor ${e.javaClass.simpleName}", 0L))
         }
     }
 
@@ -370,8 +538,8 @@ class VoiceCallEngine(
                     handleUserSpeech(best, fromPartial = true)
                 } else {
                     onPartialText(best)
-                    // Substantial partial → treat as utterance for snappier UX
-                    if (best.trim().length >= MIN_PARTIAL_CHARS * 2) {
+                    // Substantial partial → treat as utterance for snappier UX (local mode only)
+                    if (!aiEnabled && best.trim().length >= MIN_PARTIAL_CHARS * 2) {
                         handleUserSpeech(best, fromPartial = false)
                     }
                 }
@@ -403,6 +571,8 @@ class VoiceCallEngine(
 
     companion object {
         private const val TAG = "VoiceCallEngine"
+        private const val LOG_TAG = "AICall"
+        private const val MAX_HISTORY_TURNS = 24
         private const val BARGE_IN_ARM_DELAY_MS = 450L
         private const val RMS_BARGE_THRESHOLD = 7.5f
         private const val MIN_PARTIAL_CHARS = 2

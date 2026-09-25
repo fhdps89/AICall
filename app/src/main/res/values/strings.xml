@@ -16,4 +16,13 @@
     <string name="speaking">말하는 중…</string>
     <string name="permission_needed">마이크 권한이 필요합니다</string>
     <string name="grant_permission">권한 허용</string>
+    <string name="ai_key_missing_hint">AI 키 미설정 · 기본 응답 모드</string>
+    <string name="ai_key_label">AI 키 설정 (테스트용)</string>
+    <string name="ai_key_not_set">설정 안 됨 · 누르면 입력</string>
+    <string name="ai_key_input_label">Gemini API 키 붙여넣기</string>
+    <string name="ai_key_save">키 저장</string>
+    <string name="ai_key_clear">키 삭제</string>
+    <string name="ai_key_replace">키 변경</string>
+    <string name="ai_key_cancel">취소</string>
+    <string name="ai_key_notice">키는 이 폰에만 저장됩니다.</string>
 </resources>

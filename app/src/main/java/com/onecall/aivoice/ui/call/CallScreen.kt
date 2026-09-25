@@ -106,6 +106,22 @@ fun CallScreen(
                     style = MaterialTheme.typography.bodyLarge,
                     color = HerTextDim
                 )
+                state.latencyText?.let { latency ->
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = latency,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = HerTextDim
+                    )
+                }
+                if (state.aiKeyMissing) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = stringResource(R.string.ai_key_missing_hint),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = HerTextDim
+                    )
+                }
             }
 
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
