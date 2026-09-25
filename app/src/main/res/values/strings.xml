@@ -24,5 +24,7 @@
     <string name="ai_key_clear">키 삭제</string>
     <string name="ai_key_replace">키 변경</string>
     <string name="ai_key_cancel">취소</string>
+    <string name="ai_key_test">키 테스트</string>
+    <string name="ai_model_label">모델: %1$s</string>
     <string name="ai_key_notice">키는 이 폰에만 저장됩니다.</string>
 </resources>

@@ -4,8 +4,11 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.ConnectException
+import java.net.NoRouteToHostException
 import java.net.SocketTimeoutException
 import java.net.URL
+import java.net.UnknownHostException
 
 /** One turn of in-call conversation memory ("user" or "model"). */
 data class ChatTurn(val role: String, val text: String) {
@@ -18,7 +21,14 @@ data class ChatTurn(val role: String, val text: String) {
 sealed class GeminiResult {
     abstract val networkMs: Long
 
-    data class Success(val text: String, override val networkMs: Long) : GeminiResult()
+    /** [modelVersion] is the "modelVersion" reported by the API (null if absent). */
+    data class Success(
+        val text: String,
+        override val networkMs: Long,
+        val modelVersion: String? = null
+    ) : GeminiResult()
+
+    /** [reason] is a short Korean label for UI, e.g. "키 오류(API_KEY_INVALID)". Never contains the key. */
     data class Failure(val reason: String, override val networkMs: Long) : GeminiResult()
 }
 
@@ -64,26 +74,22 @@ class GeminiRequest(
                 setRequestProperty("x-goog-api-key", apiKey)
             }
             connection = conn
-            if (cancelled) return GeminiResult.Failure("cancelled", elapsed())
+            if (cancelled) return GeminiResult.Failure(GeminiErrors.CANCELLED, elapsed())
             conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
             val code = conn.responseCode
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
             if (code !in 200..299) {
-                return GeminiResult.Failure("http $code ${GeminiClient.errorMessage(text)}", elapsed())
+                return GeminiResult.Failure(GeminiErrors.httpReason(code, text), elapsed())
             }
             val reply = GeminiClient.parseResponseText(text)?.let { GeminiClient.sanitizeForSpeech(it) }
             if (reply.isNullOrBlank()) {
-                GeminiResult.Failure("empty response", elapsed())
+                GeminiResult.Failure(GeminiErrors.emptyReason(text), elapsed())
             } else {
-                GeminiResult.Success(reply, elapsed())
+                GeminiResult.Success(reply, elapsed(), GeminiClient.parseModelVersion(text))
             }
-        } catch (e: SocketTimeoutException) {
-            GeminiResult.Failure("timeout", elapsed())
-        } catch (e: IOException) {
-            GeminiResult.Failure(if (cancelled) "cancelled" else "network ${e.javaClass.simpleName}", elapsed())
         } catch (e: Exception) {
-            GeminiResult.Failure("error ${e.javaClass.simpleName}", elapsed())
+            GeminiResult.Failure(GeminiErrors.exceptionReason(e, cancelled), elapsed())
         } finally {
             try {
                 conn?.disconnect()
@@ -166,6 +172,26 @@ object GeminiClient {
         }
     }
 
+    /** Label shown after a successful key test, e.g. "연결 성공 (gemini-3.5-flash-lite)". */
+    fun keyTestSuccessLabel(modelVersion: String?): String =
+        "연결 성공 (${modelVersion?.takeIf { it.isNotBlank() } ?: MODEL_ID})"
+
+    /** Tiny blocking request to verify key + model (call off the main thread). */
+    fun testKey(apiKey: String): GeminiResult = GeminiRequest(
+        apiKey = apiKey,
+        systemInstruction = "짧게 한 단어로만 답해.",
+        turns = listOf(ChatTurn(ChatTurn.ROLE_USER, "연결 테스트야. 응 이라고만 답해."))
+    ).execute()
+
+    /** "modelVersion" field of a generateContent response, or null. */
+    fun parseModelVersion(body: String): String? {
+        return try {
+            JSONObject(body).optString("modelVersion", "").trim().ifEmpty { null }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     /** Short error message from an API error body (never contains the key). */
     fun errorMessage(body: String): String {
         return try {
@@ -196,5 +222,90 @@ object GeminiClient {
             .replace(Regex("[*_#`>~|\\[\\]]"), "")
             .replace(Regex("\\s+"), " ")
             .trim()
+    }
+}
+
+/**
+ * Maps Gemini API failures to short Korean labels for the call screen / key test.
+ * Pure Kotlin + org.json so it is unit-testable.
+ */
+object GeminiErrors {
+    const val TIMEOUT = "시간 초과"
+    const val NO_INTERNET = "인터넷 없음"
+    const val EMPTY = "빈 응답"
+    const val CANCELLED = "취소됨"
+
+    /** Parsed Google error body: error.code / error.status / first ErrorInfo reason. */
+    data class ApiError(val code: Int?, val status: String?, val reason: String?)
+
+    fun parseApiError(body: String): ApiError {
+        return try {
+            val err = JSONObject(body).optJSONObject("error") ?: return ApiError(null, null, null)
+            val code = if (err.has("code")) err.optInt("code") else null
+            val status = err.optString("status", "").trim().ifEmpty { null }
+            var reason: String? = null
+            val details = err.optJSONArray("details")
+            if (details != null) {
+                for (i in 0 until details.length()) {
+                    val d = details.optJSONObject(i) ?: continue
+                    val r = d.optString("reason", "").trim()
+                    if (r.isNotEmpty()) {
+                        reason = r
+                        break
+                    }
+                }
+            }
+            ApiError(code, status, reason)
+        } catch (_: Exception) {
+            ApiError(null, null, null)
+        }
+    }
+
+    /** Label for a non-2xx HTTP response. */
+    fun httpReason(httpCode: Int, body: String): String {
+        val e = parseApiError(body)
+        val status = e.status
+        val reason = e.reason
+        val keyProblem = reason != null && reason.startsWith("API_KEY")
+        return when {
+            keyProblem -> "키 오류($reason)"
+            httpCode == 404 -> "모델 없음(404 ${status ?: "NOT_FOUND"})"
+            httpCode == 429 -> "한도 초과(429)"
+            httpCode == 401 || httpCode == 403 ->
+                "권한 없음($httpCode ${reason ?: status ?: "PERMISSION_DENIED"})"
+            httpCode == 400 && status == "FAILED_PRECONDITION" ->
+                "사용 불가(400 FAILED_PRECONDITION)"
+            httpCode == 400 -> "요청 오류(400 ${reason ?: status ?: "INVALID_ARGUMENT"})"
+            httpCode == 408 || httpCode == 504 -> "$TIMEOUT($httpCode)"
+            httpCode in 500..599 -> "서버 오류($httpCode${status?.let { " $it" }.orEmpty()})"
+            else -> "HTTP 오류($httpCode${status?.let { " $it" }.orEmpty()})"
+        }
+    }
+
+    /** Label for a 2xx response without usable text (safety block, token limit, ...). */
+    fun emptyReason(body: String): String {
+        val why = try {
+            val root = JSONObject(body)
+            val block = root.optJSONObject("promptFeedback")?.optString("blockReason", "").orEmpty()
+            val finish = root.optJSONArray("candidates")?.optJSONObject(0)
+                ?.optString("finishReason", "").orEmpty()
+            when {
+                block.isNotBlank() -> block
+                finish.isNotBlank() && finish != "STOP" -> finish
+                else -> ""
+            }
+        } catch (_: Exception) {
+            ""
+        }
+        return if (why.isEmpty()) EMPTY else "$EMPTY($why)"
+    }
+
+    /** Label for an exception thrown while calling the API. */
+    fun exceptionReason(e: Throwable, cancelled: Boolean = false): String = when {
+        cancelled -> CANCELLED
+        e is SocketTimeoutException -> TIMEOUT
+        e is UnknownHostException || e is ConnectException || e is NoRouteToHostException -> NO_INTERNET
+        e is IOException -> "네트워크 오류(${e.javaClass.simpleName})"
+        else -> "오류(${e.javaClass.simpleName})"
     }
 }

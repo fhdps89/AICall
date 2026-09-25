@@ -21,21 +21,28 @@ import java.util.concurrent.atomic.AtomicBoolean
 enum class ReplySource { Ai, Local, Fallback }
 
 /**
- * Time from the final STT result to the moment TTS starts speaking the reply.
- * [networkMs] is the Gemini request time (null for local replies).
+ * Time from the end-of-turn decision (silence window closed) to the moment TTS starts
+ * speaking the reply. [networkMs] is the Gemini request time (null for local replies).
+ * [sinceSpeechMs] additionally includes the end-of-turn silence window (from the last
+ * final STT result); null when unknown.
  */
 data class ReplyLatency(
     val totalMs: Long,
     val networkMs: Long?,
-    val source: ReplySource
+    val source: ReplySource,
+    val sinceSpeechMs: Long? = null
 )
 
 /**
  * Stage-1 realtime voice loop:
  * - Korean TTS (device default) + SpeechRecognizer
  * - Greets with nickname, listens, replies
- * - Replies via Gemini API when an on-device key is set (in-call memory only),
- *   otherwise via local [ReplyGenerator]; AI failures speak a retry prompt and keep listening
+ * - End-of-turn wait: after a final STT result the recognizer restarts immediately and
+ *   the reply is only generated after [UtteranceWindow.DEFAULT_WINDOW_MS] of silence;
+ *   speech inside the window is appended to the same turn
+ * - Replies via Gemini API whenever an on-device key is set (read fresh from settings at
+ *   every request; in-call memory only). With a key set, [ReplyGenerator] is never used:
+ *   AI failures speak a retry line and keep listening. Without a key → [ReplyGenerator]
  * - Barge-in: while TTS speaking, restart listening; on partial/final speech stop TTS
  */
 class VoiceCallEngine(
@@ -45,8 +52,10 @@ class VoiceCallEngine(
     private val onPartialText: (String) -> Unit = {},
     private val onErrorMessage: (String) -> Unit = {},
     private val isMuted: () -> Boolean = { false },
+    /** Read at every AI request (not cached), so a key saved in settings is always used. */
     private val apiKeyProvider: () -> String? = { null },
-    private val onLatency: (ReplyLatency) -> Unit = {}
+    private val onLatency: (ReplyLatency) -> Unit = {},
+    private val onReplyOrigin: (ReplyOrigin) -> Unit = {}
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var tts: TextToSpeech? = null
@@ -62,7 +71,6 @@ class VoiceCallEngine(
     private var currentUtteranceId: String? = null
 
     // Gemini (main-thread state). Memory lives only for this call.
-    private var aiKey: String? = null
     private val history = mutableListOf<ChatTurn>()
     private val netExecutor = Executors.newCachedThreadPool()
     private var inFlight: GeminiRequest? = null
@@ -70,35 +78,51 @@ class VoiceCallEngine(
     private var greetingText: String? = null
     private var ttsInitDone = false
 
+    // End-of-turn silence window (main thread only)
+    private val turn = UtteranceWindow()
+    private val turnCheck = Runnable { checkTurnWindow() }
+
+    /** True between the end of a user turn and the start of the reply (no listening then). */
+    private var awaitingReply = false
+
     private class LatencyMark(
         val heardAt: Long,
         val networkMs: Long?,
-        val source: ReplySource
+        val source: ReplySource,
+        val lastSpeechAt: Long? = null
     )
 
     private var pendingLatency: LatencyMark? = null
     private var pendingLatencyUtteranceId: String? = null
 
-    private val aiEnabled: Boolean get() = aiKey != null
+    /** Fresh read of the saved key; null when not set. */
+    private fun currentKey(): String? = apiKeyProvider()?.trim()?.takeIf { it.isNotEmpty() }
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
         onPhase(CallPhase.Greeting)
-        aiKey = apiKeyProvider()?.takeIf { it.isNotBlank() }
+        val key = currentKey()
         val nick = nicknameProvider()
-        if (aiKey == null) {
+        Log.i(LOG_TAG, "call start: ai=${key != null} model=${GeminiClient.MODEL_ID}")
+        if (key == null) {
             greetingText = ReplyGenerator.greeting(nick)
+            onReplyOrigin(ReplyOrigin.LocalNoKey)
         } else {
             // Fetch the AI greeting in parallel with TTS init
             history.add(ChatTurn(ChatTurn.ROLE_USER, PersonaPrompt.greetingRequest(nick)))
-            requestAi { result ->
-                val greeting = (result as? GeminiResult.Success)?.text
-                if (greeting == null) {
-                    Log.w(LOG_TAG, "AI greeting failed: ${(result as GeminiResult.Failure).reason} (${result.networkMs}ms)")
-                } else {
-                    Log.i(LOG_TAG, "AI greeting network=${result.networkMs}ms")
+            requestAi(key) { result ->
+                val text = when (result) {
+                    is GeminiResult.Success -> {
+                        Log.i(LOG_TAG, "AI greeting network=${result.networkMs}ms")
+                        onReplyOrigin(ReplyOrigin.Ai)
+                        result.text
+                    }
+                    is GeminiResult.Failure -> {
+                        Log.w(LOG_TAG, "AI greeting failed: ${result.reason} (${result.networkMs}ms)")
+                        onReplyOrigin(ReplyOrigin.AiFailed(result.reason))
+                        PersonaPrompt.greetingFallback(nick)
+                    }
                 }
-                val text = greeting ?: ReplyGenerator.greeting(nick)
                 history.add(ChatTurn(ChatTurn.ROLE_MODEL, text))
                 greetingText = text
                 maybeSpeakGreeting()
@@ -131,6 +155,8 @@ class VoiceCallEngine(
         inFlight = null
         history.clear()
         pendingLatency = null
+        awaitingReply = false
+        resetTurn()
         netExecutor.shutdownNow()
         stopListeningInternal()
         stopSpeakingInternal()
@@ -143,6 +169,7 @@ class VoiceCallEngine(
     fun setMuted(muted: Boolean) {
         if (!running.get()) return
         if (muted) {
+            resetTurn()
             stopListeningInternal()
             stopSpeakingInternal()
             onPhase(CallPhase.Idle)
@@ -237,11 +264,14 @@ class VoiceCallEngine(
         val latency = ReplyLatency(
             totalMs = ttsStartedAt - mark.heardAt,
             networkMs = mark.networkMs,
-            source = mark.source
+            source = mark.source,
+            sinceSpeechMs = mark.lastSpeechAt?.let { ttsStartedAt - it }
         )
         Log.i(
             LOG_TAG,
-            "reply latency total=${latency.totalMs}ms network=${latency.networkMs ?: "-"}ms source=${latency.source}"
+            "reply latency total=${latency.totalMs}ms network=${latency.networkMs ?: "-"}ms " +
+                "sinceLastSpeech(incl. ${turn.windowMs}ms window)=${latency.sinceSpeechMs ?: "-"}ms " +
+                "source=${latency.source}"
         )
         onLatency(latency)
     }
@@ -279,14 +309,15 @@ class VoiceCallEngine(
     }
 
     private fun startListening() {
-        if (!running.get() || isMuted() || isSpeaking.get()) return
+        if (!running.get() || isMuted() || isSpeaking.get() || awaitingReply) return
         ensureRecognizer()
         val r = recognizer ?: return
         if (isListening.get()) return
         isListening.set(true)
         bargeInArmed.set(false)
         onPhase(CallPhase.Listening)
-        onPartialText("")
+        // Keep showing the accumulated text while the end-of-turn window is open
+        if (!turn.hasContent) onPartialText("")
         try {
             r.startListening(buildListenIntent(partial = true))
         } catch (e: Exception) {
@@ -319,6 +350,15 @@ class VoiceCallEngine(
             // Prefer on-device when available (API 33+); ignored on older
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false)
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
+            // Hints only (many recognizers ignore them); the real wait is UtteranceWindow
+            putExtra(
+                RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,
+                UtteranceWindow.DEFAULT_WINDOW_MS
+            )
+            putExtra(
+                RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,
+                UtteranceWindow.DEFAULT_WINDOW_MS
+            )
         }
     }
 
@@ -340,58 +380,84 @@ class VoiceCallEngine(
         currentUtteranceId = null
     }
 
-    private fun handleUserSpeech(text: String, fromPartial: Boolean) {
-        val cleaned = text.trim()
-        if (cleaned.isEmpty()) return
-
-        // Barge-in: user spoke while TTS was playing
-        if (isSpeaking.get()) {
-            Log.d(TAG, "barge-in detected: $cleaned (partial=$fromPartial)")
-            stopSpeakingInternal()
-            pendingAfterTts = null
-            // Continue below to process after stopping TTS
-        }
-
-        if (fromPartial && cleaned.length < MIN_PARTIAL_CHARS) {
-            onPartialText(cleaned)
-            return
-        }
-
-        onPartialText(cleaned)
-
-        // For partials during listening (not barge-in), wait for final unless substantial.
-        // AI mode always waits for the final STT result (full sentence for the model).
-        if (fromPartial && (aiEnabled || !wasBargeInContext())) {
-            // Keep listening; final will arrive
-            return
-        }
-
-        processUserUtterance(cleaned)
+    /** User speech detected while TTS is playing: stop TTS (barge-in) and go back to listening. */
+    private fun bargeIn(why: String) {
+        Log.d(TAG, "barge-in detected ($why)")
+        stopSpeakingInternal()
+        pendingAfterTts = null
+        onPhase(CallPhase.Listening)
     }
 
-    private var lastBargeInAt = 0L
-    private fun wasBargeInContext(): Boolean {
-        // After we stopped speaking due to barge-in, treat next speech as final-ish
-        return System.currentTimeMillis() - lastBargeInAt < 1500L
-    }
-
-    private fun processUserUtterance(text: String) {
+    /**
+     * A final STT result: append to the current turn, restart the recognizer right away and
+     * (re)start the silence window. The reply is only generated when the window closes.
+     */
+    private fun acceptFinal(text: String) {
         if (!running.get() || isMuted()) return
-        val heardAt = SystemClock.elapsedRealtime()
+        val now = SystemClock.elapsedRealtime()
+        turn.onFinal(text, now)
+        Log.d(TAG, "final segment added; waiting ${turn.windowMs}ms for more speech")
+        onPartialText(turn.displayText())
+        isListening.set(false)
+        startListening()
+        scheduleTurnCheck()
+    }
+
+    private fun scheduleTurnCheck() {
+        mainHandler.removeCallbacks(turnCheck)
+        val deadline = turn.deadline ?: return
+        val delay = (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+        mainHandler.postDelayed(turnCheck, delay)
+    }
+
+    private fun checkTurnWindow() {
+        if (!running.get() || isMuted() || !turn.hasContent) return
+        val now = SystemClock.elapsedRealtime()
+        if (!turn.isDue(now)) {
+            // New speech pushed the deadline out; check again later
+            scheduleTurnCheck()
+            return
+        }
+        val lastFinalAt = turn.lastFinalAt
+        val text = turn.take()
+        Log.i(LOG_TAG, "turn closed after ${turn.windowMs}ms silence (${text.length} chars)")
+        processUserUtterance(text, windowClosedAt = now, lastSpeechAt = lastFinalAt)
+    }
+
+    private fun resetTurn() {
+        mainHandler.removeCallbacks(turnCheck)
+        turn.reset()
+    }
+
+    private fun processUserUtterance(text: String, windowClosedAt: Long, lastSpeechAt: Long?) {
+        if (!running.get() || isMuted()) return
+        val cleaned = text.trim()
+        if (cleaned.isEmpty()) {
+            startListening()
+            return
+        }
+        awaitingReply = true
         stopListeningInternal()
         onPhase(CallPhase.Thinking)
-        if (!aiEnabled) {
-            val reply = ReplyGenerator.reply(text, nicknameProvider())
-            speakReply(reply, LatencyMark(heardAt, null, ReplySource.Local))
+        onPartialText(cleaned)
+        val key = currentKey()
+        if (key == null) {
+            val reply = ReplyGenerator.reply(cleaned, nicknameProvider())
+            onReplyOrigin(ReplyOrigin.LocalNoKey)
+            speakReply(reply, LatencyMark(windowClosedAt, null, ReplySource.Local, lastSpeechAt))
             return
         }
-        history.add(ChatTurn(ChatTurn.ROLE_USER, text))
+        history.add(ChatTurn(ChatTurn.ROLE_USER, cleaned))
         while (history.size > MAX_HISTORY_TURNS) history.removeAt(0)
-        requestAi { result ->
+        requestAi(key) { result ->
             when (result) {
                 is GeminiResult.Success -> {
                     history.add(ChatTurn(ChatTurn.ROLE_MODEL, result.text))
-                    speakReply(result.text, LatencyMark(heardAt, result.networkMs, ReplySource.Ai))
+                    onReplyOrigin(ReplyOrigin.Ai)
+                    speakReply(
+                        result.text,
+                        LatencyMark(windowClosedAt, result.networkMs, ReplySource.Ai, lastSpeechAt)
+                    )
                 }
                 is GeminiResult.Failure -> {
                     Log.w(LOG_TAG, "AI reply failed: ${result.reason} (${result.networkMs}ms)")
@@ -399,9 +465,10 @@ class VoiceCallEngine(
                     while (history.lastOrNull()?.role == ChatTurn.ROLE_USER) {
                         history.removeAt(history.size - 1)
                     }
+                    onReplyOrigin(ReplyOrigin.AiFailed(result.reason))
                     speakReply(
                         PersonaPrompt.RETRY_FALLBACK,
-                        LatencyMark(heardAt, result.networkMs, ReplySource.Fallback)
+                        LatencyMark(windowClosedAt, result.networkMs, ReplySource.Fallback, lastSpeechAt)
                     )
                 }
             }
@@ -409,6 +476,7 @@ class VoiceCallEngine(
     }
 
     private fun speakReply(text: String, latency: LatencyMark) {
+        awaitingReply = false
         speak(text, latency) {
             if (running.get() && !isMuted()) startListening()
         }
@@ -419,8 +487,7 @@ class VoiceCallEngine(
      * [onResult] runs on the main thread, only if the call is still active and no newer
      * request superseded this one. Overall deadline: [GeminiClient.TIMEOUT_MS].
      */
-    private fun requestAi(onResult: (GeminiResult) -> Unit) {
-        val key = aiKey ?: return
+    private fun requestAi(key: String, onResult: (GeminiResult) -> Unit) {
         inFlight?.cancel()
         val seq = ++requestSeq
         val request = GeminiRequest(
@@ -443,7 +510,7 @@ class VoiceCallEngine(
         }
         val deadline = Runnable {
             request.cancel()
-            deliver(GeminiResult.Failure("timeout", SystemClock.elapsedRealtime() - startedAt))
+            deliver(GeminiResult.Failure(GeminiErrors.TIMEOUT, SystemClock.elapsedRealtime() - startedAt))
         }
         mainHandler.postDelayed(deadline, GeminiClient.TIMEOUT_MS.toLong())
         try {
@@ -454,37 +521,37 @@ class VoiceCallEngine(
             }
         } catch (e: Exception) {
             mainHandler.removeCallbacks(deadline)
-            deliver(GeminiResult.Failure("executor ${e.javaClass.simpleName}", 0L))
+            deliver(GeminiResult.Failure("오류(${e.javaClass.simpleName})", 0L))
         }
     }
 
-    private fun scheduleRestartListen() {
+    private fun scheduleRestartListen(delayMs: Long = 600L) {
         mainHandler.postDelayed({
             if (running.get() && !isMuted() && !isSpeaking.get() && !isListening.get()) {
                 startListening()
             }
-        }, 600L)
+        }, delayMs)
     }
 
     private val listener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {}
         override fun onBeginningOfSpeech() {
             if (isSpeaking.get() && bargeInArmed.get()) {
-                lastBargeInAt = System.currentTimeMillis()
-                stopSpeakingInternal()
-                pendingAfterTts = null
-                onPhase(CallPhase.Listening)
+                bargeIn("beginning of speech")
+            } else if (turn.hasContent) {
+                turn.onActivity(SystemClock.elapsedRealtime())
             }
         }
 
         override fun onRmsChanged(rmsdB: Float) {
+            if (rmsdB < RMS_BARGE_THRESHOLD) return
             // Optional audio-level barge-in while speaking
-            if (isSpeaking.get() && bargeInArmed.get() && rmsdB >= RMS_BARGE_THRESHOLD) {
-                lastBargeInAt = System.currentTimeMillis()
+            if (isSpeaking.get() && bargeInArmed.get()) {
                 Log.d(TAG, "RMS barge-in rms=$rmsdB")
-                stopSpeakingInternal()
-                pendingAfterTts = null
-                onPhase(CallPhase.Listening)
+                bargeIn("rms")
+            } else if (turn.hasContent) {
+                // Voice-level audio during the end-of-turn window: user is still talking
+                turn.onActivity(SystemClock.elapsedRealtime())
             }
         }
 
@@ -506,44 +573,42 @@ class VoiceCallEngine(
                 }, 350L)
                 return
             }
-            // Normal listen errors → restart
-            when (error) {
-                SpeechRecognizer.ERROR_CLIENT,
-                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> scheduleRestartListen()
-                SpeechRecognizer.ERROR_NO_MATCH,
-                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> scheduleRestartListen()
-                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
-                    onErrorMessage("마이크 권한이 필요합니다.")
-                else -> scheduleRestartListen()
+            if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                onErrorMessage("마이크 권한이 필요합니다.")
+                return
             }
+            if (turn.hasContent) {
+                // Inside the end-of-turn window NO_MATCH / SPEECH_TIMEOUT (and other errors)
+                // just mean silence: keep listening, the window timer decides the turn end.
+                scheduleRestartListen(WINDOW_RESTART_DELAY_MS)
+                return
+            }
+            // Normal listen errors → restart
+            scheduleRestartListen()
         }
 
         override fun onResults(results: Bundle?) {
             isListening.set(false)
             val texts = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-            val best = texts?.firstOrNull().orEmpty()
-            if (best.isNotBlank()) {
-                handleUserSpeech(best, fromPartial = false)
+            val best = texts?.firstOrNull().orEmpty().trim()
+            if (best.isNotEmpty()) {
+                if (isSpeaking.get()) bargeIn("final result")
+                acceptFinal(best)
             } else if (running.get() && !isMuted() && !isSpeaking.get()) {
-                scheduleRestartListen()
+                scheduleRestartListen(if (turn.hasContent) WINDOW_RESTART_DELAY_MS else 600L)
             }
         }
 
         override fun onPartialResults(partialResults: Bundle?) {
             val texts = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-            val best = texts?.firstOrNull().orEmpty()
-            if (best.isNotBlank()) {
-                if (isSpeaking.get() && bargeInArmed.get()) {
-                    lastBargeInAt = System.currentTimeMillis()
-                    handleUserSpeech(best, fromPartial = true)
-                } else {
-                    onPartialText(best)
-                    // Substantial partial → treat as utterance for snappier UX (local mode only)
-                    if (!aiEnabled && best.trim().length >= MIN_PARTIAL_CHARS * 2) {
-                        handleUserSpeech(best, fromPartial = false)
-                    }
-                }
+            val best = texts?.firstOrNull().orEmpty().trim()
+            if (best.isEmpty()) return
+            if (isSpeaking.get()) {
+                if (!bargeInArmed.get()) return
+                bargeIn("partial result")
             }
+            turn.onPartial(best, SystemClock.elapsedRealtime())
+            onPartialText(turn.displayText(best))
         }
 
         override fun onEvent(eventType: Int, params: Bundle?) {}
@@ -575,6 +640,6 @@ class VoiceCallEngine(
         private const val MAX_HISTORY_TURNS = 24
         private const val BARGE_IN_ARM_DELAY_MS = 450L
         private const val RMS_BARGE_THRESHOLD = 7.5f
-        private const val MIN_PARTIAL_CHARS = 2
+        private const val WINDOW_RESTART_DELAY_MS = 100L
     }
 }

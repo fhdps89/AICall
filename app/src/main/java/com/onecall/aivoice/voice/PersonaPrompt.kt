@@ -6,6 +6,12 @@ object PersonaPrompt {
     /** Spoken when the AI request fails / times out / returns empty. Call continues. */
     const val RETRY_FALLBACK = "잠깐 잘 안 들렸어, 다시 말해줄래?"
 
+    /**
+     * Opening line when a key is set but the AI greeting request failed.
+     * (With a key set the rule-based ReplyGenerator is never used.)
+     */
+    fun greetingFallback(nickname: String): String = "$nickname, 여보세요? $RETRY_FALLBACK"
+
     fun systemInstruction(nickname: String): String = """
         너는 「오늘도 한 통」 앱에서 사용자와 음성 통화를 하는 AI 친구야.
         규칙:

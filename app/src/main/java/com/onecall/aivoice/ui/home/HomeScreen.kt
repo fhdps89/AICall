@@ -42,6 +42,7 @@ import com.onecall.aivoice.R
 import com.onecall.aivoice.ui.components.GlowingOrb
 import com.onecall.aivoice.ui.components.OrbMode
 import com.onecall.aivoice.ui.theme.HerAmber
+import com.onecall.aivoice.ui.theme.HerDanger
 import com.onecall.aivoice.ui.theme.HerBg
 import com.onecall.aivoice.ui.theme.HerSurface
 import com.onecall.aivoice.ui.theme.HerText
@@ -213,6 +214,12 @@ private fun ApiKeySection(state: HomeUiState, viewModel: HomeViewModel) {
                 style = MaterialTheme.typography.bodyMedium,
                 color = if (state.maskedApiKey.isEmpty()) HerTextDim else HerAmber
             )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = stringResource(R.string.ai_model_label, state.modelId),
+                style = MaterialTheme.typography.labelSmall,
+                color = HerTextDim
+            )
         }
         if (state.apiKeyEditing) {
             OutlinedTextField(
@@ -246,6 +253,12 @@ private fun ApiKeySection(state: HomeUiState, viewModel: HomeViewModel) {
                     Text(stringResource(R.string.ai_key_cancel), color = HerTextDim)
                 }
                 TextButton(
+                    onClick = { viewModel.testApiKey() },
+                    enabled = state.apiKeyDraft.isNotBlank() && !state.keyTestRunning
+                ) {
+                    Text(stringResource(R.string.ai_key_test), color = HerTextDim)
+                }
+                TextButton(
                     onClick = { viewModel.saveApiKey() },
                     enabled = state.apiKeyDraft.isNotBlank()
                 ) {
@@ -254,6 +267,12 @@ private fun ApiKeySection(state: HomeUiState, viewModel: HomeViewModel) {
             }
         } else if (state.maskedApiKey.isNotEmpty()) {
             Row(modifier = Modifier.fillMaxWidth()) {
+                TextButton(
+                    onClick = { viewModel.testApiKey() },
+                    enabled = !state.keyTestRunning
+                ) {
+                    Text(stringResource(R.string.ai_key_test), color = HerAmber)
+                }
                 TextButton(onClick = { viewModel.startApiKeyEdit() }) {
                     Text(stringResource(R.string.ai_key_replace), color = HerTextDim)
                 }
@@ -261,6 +280,18 @@ private fun ApiKeySection(state: HomeUiState, viewModel: HomeViewModel) {
                     Text(stringResource(R.string.ai_key_clear), color = HerTextDim)
                 }
             }
+        }
+        state.keyTestResult?.let { result ->
+            Text(
+                text = result,
+                style = MaterialTheme.typography.bodyMedium,
+                color = when {
+                    state.keyTestRunning -> HerTextDim
+                    state.keyTestOk -> HerAmber
+                    else -> HerDanger
+                },
+                modifier = Modifier.padding(vertical = 4.dp)
+            )
         }
     }
 }

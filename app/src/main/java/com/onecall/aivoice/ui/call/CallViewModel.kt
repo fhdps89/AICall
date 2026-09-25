@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.onecall.aivoice.data.UserPreferences
 import com.onecall.aivoice.voice.CallPhase
 import com.onecall.aivoice.voice.ReplyLatency
+import com.onecall.aivoice.voice.ReplyOrigin
 import com.onecall.aivoice.voice.ReplySource
 import com.onecall.aivoice.voice.VoiceCallEngine
 import kotlinx.coroutines.Job
@@ -28,7 +29,9 @@ data class CallUiState(
     /** Small latency label, e.g. "응답 1.8초 · 모델 1.2초". */
     val latencyText: String? = null,
     /** True when no Gemini key is set (local fallback replies). */
-    val aiKeyMissing: Boolean = false
+    val aiKeyMissing: Boolean = false,
+    /** Source of the last spoken reply: "AI 대답" / "기본 대답(키 없음)" / "AI 실패: …". */
+    val replySourceText: String? = null
 )
 
 class CallViewModel(application: Application) : AndroidViewModel(application) {
@@ -45,8 +48,9 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         if (engine != null) return
         callStartedAt = SystemClock.elapsedRealtime()
         startTimer()
-        val apiKey = prefs.geminiApiKey
-        _ui.update { it.copy(aiKeyMissing = apiKey == null, latencyText = null) }
+        // Fresh read at call start (UI hint); the engine re-reads the key at every request.
+        val keySet = prefs.geminiApiKey != null
+        _ui.update { it.copy(aiKeyMissing = !keySet, latencyText = null, replySourceText = null) }
         engine = VoiceCallEngine(
             context = getApplication(),
             nicknameProvider = { prefs.nickname },
@@ -54,8 +58,16 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             onPartialText = { text -> _ui.update { it.copy(partialText = text) } },
             onErrorMessage = { msg -> _ui.update { it.copy(errorMessage = msg) } },
             isMuted = { _ui.value.muted },
-            apiKeyProvider = { apiKey },
-            onLatency = { latency -> _ui.update { it.copy(latencyText = formatLatency(latency)) } }
+            apiKeyProvider = { prefs.geminiApiKey },
+            onLatency = { latency -> _ui.update { it.copy(latencyText = formatLatency(latency)) } },
+            onReplyOrigin = { origin ->
+                _ui.update {
+                    it.copy(
+                        replySourceText = origin.label,
+                        aiKeyMissing = origin is ReplyOrigin.LocalNoKey
+                    )
+                }
+            }
         ).also { it.start() }
     }
 

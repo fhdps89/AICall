@@ -106,6 +106,15 @@ fun CallScreen(
                     style = MaterialTheme.typography.bodyLarge,
                     color = HerTextDim
                 )
+                state.replySourceText?.let { source ->
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = source,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (source.startsWith("AI 실패")) HerDanger else HerTextDim,
+                        textAlign = TextAlign.Center
+                    )
+                }
                 state.latencyText?.let { latency ->
                     Spacer(Modifier.height(4.dp))
                     Text(

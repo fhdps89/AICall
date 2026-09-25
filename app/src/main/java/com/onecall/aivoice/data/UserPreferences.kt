@@ -19,15 +19,19 @@ class UserPreferences(context: Context) {
             prefs.edit().putString(KEY_NICKNAME, value.trim().ifBlank { DEFAULT_NICKNAME }).apply()
         }
 
-    /** Gemini API key pasted by the user in settings. Null when not set. */
+    /**
+     * Gemini API key pasted by the user in settings. Null when not set.
+     * Read fresh from SharedPreferences on every access (no caching). Saved with commit()
+     * so it is on disk before the next call starts.
+     */
     var geminiApiKey: String?
-        get() = prefs.getString(KEY_GEMINI_API_KEY, null)?.takeIf { it.isNotBlank() }
+        get() = cleanApiKey(prefs.getString(KEY_GEMINI_API_KEY, null)).ifEmpty { null }
         set(value) {
-            val cleaned = value?.filterNot { it.isWhitespace() }.orEmpty()
+            val cleaned = cleanApiKey(value)
             if (cleaned.isEmpty()) {
-                prefs.edit().remove(KEY_GEMINI_API_KEY).apply()
+                prefs.edit().remove(KEY_GEMINI_API_KEY).commit()
             } else {
-                prefs.edit().putString(KEY_GEMINI_API_KEY, cleaned).apply()
+                prefs.edit().putString(KEY_GEMINI_API_KEY, cleaned).commit()
             }
         }
 
@@ -40,6 +44,23 @@ class UserPreferences(context: Context) {
         const val KEY_GEMINI_API_KEY = "gemini_api_key"
         const val DEFAULT_NICKNAME = "친구"
         const val FIXED_VOICE_NAME = "기본 한국어 음성"
+
+        private val QUOTE_CHARS = setOf('"', '\'', '`', '\u201C', '\u201D', '\u2018', '\u2019')
+
+        /**
+         * Cleans a pasted key: drops whitespace/newlines, invisible format characters
+         * (zero-width space, BOM, ...), control characters and quote marks.
+         */
+        fun cleanApiKey(raw: String?): String {
+            if (raw == null) return ""
+            val sb = StringBuilder()
+            for (ch in raw) {
+                if (ch.isWhitespace() || ch.isISOControl() || ch in QUOTE_CHARS) continue
+                if (Character.getType(ch) == Character.FORMAT.toInt()) continue
+                sb.append(ch)
+            }
+            return sb.toString()
+        }
 
         /** Masked display, e.g. "abcd••••••••wxyz". */
         fun maskKey(key: String?): String {
