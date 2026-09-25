@@ -177,7 +177,6 @@ fun CallScreen(
                             containerColor = HerDanger,
                             contentColor = HerText
                         ),
-                        shape = CircleShape
                     ) {
                         Icon(
                             imageVector = Icons.Default.CallEnd,
