@@ -1,12 +1,14 @@
 package com.onecall.aivoice.data
 
 import android.content.Context
+import com.onecall.aivoice.voice.TtsVoice
 
 /**
  * Local SharedPreferences for Stage-1 settings.
- * Stores nickname (how AI addresses the user). Voice is fixed.
- * Also stores the user-pasted Gemini API key on-device only (this prefs file is
- * excluded from backup; the key is never bundled in the repo or APK).
+ * Stores nickname (how AI addresses the user) and the test voice choice.
+ * Also stores the user-pasted OpenRouter key (main) and Gemini key (fallback brain when no
+ * OpenRouter key) on-device only (this prefs file is excluded from backup; keys are never
+ * bundled in the repo or APK).
  */
 class UserPreferences(context: Context) {
 
@@ -35,6 +37,32 @@ class UserPreferences(context: Context) {
             }
         }
 
+    /**
+     * OpenRouter key pasted by the user (one key for reply brain + voice). Null when not set.
+     * Same handling as [geminiApiKey]: cleaned, read fresh, saved with commit().
+     */
+    var openRouterApiKey: String?
+        get() = cleanApiKey(prefs.getString(KEY_OPENROUTER_API_KEY, null)).ifEmpty { null }
+        set(value) {
+            val cleaned = cleanApiKey(value)
+            if (cleaned.isEmpty()) {
+                prefs.edit().remove(KEY_OPENROUTER_API_KEY).commit()
+            } else {
+                prefs.edit().putString(KEY_OPENROUTER_API_KEY, cleaned).commit()
+            }
+        }
+
+    /** Test voice (option 2 = default, 1, 7). Only used with an OpenRouter key. */
+    var ttsVoice: TtsVoice
+        get() = TtsVoice.fromOption(prefs.getString(KEY_TTS_VOICE, null))
+        set(value) {
+            prefs.edit().putString(KEY_TTS_VOICE, value.option).commit()
+        }
+
+    /** Voice name shown on the home screen. */
+    val voiceDisplayName: String
+        get() = if (openRouterApiKey != null) ttsVoice.shortLabel else FIXED_VOICE_NAME
+
     /** Fixed Stage-1 voice display name (device default Korean TTS). */
     val fixedVoiceName: String = FIXED_VOICE_NAME
 
@@ -42,6 +70,8 @@ class UserPreferences(context: Context) {
         const val PREFS_NAME = "aivoice_prefs"
         const val KEY_NICKNAME = "nickname"
         const val KEY_GEMINI_API_KEY = "gemini_api_key"
+        const val KEY_OPENROUTER_API_KEY = "openrouter_api_key"
+        const val KEY_TTS_VOICE = "tts_voice_option"
         const val DEFAULT_NICKNAME = "친구"
         const val FIXED_VOICE_NAME = "기본 한국어 음성"
 

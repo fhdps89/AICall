@@ -115,6 +115,24 @@ fun CallScreen(
                         textAlign = TextAlign.Center
                     )
                 }
+                state.voiceInfoText?.let { info ->
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = info,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = HerTextDim,
+                        textAlign = TextAlign.Center
+                    )
+                }
+                state.voiceFailureText?.let { failure ->
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = failure,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = HerDanger,
+                        textAlign = TextAlign.Center
+                    )
+                }
                 state.latencyText?.let { latency ->
                     Spacer(Modifier.height(4.dp))
                     Text(

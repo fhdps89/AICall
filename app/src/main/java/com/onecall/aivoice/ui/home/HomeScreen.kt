@@ -22,6 +22,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -47,6 +49,7 @@ import com.onecall.aivoice.ui.theme.HerBg
 import com.onecall.aivoice.ui.theme.HerSurface
 import com.onecall.aivoice.ui.theme.HerText
 import com.onecall.aivoice.ui.theme.HerTextDim
+import com.onecall.aivoice.voice.TtsVoice
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -187,47 +190,117 @@ fun HomeScreen(
                 }
                 Spacer(Modifier.height(12.dp))
                 HorizontalDivider(color = HerTextDim.copy(alpha = 0.2f))
-                ApiKeySection(state = state, viewModel = viewModel)
+                ApiKeySection(
+                    kind = KeyKind.OpenRouter,
+                    key = state.openRouter,
+                    title = stringResource(R.string.ai_key_label),
+                    inputLabel = stringResource(R.string.ai_key_input_label),
+                    modelLine = stringResource(R.string.ai_model_label, state.openRouterModel),
+                    viewModel = viewModel
+                )
+                VoiceChoiceSection(state = state, viewModel = viewModel)
+                HorizontalDivider(color = HerTextDim.copy(alpha = 0.2f))
+                ApiKeySection(
+                    kind = KeyKind.Gemini,
+                    key = state.gemini,
+                    title = stringResource(R.string.gemini_key_label),
+                    inputLabel = stringResource(R.string.gemini_key_input_label),
+                    modelLine = stringResource(R.string.gemini_model_label, state.modelId),
+                    viewModel = viewModel
+                )
             }
         }
     }
 }
 
-/** Subtle on-device Gemini key entry (test builds). The key never leaves the phone except to call Gemini. */
+/** Test voice choice (used only with an OpenRouter key). Saved immediately. */
 @Composable
-private fun ApiKeySection(state: HomeUiState, viewModel: HomeViewModel) {
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(enabled = !state.apiKeyEditing) { viewModel.startApiKeyEdit() }
-                .padding(vertical = 12.dp)
-        ) {
+private fun VoiceChoiceSection(state: HomeUiState, viewModel: HomeViewModel) {
+    Column(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+        Text(
+            text = stringResource(R.string.voice_choice_label),
+            style = MaterialTheme.typography.bodyMedium,
+            color = HerTextDim
+        )
+        TtsVoice.values().forEach { voice ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { viewModel.selectVoice(voice) }
+                    .padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                RadioButton(
+                    selected = state.selectedVoice == voice,
+                    onClick = { viewModel.selectVoice(voice) },
+                    colors = RadioButtonDefaults.colors(selectedColor = HerAmber, unselectedColor = HerTextDim)
+                )
+                Column {
+                    Text(
+                        text = voice.shortLabel,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (state.selectedVoice == voice) HerAmber else HerText
+                    )
+                    Text(
+                        text = voice.description,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = HerTextDim
+                    )
+                }
+            }
+        }
+        if (state.openRouter.masked.isEmpty()) {
             Text(
-                text = stringResource(R.string.ai_key_label),
-                style = MaterialTheme.typography.bodyMedium,
-                color = HerTextDim
-            )
-            Spacer(Modifier.height(2.dp))
-            Text(
-                text = state.maskedApiKey.ifEmpty { stringResource(R.string.ai_key_not_set) },
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (state.maskedApiKey.isEmpty()) HerTextDim else HerAmber
-            )
-            Spacer(Modifier.height(2.dp))
-            Text(
-                text = stringResource(R.string.ai_model_label, state.modelId),
+                text = stringResource(R.string.voice_choice_needs_key),
                 style = MaterialTheme.typography.labelSmall,
                 color = HerTextDim
             )
         }
-        if (state.apiKeyEditing) {
+    }
+}
+
+/** Subtle on-device key entry (test builds). The key never leaves the phone except to call the API. */
+@Composable
+private fun ApiKeySection(
+    kind: KeyKind,
+    key: KeyUi,
+    title: String,
+    inputLabel: String,
+    modelLine: String,
+    viewModel: HomeViewModel
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(enabled = !key.editing) { viewModel.startApiKeyEdit(kind) }
+                .padding(vertical = 12.dp)
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium,
+                color = HerTextDim
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = key.masked.ifEmpty { stringResource(R.string.ai_key_not_set) },
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (key.masked.isEmpty()) HerTextDim else HerAmber
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = modelLine,
+                style = MaterialTheme.typography.labelSmall,
+                color = HerTextDim
+            )
+        }
+        if (key.editing) {
             OutlinedTextField(
-                value = state.apiKeyDraft,
-                onValueChange = viewModel::updateApiKeyDraft,
+                value = key.draft,
+                onValueChange = { viewModel.updateApiKeyDraft(kind, it) },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                label = { Text(stringResource(R.string.ai_key_input_label)) },
+                label = { Text(inputLabel) },
                 visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                 colors = OutlinedTextFieldDefaults.colors(
@@ -249,45 +322,45 @@ private fun ApiKeySection(state: HomeUiState, viewModel: HomeViewModel) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End
             ) {
-                TextButton(onClick = { viewModel.cancelApiKeyEdit() }) {
+                TextButton(onClick = { viewModel.cancelApiKeyEdit(kind) }) {
                     Text(stringResource(R.string.ai_key_cancel), color = HerTextDim)
                 }
                 TextButton(
-                    onClick = { viewModel.testApiKey() },
-                    enabled = state.apiKeyDraft.isNotBlank() && !state.keyTestRunning
+                    onClick = { viewModel.testApiKey(kind) },
+                    enabled = key.draft.isNotBlank() && !key.testRunning
                 ) {
                     Text(stringResource(R.string.ai_key_test), color = HerTextDim)
                 }
                 TextButton(
-                    onClick = { viewModel.saveApiKey() },
-                    enabled = state.apiKeyDraft.isNotBlank()
+                    onClick = { viewModel.saveApiKey(kind) },
+                    enabled = key.draft.isNotBlank()
                 ) {
                     Text(stringResource(R.string.ai_key_save), color = HerAmber)
                 }
             }
-        } else if (state.maskedApiKey.isNotEmpty()) {
+        } else if (key.masked.isNotEmpty()) {
             Row(modifier = Modifier.fillMaxWidth()) {
                 TextButton(
-                    onClick = { viewModel.testApiKey() },
-                    enabled = !state.keyTestRunning
+                    onClick = { viewModel.testApiKey(kind) },
+                    enabled = !key.testRunning
                 ) {
                     Text(stringResource(R.string.ai_key_test), color = HerAmber)
                 }
-                TextButton(onClick = { viewModel.startApiKeyEdit() }) {
+                TextButton(onClick = { viewModel.startApiKeyEdit(kind) }) {
                     Text(stringResource(R.string.ai_key_replace), color = HerTextDim)
                 }
-                TextButton(onClick = { viewModel.clearApiKey() }) {
+                TextButton(onClick = { viewModel.clearApiKey(kind) }) {
                     Text(stringResource(R.string.ai_key_clear), color = HerTextDim)
                 }
             }
         }
-        state.keyTestResult?.let { result ->
+        key.testResult?.let { result ->
             Text(
                 text = result,
                 style = MaterialTheme.typography.bodyMedium,
                 color = when {
-                    state.keyTestRunning -> HerTextDim
-                    state.keyTestOk -> HerAmber
+                    key.testRunning -> HerTextDim
+                    key.testOk -> HerAmber
                     else -> HerDanger
                 },
                 modifier = Modifier.padding(vertical = 4.dp)

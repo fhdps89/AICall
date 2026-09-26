@@ -9,11 +9,7 @@ import android.os.SystemClock
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
 import android.util.Log
-import java.util.Locale
-import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -21,29 +17,32 @@ import java.util.concurrent.atomic.AtomicBoolean
 enum class ReplySource { Ai, Local, Fallback }
 
 /**
- * Time from the end-of-turn decision (silence window closed) to the moment TTS starts
- * speaking the reply. [networkMs] is the Gemini request time (null for local replies).
- * [sinceSpeechMs] additionally includes the end-of-turn silence window (from the last
- * final STT result); null when unknown.
+ * Latency of one reply, measured on the phone.
+ * [firstSoundMs]: end-of-turn decision (1.5 s silence window closed) → first audible sample.
+ * [sinceSpeechMs]: same end point but from the last final STT result (includes the window).
+ * [modelMs]: OpenRouter = chat request → first complete sentence; Gemini key = whole request.
+ * [voiceMs]: first sentence ready → first audible sample (TTS time incl. fallback).
  */
 data class ReplyLatency(
-    val totalMs: Long,
-    val networkMs: Long?,
+    val firstSoundMs: Long,
+    val modelMs: Long?,
     val source: ReplySource,
-    val sinceSpeechMs: Long? = null
+    val sinceSpeechMs: Long? = null,
+    val voiceMs: Long? = null,
+    val remoteVoice: Boolean = false
 )
 
 /**
- * Stage-1 realtime voice loop:
- * - Korean TTS (device default) + SpeechRecognizer
- * - Greets with nickname, listens, replies
- * - End-of-turn wait: after a final STT result the recognizer restarts immediately and
- *   the reply is only generated after [UtteranceWindow.DEFAULT_WINDOW_MS] of silence;
- *   speech inside the window is appended to the same turn
- * - Replies via Gemini API whenever an on-device key is set (read fresh from settings at
- *   every request; in-call memory only). With a key set, [ReplyGenerator] is never used:
- *   AI failures speak a retry line and keep listening. Without a key → [ReplyGenerator]
- * - Barge-in: while TTS speaking, restart listening; on partial/final speech stop TTS
+ * Realtime voice loop:
+ * - SpeechRecognizer; end-of-turn wait: after a final STT result the recognizer restarts and
+ *   the reply is only generated after [UtteranceWindow.DEFAULT_WINDOW_MS] of silence
+ * - Brain (keys read fresh at every request, in-call memory only):
+ *   OpenRouter key → streamed chat ([OpenRouterClient.CHAT_MODEL]); else Gemini key → Gemini
+ *   REST; else rule-based [ReplyGenerator]
+ * - Voice: OpenRouter key → OpenRouter TTS (selected [TtsVoice]) sentence by sentence via
+ *   [SpeechPipeline] (first sentence plays while the rest is synthesized); failed sentences
+ *   and key-less modes use the built-in TTS
+ * - Barge-in: while speaking, listen; on user speech stop audio + cancel pending synthesis
  */
 class VoiceCallEngine(
     private val context: Context,
@@ -54,96 +53,126 @@ class VoiceCallEngine(
     private val isMuted: () -> Boolean = { false },
     /** Read at every AI request (not cached), so a key saved in settings is always used. */
     private val apiKeyProvider: () -> String? = { null },
+    private val openRouterKeyProvider: () -> String? = { null },
+    private val voiceProvider: () -> TtsVoice = { TtsVoice.DEFAULT },
     private val onLatency: (ReplyLatency) -> Unit = {},
-    private val onReplyOrigin: (ReplyOrigin) -> Unit = {}
+    private val onReplyOrigin: (ReplyOrigin) -> Unit = {},
+    /** Brain + voice of the current reply, e.g. "google/gemini-3.5-flash-lite · 목소리 2번 Puck". */
+    private val onVoiceInfo: (String) -> Unit = {},
+    /** "음성 실패: <사유> → 기본 음성" or null when the reply's voice worked. */
+    private val onVoiceFailure: (String?) -> Unit = {}
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var tts: TextToSpeech? = null
+    private var speaker: BuiltInSpeaker? = null
     private var recognizer: SpeechRecognizer? = null
 
     private val running = AtomicBoolean(false)
-    private val ttsReady = AtomicBoolean(false)
     private val isSpeaking = AtomicBoolean(false)
     private val isListening = AtomicBoolean(false)
     private val bargeInArmed = AtomicBoolean(false)
 
-    private var pendingAfterTts: (() -> Unit)? = null
-    private var currentUtteranceId: String? = null
-
-    // Gemini (main-thread state). Memory lives only for this call.
+    // AI (main-thread state). Memory lives only for this call.
     private val history = mutableListOf<ChatTurn>()
     private val netExecutor = Executors.newCachedThreadPool()
     private var inFlight: GeminiRequest? = null
     private var requestSeq = 0
-    private var greetingText: String? = null
-    private var ttsInitDone = false
 
     // End-of-turn silence window (main thread only)
     private val turn = UtteranceWindow()
     private val turnCheck = Runnable { checkTurnWindow() }
 
-    /** True between the end of a user turn and the start of the reply (no listening then). */
+    /** True between the end of a user turn and the first sound of the reply (no listening then). */
     private var awaitingReply = false
 
-    private class LatencyMark(
-        val heardAt: Long,
-        val networkMs: Long?,
-        val source: ReplySource,
-        val lastSpeechAt: Long? = null
-    )
+    /** The reply being produced/spoken (main thread). */
+    private var active: ActiveReply? = null
+    private var replySeq = 0
 
-    private var pendingLatency: LatencyMark? = null
-    private var pendingLatencyUtteranceId: String? = null
+    private enum class Brain { OpenRouter, Gemini, Local }
 
-    /** Fresh read of the saved key; null when not set. */
+    /** One reply: chat stream (optional) + speech pipeline. Timestamps: elapsedRealtime ms. */
+    private inner class ActiveReply(
+        val id: Int,
+        val brain: Brain,
+        val voice: TtsVoice?,
+        /** When the end-of-turn window closed; null for the greeting. */
+        val committedAt: Long?,
+        val lastSpeechAt: Long?,
+        val isGreeting: Boolean
+    ) {
+        lateinit var pipeline: SpeechPipeline
+        var sink: AudioTrackSink? = null
+
+        @Volatile
+        var chat: OpenRouterChatRequest? = null
+        val streamed = StringBuffer()
+
+        @Volatile
+        var sentencesAdded = 0
+
+        @Volatile
+        var chatStartedAt = 0L
+
+        @Volatile
+        var firstSentenceAt: Long? = null
+
+        @Volatile
+        var modelMs: Long? = null
+        var source: ReplySource = ReplySource.Ai
+
+        @Volatile
+        var cancelled = false
+        var historyDone = false
+        var voiceFailed = false
+    }
+
     private fun currentKey(): String? = apiKeyProvider()?.trim()?.takeIf { it.isNotEmpty() }
+    private fun currentOpenRouterKey(): String? = openRouterKeyProvider()?.trim()?.takeIf { it.isNotEmpty() }
+
+    private fun now() = SystemClock.elapsedRealtime()
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
         onPhase(CallPhase.Greeting)
+        speaker = BuiltInSpeaker(context) { msg -> mainHandler.post { onErrorMessage(msg) } }
+        ensureRecognizer()
+        val orKey = currentOpenRouterKey()
         val key = currentKey()
         val nick = nicknameProvider()
-        Log.i(LOG_TAG, "call start: ai=${key != null} model=${GeminiClient.MODEL_ID}")
-        if (key == null) {
-            greetingText = ReplyGenerator.greeting(nick)
-            onReplyOrigin(ReplyOrigin.LocalNoKey)
-        } else {
-            // Fetch the AI greeting in parallel with TTS init
-            history.add(ChatTurn(ChatTurn.ROLE_USER, PersonaPrompt.greetingRequest(nick)))
-            requestAi(key) { result ->
-                val text = when (result) {
-                    is GeminiResult.Success -> {
-                        Log.i(LOG_TAG, "AI greeting network=${result.networkMs}ms")
-                        onReplyOrigin(ReplyOrigin.Ai)
-                        result.text
+        val brain = when {
+            orKey != null -> Brain.OpenRouter
+            key != null -> Brain.Gemini
+            else -> Brain.Local
+        }
+        Log.i(LOG_TAG, "call start: brain=$brain voice=${if (orKey != null) voiceProvider().shortLabel else "builtin"}")
+        when (brain) {
+            Brain.OpenRouter -> {
+                history.add(ChatTurn(ChatTurn.ROLE_USER, PersonaPrompt.greetingRequest(nick)))
+                startOpenRouterReply(orKey!!, committedAt = null, lastSpeechAt = null, isGreeting = true)
+            }
+            Brain.Gemini -> {
+                history.add(ChatTurn(ChatTurn.ROLE_USER, PersonaPrompt.greetingRequest(nick)))
+                requestAi(key!!) { result ->
+                    val text = when (result) {
+                        is GeminiResult.Success -> {
+                            Log.i(LOG_TAG, "AI greeting network=${result.networkMs}ms")
+                            onReplyOrigin(ReplyOrigin.Ai)
+                            result.text
+                        }
+                        is GeminiResult.Failure -> {
+                            Log.w(LOG_TAG, "AI greeting failed: ${result.reason} (${result.networkMs}ms)")
+                            onReplyOrigin(ReplyOrigin.AiFailed(result.reason))
+                            PersonaPrompt.greetingFallback(nick)
+                        }
                     }
-                    is GeminiResult.Failure -> {
-                        Log.w(LOG_TAG, "AI greeting failed: ${result.reason} (${result.networkMs}ms)")
-                        onReplyOrigin(ReplyOrigin.AiFailed(result.reason))
-                        PersonaPrompt.greetingFallback(nick)
-                    }
+                    history.add(ChatTurn(ChatTurn.ROLE_MODEL, text))
+                    startStaticReply(text, Brain.Gemini, null, null, ReplySource.Ai, null, isGreeting = true)
                 }
-                history.add(ChatTurn(ChatTurn.ROLE_MODEL, text))
-                greetingText = text
-                maybeSpeakGreeting()
             }
-        }
-        initTts {
-            mainHandler.post {
-                if (!running.get()) return@post
-                ensureRecognizer()
-                ttsInitDone = true
-                maybeSpeakGreeting()
+            Brain.Local -> {
+                onReplyOrigin(ReplyOrigin.LocalNoKey)
+                startStaticReply(ReplyGenerator.greeting(nick), Brain.Local, null, null, ReplySource.Local, null, true)
             }
-        }
-    }
-
-    private fun maybeSpeakGreeting() {
-        if (!running.get() || !ttsInitDone) return
-        val text = greetingText ?: return
-        greetingText = null
-        speak(text) {
-            if (running.get() && !isMuted()) startListening()
         }
     }
 
@@ -153,16 +182,16 @@ class VoiceCallEngine(
         requestSeq++
         inFlight?.cancel()
         inFlight = null
+        cancelActiveReply(recordPartial = false)
         history.clear()
-        pendingLatency = null
         awaitingReply = false
         resetTurn()
-        netExecutor.shutdownNow()
         stopListeningInternal()
-        stopSpeakingInternal()
-        pendingAfterTts = null
+        isSpeaking.set(false)
         destroyRecognizer()
-        destroyTts()
+        speaker?.shutdown()
+        speaker = null
+        netExecutor.shutdownNow()
         onPhase(CallPhase.Ended)
     }
 
@@ -171,7 +200,10 @@ class VoiceCallEngine(
         if (muted) {
             resetTurn()
             stopListeningInternal()
-            stopSpeakingInternal()
+            cancelActiveReply(recordPartial = true)
+            isSpeaking.set(false)
+            bargeInArmed.set(false)
+            awaitingReply = false
             onPhase(CallPhase.Idle)
         } else {
             if (!isSpeaking.get() && !isListening.get()) {
@@ -180,122 +212,284 @@ class VoiceCallEngine(
         }
     }
 
-    private fun initTts(onReady: () -> Unit) {
-        tts = TextToSpeech(context) { status ->
-            if (status != TextToSpeech.SUCCESS) {
-                onErrorMessage("TTS 초기화 실패. 기기 한국어 TTS를 확인해 주세요.")
-                ttsReady.set(false)
-                return@TextToSpeech
-            }
-            val engine = tts ?: return@TextToSpeech
-            val result = engine.setLanguage(Locale.KOREAN)
-            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                // Fallback: try language tag ko
-                engine.setLanguage(Locale.forLanguageTag("ko"))
-            }
-            engine.setSpeechRate(1.0f)
-            engine.setPitch(1.0f)
-            engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                override fun onStart(utteranceId: String?) {
-                    val startedAt = SystemClock.elapsedRealtime()
-                    mainHandler.post {
-                        reportLatency(utteranceId, startedAt)
-                        isSpeaking.set(true)
-                        onPhase(CallPhase.Speaking)
-                        // Arm barge-in shortly after TTS starts (avoid self-echo)
-                        mainHandler.postDelayed({
-                            if (running.get() && isSpeaking.get() && !isMuted()) {
-                                bargeInArmed.set(true)
-                                startListeningForBargeIn()
-                            }
-                        }, BARGE_IN_ARM_DELAY_MS)
-                    }
-                }
+    // ---------------------------------------------------------------- replies
 
-                override fun onDone(utteranceId: String?) {
-                    mainHandler.post {
-                        if (utteranceId != currentUtteranceId) return@post
-                        finishSpeaking()
-                    }
-                }
-
-                @Deprecated("Deprecated in API")
-                override fun onError(utteranceId: String?) {
-                    mainHandler.post {
-                        if (utteranceId != currentUtteranceId) return@post
-                        finishSpeaking()
-                    }
-                }
-
-                override fun onError(utteranceId: String?, errorCode: Int) {
-                    mainHandler.post {
-                        if (utteranceId != currentUtteranceId) return@post
-                        finishSpeaking()
-                    }
-                }
-            })
-            ttsReady.set(true)
-            onReady()
+    private fun voiceLabel(brain: Brain, voice: TtsVoice?): String {
+        val voicePart = voice?.let { "목소리 ${it.shortLabel}" } ?: "기본 음성"
+        return when (brain) {
+            Brain.OpenRouter -> "${OpenRouterClient.CHAT_MODEL} · $voicePart"
+            Brain.Gemini -> "${GeminiClient.MODEL_ID}(Gemini 키) · $voicePart"
+            Brain.Local -> voicePart
         }
     }
 
-    private fun finishSpeaking() {
+    /** Creates the reply + pipeline (remote voice only with an OpenRouter key). */
+    private fun newReply(
+        brain: Brain,
+        orKey: String?,
+        committedAt: Long?,
+        lastSpeechAt: Long?,
+        isGreeting: Boolean
+    ): ActiveReply? {
+        if (!running.get()) return null
+        cancelActiveReply(recordPartial = true)
+        val voice = if (orKey != null) voiceProvider() else null
+        val reply = ActiveReply(++replySeq, brain, voice, committedAt, lastSpeechAt, isGreeting)
+        val synth = if (orKey != null && voice != null) OpenRouterSynth(orKey, voice, netExecutor) else null
+        val sink = AudioTrackSink(mainHandler)
+        val fallback = speaker ?: return null
+        reply.sink = sink
+        reply.pipeline = SpeechPipeline(synth, sink, fallback, PipelineListener(reply))
+        active = reply
+        onVoiceInfo(voiceLabel(brain, voice))
+        onVoiceFailure(null)
+        stopListeningInternal()
+        reply.pipeline.start()
+        return reply
+    }
+
+    private inner class PipelineListener(private val reply: ActiveReply) : SpeechPipeline.Listener {
+        private fun onMain(block: () -> Unit) = mainHandler.post {
+            if (running.get() && active === reply && !reply.cancelled) block()
+        }
+
+        override fun onFirstSound(atMs: Long, remote: Boolean) {
+            val at = now()
+            onMain { onReplyFirstSound(reply, at, remote) }
+        }
+
+        override fun onSynthStarted(index: Int, text: String) {
+            Log.d(LOG_TAG, "tts[$index] request start (${text.length} chars) voice=${reply.voice?.shortLabel}")
+        }
+
+        override fun onTtsTiming(index: Int, firstAudioMs: Long?, totalMs: Long) {
+            Log.i(
+                LOG_TAG,
+                "tts[$index] firstAudio=${firstAudioMs ?: "-"}ms total=${totalMs}ms voice=${reply.voice?.shortLabel}"
+            )
+        }
+
+        override fun onFallback(index: Int, reason: String) {
+            Log.w(LOG_TAG, "tts[$index] failed: $reason → built-in TTS")
+            onMain {
+                reply.voiceFailed = true
+                onVoiceFailure(TtsFallback.label(reason))
+            }
+        }
+
+        override fun onFinished(cancelled: Boolean) {
+            mainHandler.post { onReplyFinished(reply, cancelled) }
+        }
+    }
+
+    private fun onReplyFirstSound(reply: ActiveReply, at: Long, remote: Boolean) {
+        isSpeaking.set(true)
+        awaitingReply = false
+        onPhase(CallPhase.Speaking)
+        val committed = reply.committedAt
+        val voiceMs = reply.firstSentenceAt?.let { at - it }
+        if (committed != null) {
+            val latency = ReplyLatency(
+                firstSoundMs = at - committed,
+                modelMs = reply.modelMs,
+                source = reply.source,
+                sinceSpeechMs = reply.lastSpeechAt?.let { at - it },
+                voiceMs = voiceMs,
+                remoteVoice = remote
+            )
+            Log.i(
+                LOG_TAG,
+                "first sound: sinceTurnCommit=${latency.firstSoundMs}ms " +
+                    "sinceLastSpeech(incl. ${turn.windowMs}ms window)=${latency.sinceSpeechMs ?: "-"}ms " +
+                    "model(firstSentence)=${latency.modelMs ?: "-"}ms voice(sentence→sound)=${voiceMs ?: "-"}ms " +
+                    "brain=${reply.brain} voice=${reply.voice?.shortLabel ?: "builtin"} " +
+                    "remote=$remote source=${latency.source}"
+            )
+            onLatency(latency)
+        } else {
+            Log.i(
+                LOG_TAG,
+                "greeting first sound: model(firstSentence)=${reply.modelMs ?: "-"}ms " +
+                    "voice(sentence→sound)=${voiceMs ?: "-"}ms voice=${reply.voice?.shortLabel ?: "builtin"} remote=$remote"
+            )
+        }
+        // Arm barge-in shortly after audio starts (avoid self-echo)
+        mainHandler.postDelayed({
+            if (running.get() && isSpeaking.get() && !isMuted() && active === reply) {
+                bargeInArmed.set(true)
+                startListeningForBargeIn()
+            }
+        }, BARGE_IN_ARM_DELAY_MS)
+    }
+
+    private fun onReplyFinished(reply: ActiveReply, cancelled: Boolean) {
+        if (active !== reply) return
+        active = null
+        if (cancelled || reply.cancelled || !running.get()) return
         isSpeaking.set(false)
         bargeInArmed.set(false)
+        awaitingReply = false
         stopListeningInternal()
-        val next = pendingAfterTts
-        pendingAfterTts = null
-        if (!running.get() || isMuted()) {
+        if (isMuted()) {
             onPhase(CallPhase.Idle)
-            return
-        }
-        if (next != null) {
-            next.invoke()
         } else {
             startListening()
         }
     }
 
-    private fun reportLatency(utteranceId: String?, ttsStartedAt: Long) {
-        val mark = pendingLatency ?: return
-        if (utteranceId == null || utteranceId != pendingLatencyUtteranceId) return
-        pendingLatency = null
-        pendingLatencyUtteranceId = null
-        val latency = ReplyLatency(
-            totalMs = ttsStartedAt - mark.heardAt,
-            networkMs = mark.networkMs,
-            source = mark.source,
-            sinceSpeechMs = mark.lastSpeechAt?.let { ttsStartedAt - it }
-        )
-        Log.i(
-            LOG_TAG,
-            "reply latency total=${latency.totalMs}ms network=${latency.networkMs ?: "-"}ms " +
-                "sinceLastSpeech(incl. ${turn.windowMs}ms window)=${latency.sinceSpeechMs ?: "-"}ms " +
-                "source=${latency.source}"
-        )
-        onLatency(latency)
+    /** Stops audio + pending synthesis + chat stream. Keeps streamed text in memory if asked. */
+    private fun cancelActiveReply(recordPartial: Boolean) {
+        val reply = active ?: return
+        active = null
+        reply.cancelled = true
+        reply.chat?.cancel()
+        reply.pipeline.cancel()
+        if (reply.brain == Brain.OpenRouter && !reply.historyDone) {
+            reply.historyDone = true
+            val partial = GeminiClient.sanitizeForSpeech(reply.streamed.toString())
+            if (recordPartial && partial.isNotBlank()) {
+                history.add(ChatTurn(ChatTurn.ROLE_MODEL, partial))
+            } else {
+                dropTrailingUserTurns()
+            }
+        }
     }
 
-    private fun speak(text: String, latency: LatencyMark? = null, then: (() -> Unit)? = null) {
-        if (!running.get() || isMuted()) {
-            then?.invoke()
-            return
-        }
-        val engine = tts
-        if (engine == null || !ttsReady.get()) {
-            onErrorMessage("TTS가 준비되지 않았습니다.")
-            then?.invoke()
-            return
-        }
-        stopListeningInternal()
-        pendingAfterTts = then
-        val id = UUID.randomUUID().toString()
-        currentUtteranceId = id
-        pendingLatency = latency
-        pendingLatencyUtteranceId = if (latency != null) id else null
-        onPhase(CallPhase.Speaking)
-        engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
+    private fun dropTrailingUserTurns() {
+        while (history.lastOrNull()?.role == ChatTurn.ROLE_USER) history.removeAt(history.size - 1)
     }
+
+    /** Known full text (local / Gemini key / fallback line): split and speak. */
+    private fun startStaticReply(
+        text: String,
+        brain: Brain,
+        committedAt: Long?,
+        lastSpeechAt: Long?,
+        source: ReplySource,
+        modelMs: Long?,
+        isGreeting: Boolean = false
+    ) {
+        if (!running.get() || isMuted()) {
+            awaitingReply = false
+            if (running.get()) onPhase(CallPhase.Idle)
+            return
+        }
+        val reply = newReply(brain, currentOpenRouterKey().takeIf { brain == Brain.OpenRouter }, committedAt, lastSpeechAt, isGreeting)
+            ?: return
+        reply.source = source
+        reply.modelMs = modelMs
+        reply.historyDone = true
+        reply.firstSentenceAt = now()
+        SentenceSplitter.splitAll(text).map { GeminiClient.sanitizeForSpeech(it) }.forEach { reply.pipeline.add(it) }
+        reply.pipeline.endInput()
+    }
+
+    /**
+     * Streams the reply from OpenRouter; every completed sentence goes to the pipeline at once.
+     * History (last turn = user or the greeting request) is sent as-is.
+     */
+    private fun startOpenRouterReply(orKey: String, committedAt: Long?, lastSpeechAt: Long?, isGreeting: Boolean) {
+        val reply = newReply(Brain.OpenRouter, orKey, committedAt, lastSpeechAt, isGreeting) ?: return
+        val nick = nicknameProvider()
+        val splitter = SentenceSplitter()
+        fun addSentence(raw: String) {
+            val s = GeminiClient.sanitizeForSpeech(raw)
+            if (s.isBlank()) return
+            if (reply.sentencesAdded == 0) {
+                val t = now()
+                reply.firstSentenceAt = t
+                reply.modelMs = t - reply.chatStartedAt
+                Log.i(LOG_TAG, "chat first sentence=${reply.modelMs}ms (${s.length} chars)")
+                mainHandler.post { if (active === reply) onReplyOrigin(ReplyOrigin.Ai) }
+            }
+            reply.sentencesAdded++
+            reply.pipeline.add(s)
+        }
+        val request = OpenRouterChatRequest(
+            apiKey = orKey,
+            systemPrompt = PersonaPrompt.systemInstruction(nick),
+            turns = history.toList(),
+            onDelta = { delta ->
+                if (!reply.cancelled) {
+                    reply.streamed.append(delta)
+                    splitter.push(delta).forEach { addSentence(it) }
+                }
+            }
+        )
+        reply.chat = request
+        val firstTokenWatch = Runnable {
+            if (reply.streamed.isEmpty() && !reply.cancelled) request.cancel(timeout = true)
+        }
+        val totalWatch = Runnable { if (!reply.cancelled) request.cancel(timeout = true) }
+        mainHandler.postDelayed(firstTokenWatch, OpenRouterClient.CHAT_FIRST_TOKEN_TIMEOUT_MS.toLong())
+        mainHandler.postDelayed(totalWatch, OpenRouterClient.CHAT_TOTAL_TIMEOUT_MS.toLong())
+        reply.chatStartedAt = now()
+        try {
+            netExecutor.execute {
+                val result = request.execute()
+                mainHandler.removeCallbacks(firstTokenWatch)
+                mainHandler.removeCallbacks(totalWatch)
+                if (!reply.cancelled) {
+                    if (result is ChatResult.Success || reply.sentencesAdded > 0) {
+                        splitter.flush().forEach { addSentence(it) }
+                    }
+                    if (reply.sentencesAdded == 0) {
+                        // Nothing usable arrived: speak the fixed retry line instead
+                        reply.pipeline.add(
+                            if (isGreeting) PersonaPrompt.greetingFallback(nick) else PersonaPrompt.RETRY_FALLBACK
+                        )
+                    }
+                    reply.pipeline.endInput()
+                }
+                mainHandler.post { onChatDone(reply, result) }
+            }
+        } catch (e: Exception) {
+            mainHandler.removeCallbacks(firstTokenWatch)
+            mainHandler.removeCallbacks(totalWatch)
+            reply.pipeline.add(PersonaPrompt.RETRY_FALLBACK)
+            reply.pipeline.endInput()
+            onChatDone(reply, ChatResult.Failure("오류(${e.javaClass.simpleName})", 0L))
+        }
+    }
+
+    /** Main thread: record memory + reply source once the chat stream ended. */
+    private fun onChatDone(reply: ActiveReply, result: ChatResult) {
+        if (!running.get() || reply.cancelled || reply.historyDone) return
+        reply.historyDone = true
+        when (result) {
+            is ChatResult.Success -> {
+                Log.i(
+                    LOG_TAG,
+                    "chat done total=${result.networkMs}ms firstToken=${result.firstTokenMs ?: "-"}ms " +
+                        "model=${result.model ?: OpenRouterClient.CHAT_MODEL}"
+                )
+                history.add(ChatTurn(ChatTurn.ROLE_MODEL, result.text))
+                while (history.size > MAX_HISTORY_TURNS) history.removeAt(0)
+                reply.source = ReplySource.Ai
+                onReplyOrigin(ReplyOrigin.Ai)
+            }
+            is ChatResult.Failure -> {
+                Log.w(LOG_TAG, "chat failed: ${result.reason} (${result.networkMs}ms, partial=${result.partialText.length} chars)")
+                val partial = GeminiClient.sanitizeForSpeech(result.partialText)
+                if (reply.sentencesAdded > 0 && partial.isNotBlank()) {
+                    history.add(ChatTurn(ChatTurn.ROLE_MODEL, partial))
+                    onReplyOrigin(ReplyOrigin.AiFailed(result.reason))
+                } else {
+                    reply.source = ReplySource.Fallback
+                    reply.modelMs = result.networkMs
+                    reply.firstSentenceAt = reply.firstSentenceAt ?: now()
+                    if (reply.isGreeting) {
+                        history.add(ChatTurn(ChatTurn.ROLE_MODEL, PersonaPrompt.greetingFallback(nicknameProvider())))
+                    } else {
+                        dropTrailingUserTurns()
+                    }
+                    onReplyOrigin(ReplyOrigin.AiFailed(result.reason))
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- STT
 
     private fun ensureRecognizer() {
         if (recognizer != null) return
@@ -309,7 +503,7 @@ class VoiceCallEngine(
     }
 
     private fun startListening() {
-        if (!running.get() || isMuted() || isSpeaking.get() || awaitingReply) return
+        if (!running.get() || isMuted() || isSpeaking.get() || awaitingReply || active != null) return
         ensureRecognizer()
         val r = recognizer ?: return
         if (isListening.get()) return
@@ -370,21 +564,12 @@ class VoiceCallEngine(
         }
     }
 
-    private fun stopSpeakingInternal() {
-        bargeInArmed.set(false)
-        isSpeaking.set(false)
-        try {
-            tts?.stop()
-        } catch (_: Exception) {
-        }
-        currentUtteranceId = null
-    }
-
-    /** User speech detected while TTS is playing: stop TTS (barge-in) and go back to listening. */
+    /** User speech detected while the reply plays: stop audio at once, cancel pending synthesis. */
     private fun bargeIn(why: String) {
-        Log.d(TAG, "barge-in detected ($why)")
-        stopSpeakingInternal()
-        pendingAfterTts = null
+        Log.i(LOG_TAG, "barge-in ($why): audio stopped, pending synthesis cancelled")
+        bargeInArmed.set(false)
+        cancelActiveReply(recordPartial = true)
+        isSpeaking.set(false)
         onPhase(CallPhase.Listening)
     }
 
@@ -436,54 +621,48 @@ class VoiceCallEngine(
             startListening()
             return
         }
+        cancelActiveReply(recordPartial = true)
         awaitingReply = true
         stopListeningInternal()
         onPhase(CallPhase.Thinking)
         onPartialText(cleaned)
+        val orKey = currentOpenRouterKey()
         val key = currentKey()
-        if (key == null) {
+        if (orKey == null && key == null) {
             val reply = ReplyGenerator.reply(cleaned, nicknameProvider())
             onReplyOrigin(ReplyOrigin.LocalNoKey)
-            speakReply(reply, LatencyMark(windowClosedAt, null, ReplySource.Local, lastSpeechAt))
+            startStaticReply(reply, Brain.Local, windowClosedAt, lastSpeechAt, ReplySource.Local, null)
             return
         }
         history.add(ChatTurn(ChatTurn.ROLE_USER, cleaned))
         while (history.size > MAX_HISTORY_TURNS) history.removeAt(0)
-        requestAi(key) { result ->
+        if (orKey != null) {
+            startOpenRouterReply(orKey, windowClosedAt, lastSpeechAt, isGreeting = false)
+            return
+        }
+        requestAi(key!!) { result ->
             when (result) {
                 is GeminiResult.Success -> {
                     history.add(ChatTurn(ChatTurn.ROLE_MODEL, result.text))
                     onReplyOrigin(ReplyOrigin.Ai)
-                    speakReply(
-                        result.text,
-                        LatencyMark(windowClosedAt, result.networkMs, ReplySource.Ai, lastSpeechAt)
-                    )
+                    startStaticReply(result.text, Brain.Gemini, windowClosedAt, lastSpeechAt, ReplySource.Ai, result.networkMs)
                 }
                 is GeminiResult.Failure -> {
                     Log.w(LOG_TAG, "AI reply failed: ${result.reason} (${result.networkMs}ms)")
                     // Drop the unanswered user turn; the user is asked to repeat it.
-                    while (history.lastOrNull()?.role == ChatTurn.ROLE_USER) {
-                        history.removeAt(history.size - 1)
-                    }
+                    dropTrailingUserTurns()
                     onReplyOrigin(ReplyOrigin.AiFailed(result.reason))
-                    speakReply(
-                        PersonaPrompt.RETRY_FALLBACK,
-                        LatencyMark(windowClosedAt, result.networkMs, ReplySource.Fallback, lastSpeechAt)
+                    startStaticReply(
+                        PersonaPrompt.RETRY_FALLBACK, Brain.Gemini, windowClosedAt, lastSpeechAt,
+                        ReplySource.Fallback, result.networkMs
                     )
                 }
             }
         }
     }
 
-    private fun speakReply(text: String, latency: LatencyMark) {
-        awaitingReply = false
-        speak(text, latency) {
-            if (running.get() && !isMuted()) startListening()
-        }
-    }
-
     /**
-     * Sends the current in-call [history] to Gemini off the main thread.
+     * Sends the current in-call [history] to Gemini off the main thread (Gemini-key mode).
      * [onResult] runs on the main thread, only if the call is still active and no newer
      * request superseded this one. Overall deadline: [GeminiClient.TIMEOUT_MS].
      */
@@ -621,17 +800,6 @@ class VoiceCallEngine(
         }
         recognizer = null
         isListening.set(false)
-    }
-
-    private fun destroyTts() {
-        try {
-            tts?.stop()
-            tts?.shutdown()
-        } catch (_: Exception) {
-        }
-        tts = null
-        ttsReady.set(false)
-        isSpeaking.set(false)
     }
 
     companion object {

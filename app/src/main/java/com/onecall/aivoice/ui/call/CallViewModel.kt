@@ -26,12 +26,16 @@ data class CallUiState(
     val partialText: String = "",
     val errorMessage: String? = null,
     val ended: Boolean = false,
-    /** Small latency label, e.g. "응답 1.8초 · 모델 1.2초". */
+    /** Small latency label, e.g. "첫 소리까지 1.9초 · 모델 첫 문장 0.7초 · 음성 1.2초". */
     val latencyText: String? = null,
-    /** True when no Gemini key is set (local fallback replies). */
+    /** True when no key (OpenRouter or Gemini) is set (local fallback replies). */
     val aiKeyMissing: Boolean = false,
     /** Source of the last spoken reply: "AI 대답" / "기본 대답(키 없음)" / "AI 실패: …". */
-    val replySourceText: String? = null
+    val replySourceText: String? = null,
+    /** Brain + voice, e.g. "google/gemini-3.5-flash-lite · 목소리 2번 Puck". */
+    val voiceInfoText: String? = null,
+    /** "음성 실패: <사유> → 기본 음성" when a sentence fell back to the built-in TTS. */
+    val voiceFailureText: String? = null
 )
 
 class CallViewModel(application: Application) : AndroidViewModel(application) {
@@ -49,8 +53,16 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         callStartedAt = SystemClock.elapsedRealtime()
         startTimer()
         // Fresh read at call start (UI hint); the engine re-reads the key at every request.
-        val keySet = prefs.geminiApiKey != null
-        _ui.update { it.copy(aiKeyMissing = !keySet, latencyText = null, replySourceText = null) }
+        val keySet = prefs.openRouterApiKey != null || prefs.geminiApiKey != null
+        _ui.update {
+            it.copy(
+                aiKeyMissing = !keySet,
+                latencyText = null,
+                replySourceText = null,
+                voiceInfoText = null,
+                voiceFailureText = null
+            )
+        }
         engine = VoiceCallEngine(
             context = getApplication(),
             nicknameProvider = { prefs.nickname },
@@ -59,6 +71,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             onErrorMessage = { msg -> _ui.update { it.copy(errorMessage = msg) } },
             isMuted = { _ui.value.muted },
             apiKeyProvider = { prefs.geminiApiKey },
+            openRouterKeyProvider = { prefs.openRouterApiKey },
+            voiceProvider = { prefs.ttsVoice },
             onLatency = { latency -> _ui.update { it.copy(latencyText = formatLatency(latency)) } },
             onReplyOrigin = { origin ->
                 _ui.update {
@@ -67,7 +81,9 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                         aiKeyMissing = origin is ReplyOrigin.LocalNoKey
                     )
                 }
-            }
+            },
+            onVoiceInfo = { info -> _ui.update { it.copy(voiceInfoText = info) } },
+            onVoiceFailure = { failure -> _ui.update { it.copy(voiceFailureText = failure) } }
         ).also { it.start() }
     }
 
@@ -112,10 +128,13 @@ fun formatElapsed(ms: Long): String {
 }
 
 fun formatLatency(latency: ReplyLatency): String {
-    val total = "응답 %.1f초".format(latency.totalMs / 1000.0)
-    return when (latency.source) {
-        ReplySource.Ai -> latency.networkMs?.let { "$total · 모델 %.1f초".format(it / 1000.0) } ?: total
-        ReplySource.Local -> "$total · 기본 응답"
-        ReplySource.Fallback -> "$total · AI 응답 실패"
+    fun sec(ms: Long) = "%.1f초".format(ms / 1000.0)
+    val parts = mutableListOf("첫 소리까지 ${sec(latency.firstSoundMs)}")
+    when (latency.source) {
+        ReplySource.Ai -> latency.modelMs?.let { parts.add("모델 ${sec(it)}") }
+        ReplySource.Local -> parts.add("기본 응답")
+        ReplySource.Fallback -> parts.add("AI 응답 실패")
     }
+    latency.voiceMs?.let { parts.add("음성 ${sec(it)}") }
+    return parts.joinToString(" · ")
 }
