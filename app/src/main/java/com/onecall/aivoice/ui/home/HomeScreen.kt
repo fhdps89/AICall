@@ -1,5 +1,24 @@
 package com.onecall.aivoice.ui.home
 
+import android.widget.Toast
+import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalTextToolbar
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.window.PopupProperties
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -295,22 +314,10 @@ private fun ApiKeySection(
             )
         }
         if (key.editing) {
-            OutlinedTextField(
+            ApiKeyInputRow(
                 value = key.draft,
                 onValueChange = { viewModel.updateApiKeyDraft(kind, it) },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                label = { Text(inputLabel) },
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = HerAmber,
-                    unfocusedBorderColor = HerTextDim,
-                    focusedLabelColor = HerAmber,
-                    cursorColor = HerAmber,
-                    focusedTextColor = HerText,
-                    unfocusedTextColor = HerText
-                )
+                label = inputLabel
             )
             Spacer(Modifier.height(4.dp))
             Text(
@@ -365,6 +372,98 @@ private fun ApiKeySection(
                 },
                 modifier = Modifier.padding(vertical = 4.dp)
             )
+        }
+    }
+}
+
+/**
+ * Key input + 「붙여넣기」 button + show/hide eye toggle.
+ * Long-press paste uses [KeyFieldTextToolbar] because the platform paste toolbar can't appear
+ * inside the ModalBottomSheet window. The key value is never logged.
+ */
+@Composable
+private fun ApiKeyInputRow(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String
+) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    val toolbar = remember { KeyFieldTextToolbar() }
+    var visible by rememberSaveable { mutableStateOf(false) }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(modifier = Modifier.weight(1f)) {
+            CompositionLocalProvider(LocalTextToolbar provides toolbar) {
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = onValueChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text(label) },
+                    visualTransformation = if (visible) VisualTransformation.None else PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Password,
+                        autoCorrect = false
+                    ),
+                    trailingIcon = {
+                        IconButton(onClick = { visible = !visible }) {
+                            Icon(
+                                imageVector = if (visible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                contentDescription = if (visible) "키 숨기기" else "키 보기",
+                                tint = HerTextDim
+                            )
+                        }
+                    },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = HerAmber,
+                        unfocusedBorderColor = HerTextDim,
+                        focusedLabelColor = HerAmber,
+                        cursorColor = HerAmber,
+                        focusedTextColor = HerText,
+                        unfocusedTextColor = HerText
+                    )
+                )
+            }
+            val actions = toolbar.actions
+            DropdownMenu(
+                expanded = actions != null,
+                onDismissRequest = { toolbar.hide() },
+                // Not focusable: keeps focus (and the selection) in the text field.
+                properties = PopupProperties(focusable = false)
+            ) {
+                actions?.onPaste?.let { paste ->
+                    DropdownMenuItem(
+                        text = { Text("붙여넣기") },
+                        onClick = { toolbar.hide(); paste() }
+                    )
+                }
+                actions?.onCut?.let { cut ->
+                    DropdownMenuItem(text = { Text("잘라내기") }, onClick = { toolbar.hide(); cut() })
+                }
+                actions?.onCopy?.let { copy ->
+                    DropdownMenuItem(text = { Text("복사") }, onClick = { toolbar.hide(); copy() })
+                }
+                actions?.onSelectAll?.let { selectAll ->
+                    DropdownMenuItem(text = { Text("전체 선택") }, onClick = { selectAll() })
+                }
+            }
+        }
+        Spacer(Modifier.width(4.dp))
+        TextButton(
+            onClick = {
+                val pasted = clipboard.getText()?.text?.trim().orEmpty()
+                if (pasted.isEmpty()) {
+                    Toast.makeText(context, "복사된 내용이 없어요", Toast.LENGTH_SHORT).show()
+                } else {
+                    onValueChange(pasted)
+                }
+            }
+        ) {
+            Text("붙여넣기", color = HerAmber)
         }
     }
 }
