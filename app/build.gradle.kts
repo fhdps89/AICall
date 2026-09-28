@@ -11,7 +11,7 @@ android {
         applicationId = "com.onecall.aivoice"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
+        versionCode = 2
         versionName = "1.0.0-stage1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -19,7 +19,33 @@ android {
         }
     }
 
+    // Fixed signing key for CI builds (so new APKs install over old ones).
+    // Values come only from environment variables set by CI from GitHub Secrets;
+    // without them, the default local debug keystore is used.
+    val ciKeystoreFile = System.getenv("AICALL_KEYSTORE_FILE")
+    val ciStorePassword = System.getenv("AICALL_STORE_PASSWORD")
+    val ciKeyAlias = System.getenv("AICALL_KEY_ALIAS")
+    val ciKeyPassword = System.getenv("AICALL_KEY_PASSWORD")
+    val hasCiSigning = listOf(ciKeystoreFile, ciStorePassword, ciKeyAlias, ciKeyPassword)
+        .all { !it.isNullOrBlank() } && file(ciKeystoreFile!!).exists()
+
+    signingConfigs {
+        if (hasCiSigning) {
+            create("ci") {
+                storeFile = file(ciKeystoreFile!!)
+                storePassword = ciStorePassword
+                keyAlias = ciKeyAlias
+                keyPassword = ciKeyPassword
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            if (hasCiSigning) {
+                signingConfig = signingConfigs.getByName("ci")
+            }
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
