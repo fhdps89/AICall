@@ -1,0 +1,8 @@
+{
+  "name": "오늘도 한 통 (One Call Today)",
+  "description": "어두운 따뜻한 HER 톤의 빛나는 오브와 실시간 한국어 AI 음성 통화 루프",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,68 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --her-bg: #1A1210;
+    --her-bg-soft: #241A17;
+    --her-amber: #E8A87C;
+    --her-amber-dim: rgba(232, 168, 124, 0.6);
+    --her-glow: rgba(255, 176, 122, 0.4);
+    --her-text: #F5EDE6;
+    --her-text-dim: rgba(245, 237, 230, 0.6);
+    --her-danger: #E07070;
+    --her-surface: #2A1F1B;
+  }
+
+  body {
+    background-color: var(--her-bg);
+    color: var(--her-text);
+    font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, Roboto, sans-serif;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+@keyframes orb-pulse-idle {
+  0%, 100% {
+    transform: scale(0.92);
+    opacity: 0.65;
+  }
+  50% {
+    transform: scale(1.05);
+    opacity: 0.85;
+  }
+}
+
+@keyframes orb-pulse-listening {
+  0%, 100% {
+    transform: scale(0.95);
+    opacity: 0.75;
+  }
+  50% {
+    transform: scale(1.12);
+    opacity: 0.95;
+  }
+}
+
+@keyframes orb-pulse-speaking {
+  0%, 100% {
+    transform: scale(0.96);
+    opacity: 0.85;
+  }
+  50% {
+    transform: scale(1.18);
+    opacity: 1;
+  }
+}
+
+.animate-orb-idle {
+  animation: orb-pulse-idle 2.8s ease-in-out infinite;
+}
+
+.animate-orb-listening {
+  animation: orb-pulse-listening 1.4s ease-in-out infinite;
+}
+
+.animate-orb-speaking {
+  animation: orb-pulse-speaking 0.9s ease-in-out infinite;
+}
