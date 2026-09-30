@@ -4,8 +4,9 @@
 
 ---
 
-## 🚀 모델 스펙 (v1.2.1)
+## 🚀 모델 스펙 (v1.2.1 · 2026-10-01 KST 기준)
 - **실시간 음성 대화 (Live API)**: `gemini-2.5-flash-native-audio-latest` (16kHz PCM 스트리밍, ~300ms 초저지연)
+
 - **텍스트 대화 엔진 (HTTP 폴백)**: `gemini-3.8-flash`
 - **고품질 음성 합성 (TTS 폴백)**: `gemini-3.8-flash-lite-tts` (24kHz WAV)
 - **음성 인식/전사 백업 (STT 폴백)**: `gemini-3.5-transcribe`
