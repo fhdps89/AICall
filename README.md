@@ -103,6 +103,17 @@ npm run start
 
 ## 📝 변경 이력 (Changelog)
 
+### v1.1.1 (2026-09-30)
+- **오디오 다운샘플링 왜곡(1/3배속 슬로모션) 해결**:
+  - `downsampleTo16kHz` 선형 보간 알고리즘을 도입하여 48kHz/44.1kHz 기기 환경에서도 왜곡 없는 정밀 16,000Hz PCM 음성 스트리밍 보장
+- **WebSpeech 환청 텍스트 하이재킹 차단**:
+  - 브라우저 음성 인식이 발생시킨 오인식 텍스트("치과", "사랑해" 등)가 Live WebSocket으로 `text_prompt`로 주입되던 구조적 결함 제거
+  - Gemini Live가 순수 마이크 음성만을 듣고 정확하게 답변하도록 단일 오디오 소스 파이프라인 정립
+- **에코 방지 마이크 게이트(Echo Suppression Gate)**:
+  - AI 발화 중 마이크 오디오 전송을 일시 차단하여 스피커 하울링 및 재유입 방지
+- **상세 진단 보고서 작성**:
+  - 외부 전문가 공유 및 아키텍처 분석용 `DIAGNOSIS_AND_SOLUTIONS.md` 생성
+
 ### v1.1.0 (2026-09-30)
 - **Gemini 2.5 Flash Native Audio Dialog 정식 연동**:
   - Google AI Studio Tier 1 Live API 모델 식별자(`gemini-2.5-flash-native-audio-latest`)로 매핑 수정 및 연결 성공

@@ -46,6 +46,33 @@ interface WebSpeechRecognition {
   onresult: ((event: SpeechRecognitionEventLike) => void) | null;
 }
 
+function downsampleTo16kHz(inputBuffer: Float32Array, inputSampleRate: number): Int16Array {
+  if (inputSampleRate === 16000) {
+    const pcm16 = new Int16Array(inputBuffer.length);
+    for (let i = 0; i < inputBuffer.length; i++) {
+      const s = Math.max(-1, Math.min(1, inputBuffer[i]));
+      pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    return pcm16;
+  }
+
+  const ratio = inputSampleRate / 16000;
+  const newLength = Math.round(inputBuffer.length / ratio);
+  const pcm16 = new Int16Array(newLength);
+
+  for (let i = 0; i < newLength; i++) {
+    const srcIndex = i * ratio;
+    const lower = Math.floor(srcIndex);
+    const upper = Math.min(lower + 1, inputBuffer.length - 1);
+    const weight = srcIndex - lower;
+    const interpolated = inputBuffer[lower] * (1 - weight) + inputBuffer[upper] * weight;
+    const s = Math.max(-1, Math.min(1, interpolated));
+    pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+
+  return pcm16;
+}
+
 export type MicStatus = 'requesting' | 'active' | 'denied' | 'unsupported';
 
 export interface VoiceCallEngineCallbacks {
@@ -343,7 +370,7 @@ export class VoiceCallEngine {
   private setupLiveMicStreaming(stream: MediaStream): void {
     try {
       const AudioCtxClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      const pcmCtx = new AudioCtxClass({ sampleRate: 16000 });
+      const pcmCtx = new AudioCtxClass(); // Capture at hardware native rate to prevent browser glitch
       this.pcmCaptureCtx = pcmCtx;
 
       const source = pcmCtx.createMediaStreamSource(stream);
@@ -353,15 +380,13 @@ export class VoiceCallEngine {
       processor.connect(pcmCtx.destination);
 
       processor.onaudioprocess = (e) => {
+        // Echo gate: never stream mic input while AI is speaking or muted
         if (!this.isRunning || this.isMutedProvider() || this.isSpeaking) return;
         if (!this.liveConnected || !this.liveWs || this.liveWs.readyState !== WebSocket.OPEN) return;
 
         const inputData = e.inputBuffer.getChannelData(0);
-        const pcm16 = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          const s = Math.max(-1, Math.min(1, inputData[i]));
-          pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-        }
+        const actualSampleRate = e.inputBuffer.sampleRate || pcmCtx.sampleRate || 48000;
+        const pcm16 = downsampleTo16kHz(inputData, actualSampleRate);
 
         const bytes = new Uint8Array(pcm16.buffer);
         let binary = '';
@@ -781,7 +806,7 @@ export class VoiceCallEngine {
     this.processUserUtterance(text, now, lastFinalAt);
   }
 
-  injectUserSpeech(text: string): void {
+  injectUserSpeech(text: string, isManualInput = true): void {
     if (!this.isRunning || this.isMutedProvider()) return;
     const cleaned = text.trim();
     if (!cleaned) return;
@@ -790,6 +815,18 @@ export class VoiceCallEngine {
       this.triggerBargeIn('manual user input');
     }
     const now = performance.now();
+
+    if (this.liveConnected && this.liveWs && this.liveWs.readyState === WebSocket.OPEN && isManualInput) {
+      this.callbacks.onPhase('Thinking');
+      this.callbacks.onPartialText(cleaned);
+      this.history.push({ role: 'user', text: cleaned });
+      this.liveWs.send(JSON.stringify({
+        type: 'text_prompt',
+        text: cleaned,
+      }));
+      return;
+    }
+
     this.acceptFinal(cleaned, now);
   }
 
@@ -798,6 +835,16 @@ export class VoiceCallEngine {
     const cleaned = text.trim();
     if (!cleaned) {
       this.startListening();
+      return;
+    }
+
+    // In Gemini Live mode:
+    // The user's voice has ALREADY been streamed in high-fidelity 16kHz PCM to Gemini Live.
+    // WebSpeech is only for local visual feedback so user sees what was recognized.
+    // NEVER send WebSpeech's phonetic guesses to liveWs as text_prompt, as that causes
+    // catastrophic hallucinations (e.g. "왜 이렇게 시차가 나지" -> "치과")!
+    if (this.liveConnected && this.liveWs && this.liveWs.readyState === WebSocket.OPEN) {
+      this.callbacks.onPartialText(cleaned);
       return;
     }
 
@@ -814,14 +861,6 @@ export class VoiceCallEngine {
     this.history.push({ role: 'user', text: cleaned });
     while (this.history.length > VoiceCallEngine.MAX_HISTORY_TURNS) {
       this.history.shift();
-    }
-
-    if (this.liveConnected && this.liveWs && this.liveWs.readyState === WebSocket.OPEN) {
-      this.liveWs.send(JSON.stringify({
-        type: 'text_prompt',
-        text: cleaned,
-      }));
-      return;
     }
 
     if (this.currentBrain === 'OpenRouter' && orKey) {
