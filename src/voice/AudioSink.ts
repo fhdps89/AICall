@@ -22,6 +22,23 @@ export class PcmAudioSink {
     this.channels = channels;
   }
 
+  unlock(): void {
+    try {
+      const ctx = this.ensureAudioContext();
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
+      // Play a 1-sample silent buffer to forcefully unlock mobile audio
+      const silentBuffer = ctx.createBuffer(1, 1, 24000);
+      const source = ctx.createBufferSource();
+      source.buffer = silentBuffer;
+      source.connect(ctx.destination);
+      source.start(0);
+    } catch {
+      // ignore
+    }
+  }
+
   private ensureAudioContext(): AudioContext {
     if (!this.audioCtx || this.audioCtx.state === 'closed') {
       const AudioCtxClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
@@ -75,6 +92,47 @@ export class PcmAudioSink {
         }
       }, delayMs);
     }
+  }
+
+  async playAudioBuffer(arrayBuffer: ArrayBuffer): Promise<number> {
+    if (this.isStopped) return 0;
+    const ctx = this.ensureAudioContext();
+    if (ctx.state === 'suspended') {
+      await ctx.resume().catch(() => {});
+    }
+    // Clone arrayBuffer because decodeAudioData detaches it
+    const copy = arrayBuffer.slice(0);
+    const audioBuffer = await ctx.decodeAudioData(copy);
+    if (this.isStopped) return 0;
+
+    const source = ctx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(ctx.destination);
+
+    const now = ctx.currentTime;
+    const startTime = Math.max(now, this.nextPlayTime);
+    source.start(startTime);
+    this.nextPlayTime = startTime + audioBuffer.duration;
+
+    this.activeSources.push(source);
+    source.onended = () => {
+      const idx = this.activeSources.indexOf(source);
+      if (idx !== -1) {
+        this.activeSources.splice(idx, 1);
+      }
+    };
+
+    if (!this.hasReportedFirstSound) {
+      this.hasReportedFirstSound = true;
+      const delayMs = Math.max(0, (startTime - now) * 1000);
+      setTimeout(() => {
+        if (!this.isStopped) {
+          this.onPlaybackStart?.();
+        }
+      }, delayMs);
+    }
+
+    return audioBuffer.duration;
   }
 
   stop(): void {

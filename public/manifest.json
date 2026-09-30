@@ -1,0 +1,18 @@
+{
+  "name": "오늘도 한 통",
+  "short_name": "오늘도 한 통",
+  "description": "어두운 따뜻한 HER 톤의 빛나는 오브와 실시간 한국어 AI 음성 통화 루프",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1A1210",
+  "theme_color": "#1A1210",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

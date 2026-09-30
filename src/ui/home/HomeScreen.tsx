@@ -43,9 +43,12 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ onStartCall }) => {
         />
 
         <div className="mt-7 text-center">
-          <p className="text-base text-[#F5EDE6]/60 font-medium">
-            지금 목소리: <span className="text-[#E8A87C]">{voiceName}</span>
-          </p>
+          <button
+            onClick={() => setSettingsOpen(true)}
+            className="px-4 py-2 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 active:scale-95 transition text-sm text-[#F5EDE6]/80 cursor-pointer"
+          >
+            지금 목소리: <span className="text-[#E8A87C] font-semibold">{voiceName}</span>
+          </button>
         </div>
       </div>
 

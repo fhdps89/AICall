@@ -12,15 +12,18 @@ export class UtteranceWindow {
   }
 
   get hasContent(): boolean {
-    return this.segments.length > 0;
+    return this.segments.length > 0 || Boolean(this.pendingPartial && this.pendingPartial.length > 0);
   }
 
   onFinal(text: string, now: number): void {
     const t = text.trim();
     this.pendingPartial = null;
     if (t.length > 0) {
-      this.segments.push(t);
-      this.lastFinalAt = now;
+      const last = this.segments[this.segments.length - 1];
+      if (!last || (last !== t && !last.endsWith(t))) {
+        this.segments.push(t);
+        this.lastFinalAt = now;
+      }
     }
     if (this.segments.length > 0) {
       this.extendTo(now + this.windowMs);
@@ -28,12 +31,11 @@ export class UtteranceWindow {
   }
 
   onPartial(text: string, now: number): void {
-    if (this.segments.length === 0) return;
     const t = text.trim();
     if (t.length > 0) {
       this.pendingPartial = t;
+      this.extendTo(now + this.windowMs);
     }
-    this.extendTo(now + this.windowMs);
   }
 
   onActivity(now: number): void {
@@ -43,13 +45,13 @@ export class UtteranceWindow {
 
   isDue(now: number): boolean {
     if (this.deadline === null) return false;
-    return this.segments.length > 0 && now >= this.deadline;
+    return this.hasContent && now >= this.deadline;
   }
 
   displayText(partial?: string | null): string {
     const p = (partial ?? this.pendingPartial)?.trim();
     const parts = [...this.segments];
-    if (p && p.length > 0) {
+    if (p && p.length > 0 && !parts.includes(p)) {
       parts.push(p);
     }
     return parts.join(' ');
@@ -58,7 +60,7 @@ export class UtteranceWindow {
   take(): string {
     const text = this.displayText(this.pendingPartial);
     this.reset();
-    return text;
+    return text.trim();
   }
 
   reset(): void {

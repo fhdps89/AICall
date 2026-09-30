@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
-import { Eye, EyeOff, X, Check } from 'lucide-react';
-import { UserPreferences } from '../../data/UserPreferences';
-import { TtsVoiceOption } from '../../types';
+import React, { useState, useRef, useEffect } from 'react';
+import { Eye, EyeOff, X, Check, Sparkles, Volume2, Play, Square, Loader2 } from 'lucide-react';
+import { UserPreferences, AiEngineMode } from '../../data/UserPreferences';
+import { TtsVoiceOption, VoiceGender, TtsVoice } from '../../types';
 import { TTS_VOICE_LIST, getTtsVoice } from '../../voice/TtsVoice';
 import { GeminiClient } from '../../voice/GeminiClient';
 import { OpenRouterClient } from '../../voice/OpenRouterClient';
@@ -16,13 +16,8 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({ isOpen, onClose, o
   const [nickname, setNickname] = useState(UserPreferences.getNickname());
   const [nicknameSavedNotice, setNicknameSavedNotice] = useState(false);
 
-  // OpenRouter state
-  const [orKey, setOrKey] = useState(UserPreferences.getOpenRouterApiKey() || '');
-  const [orEditing, setOrEditing] = useState(false);
-  const [orDraft, setOrDraft] = useState('');
-  const [orVisible, setOrVisible] = useState(false);
-  const [orTesting, setOrTesting] = useState(false);
-  const [orTestResult, setOrTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+  // Engine mode
+  const [engineMode, setEngineMode] = useState<AiEngineMode>(UserPreferences.getPreferredEngine());
 
   // Gemini state
   const [geminiKey, setGeminiKey] = useState(UserPreferences.getGeminiApiKey() || '');
@@ -32,12 +27,54 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({ isOpen, onClose, o
   const [geminiTesting, setGeminiTesting] = useState(false);
   const [geminiTestResult, setGeminiTestResult] = useState<{ ok: boolean; text: string } | null>(null);
 
-  // Voice choice
+  // OpenRouter state
+  const [orKey, setOrKey] = useState(UserPreferences.getOpenRouterApiKey() || '');
+  const [orEditing, setOrEditing] = useState(false);
+  const [orDraft, setOrDraft] = useState('');
+  const [orVisible, setOrVisible] = useState(false);
+  const [orTesting, setOrTesting] = useState(false);
+  const [orTestResult, setOrTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // Voice choice & gender filter
   const [selectedVoice, setSelectedVoice] = useState<TtsVoiceOption>(UserPreferences.getTtsVoiceOption());
+  const [genderFilter, setGenderFilter] = useState<'all' | VoiceGender>('all');
+  const [previewingVoice, setPreviewingVoice] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Stop preview audio when sheet closes or unmounts
+  useEffect(() => {
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleStopPreview = () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+    setPreviewingVoice(null);
+    setPreviewLoading(null);
+  };
+
+  const handleClose = () => {
+    handleStopPreview();
+    onClose();
+  };
 
   if (!isOpen) return null;
 
-  const currentVoiceName = UserPreferences.getVoiceDisplayName();
+  const currentVoice = getTtsVoice(selectedVoice);
+
+  const handleSelectEngine = (mode: AiEngineMode) => {
+    setEngineMode(mode);
+    UserPreferences.setPreferredEngine(mode);
+    onSaved();
+  };
 
   const handleSaveNickname = () => {
     UserPreferences.setNickname(nickname);
@@ -50,6 +87,77 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({ isOpen, onClose, o
     setSelectedVoice(opt);
     UserPreferences.setTtsVoiceOption(opt);
     onSaved();
+  };
+
+  // Preview voice sample via Gemini 3.8 Flash-Lite TTS
+  const handlePlayPreview = async (e: React.MouseEvent, voice: TtsVoice) => {
+    e.stopPropagation();
+
+    // If already playing this voice, stop it
+    if (previewingVoice === voice.option) {
+      handleStopPreview();
+      return;
+    }
+
+    handleStopPreview();
+    setPreviewLoading(voice.option);
+
+    try {
+      const apiKey = geminiKey.trim() || undefined;
+      const res = await GeminiClient.executeTts(voice.sampleText, voice.voice, apiKey);
+      if (!res || !res.audioBase64) {
+        throw new Error('음성 데이터 생성 실패');
+      }
+
+      const mimeType = res.mimeType || 'audio/wav';
+      const audio = new Audio(`data:${mimeType};base64,${res.audioBase64}`);
+      audioRef.current = audio;
+
+      audio.onended = () => {
+        setPreviewingVoice(null);
+        setPreviewLoading(null);
+        audioRef.current = null;
+      };
+
+      audio.onerror = () => {
+        setPreviewingVoice(null);
+        setPreviewLoading(null);
+        audioRef.current = null;
+      };
+
+      setPreviewLoading(null);
+      setPreviewingVoice(voice.option);
+      await audio.play();
+    } catch {
+      handleStopPreview();
+    }
+  };
+
+  // Gemini key actions
+  const handleSaveGeminiKey = () => {
+    UserPreferences.setGeminiApiKey(geminiDraft);
+    setGeminiKey(UserPreferences.getGeminiApiKey() || '');
+    setGeminiEditing(false);
+    setGeminiDraft('');
+    setGeminiTestResult(null);
+    onSaved();
+  };
+
+  const handleClearGeminiKey = () => {
+    UserPreferences.setGeminiApiKey(null);
+    setGeminiKey('');
+    setGeminiEditing(false);
+    setGeminiDraft('');
+    setGeminiTestResult(null);
+    onSaved();
+  };
+
+  const handleTestGeminiKey = async (keyToTest: string) => {
+    setGeminiTesting(true);
+    setGeminiTestResult(null);
+    const res = await GeminiClient.testKey(keyToTest);
+    setGeminiTesting(false);
+    setGeminiTestResult({ ok: res.ok, text: res.label });
   };
 
   // OpenRouter key actions
@@ -80,46 +188,29 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({ isOpen, onClose, o
     setOrTestResult({ ok: res.ok, text: res.label });
   };
 
-  // Gemini key actions
-  const handleSaveGeminiKey = () => {
-    UserPreferences.setGeminiApiKey(geminiDraft);
-    setGeminiKey(UserPreferences.getGeminiApiKey() || '');
-    setGeminiEditing(false);
-    setGeminiDraft('');
-    setGeminiTestResult(null);
-    onSaved();
-  };
-
-  const handleClearGeminiKey = () => {
-    UserPreferences.setGeminiApiKey(null);
-    setGeminiKey('');
-    setGeminiEditing(false);
-    setGeminiDraft('');
-    setGeminiTestResult(null);
-    onSaved();
-  };
-
-  const handleTestGeminiKey = async (keyToTest: string) => {
-    setGeminiTesting(true);
-    setGeminiTestResult(null);
-    const res = await GeminiClient.testKey(keyToTest);
-    setGeminiTesting(false);
-    setGeminiTestResult({ ok: res.ok, text: res.label });
-  };
+  const filteredVoices = TTS_VOICE_LIST.filter((v) => {
+    if (genderFilter === 'all') return true;
+    return v.gender === genderFilter;
+  });
 
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm transition-opacity">
       <div
-        className="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-t-3xl sm:rounded-3xl bg-[#2A1F1B] text-[#F5EDE6] p-6 shadow-2xl border border-white/5"
+        className="w-full max-w-lg max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-3xl bg-[#2A1F1B] text-[#F5EDE6] p-6 shadow-2xl border border-white/5"
         role="dialog"
         aria-modal="true"
       >
         {/* Header */}
-        <div className="flex items-center justify-between pb-4 border-b border-white/10">
-          <h2 className="text-xl font-bold tracking-tight text-[#F5EDE6]">설정</h2>
+        <div className="flex items-center justify-between pb-4 border-b border-white/10 sticky top-0 bg-[#2A1F1B]/95 backdrop-blur z-10">
+          <div className="flex items-center gap-2">
+            <h2 className="text-xl font-bold tracking-tight text-[#F5EDE6]">통화 설정</h2>
+            <span className="text-[11px] px-2 py-0.5 rounded-full bg-[#E8A87C]/15 text-[#E8A87C] font-medium">
+              Gemini 2.5 Flash Native Audio
+            </span>
+          </div>
           <button
-            onClick={onClose}
-            className="p-1 rounded-full text-[#F5EDE6]/60 hover:text-[#F5EDE6] hover:bg-white/5 transition-colors"
+            onClick={handleClose}
+            className="p-1 rounded-full text-[#F5EDE6]/60 hover:text-[#F5EDE6] hover:bg-white/5 transition-colors cursor-pointer"
             aria-label="닫기"
           >
             <X size={22} />
@@ -127,28 +218,56 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({ isOpen, onClose, o
         </div>
 
         <div className="py-4 space-y-6">
-          {/* Current Voice */}
-          <div>
-            <div className="text-sm text-[#F5EDE6]/60">지금 목소리</div>
-            <div className="text-base font-semibold text-[#E8A87C] mt-1">{currentVoiceName}</div>
+          {/* Active Voice Summary */}
+          <div className="p-3.5 rounded-2xl bg-[#E8A87C]/10 border border-[#E8A87C]/25 flex items-center justify-between">
+            <div className="space-y-0.5">
+              <div className="text-[11px] font-semibold text-[#E8A87C] uppercase tracking-wider flex items-center gap-1.5">
+                <Volume2 size={13} />
+                현재 선택된 목소리 & 캐릭터
+              </div>
+              <div className="text-sm font-bold text-[#F5EDE6]">
+                {currentVoice.name} · <span className="text-[#E8A87C]">{currentVoice.vibe}</span>
+              </div>
+              <div className="text-xs text-[#F5EDE6]/60">
+                {currentVoice.gender === 'female' ? '여성' : '남성'} · Gemini 2.5 Flash Native Audio
+              </div>
+            </div>
+            <button
+              onClick={(e) => handlePlayPreview(e, currentVoice)}
+              className="px-3 py-1.5 rounded-xl bg-[#E8A87C] text-[#1A1210] text-xs font-bold hover:bg-[#d8976b] transition active:scale-95 flex items-center gap-1 shadow cursor-pointer shrink-0"
+            >
+              {previewLoading === currentVoice.option ? (
+                <Loader2 size={13} className="animate-spin" />
+              ) : previewingVoice === currentVoice.option ? (
+                <>
+                  <Square size={12} className="fill-current" />
+                  정지
+                </>
+              ) : (
+                <>
+                  <Play size={12} className="fill-current" />
+                  미리듣기
+                </>
+              )}
+            </button>
           </div>
 
-          {/* Nickname */}
+          {/* Nickname Setting */}
           <div className="space-y-2">
             <label className="block text-sm font-medium text-[#F5EDE6]/80">
-              호칭 (AI가 부를 이름)
+              호칭 (AI가 나를 부를 이름)
             </label>
             <div className="flex gap-2">
               <input
                 type="text"
                 value={nickname}
                 onChange={(e) => setNickname(e.target.value)}
-                placeholder="예: 민수, 엄마, 친구"
-                className="flex-1 px-4 py-2.5 rounded-xl bg-[#1A1210] border border-[#F5EDE6]/20 text-[#F5EDE6] placeholder-[#F5EDE6]/30 focus:outline-none focus:border-[#E8A87C] transition-colors"
+                placeholder="예: 민수, 지은, 친구"
+                className="flex-1 px-4 py-2.5 rounded-xl bg-[#1A1210] border border-[#F5EDE6]/20 text-[#F5EDE6] placeholder-[#F5EDE6]/30 focus:outline-none focus:border-[#E8A87C] transition-colors text-sm"
               />
               <button
                 onClick={handleSaveNickname}
-                className="px-5 py-2.5 rounded-xl bg-[#E8A87C] text-[#1A1210] font-medium hover:bg-[#d8976b] active:scale-95 transition"
+                className="px-5 py-2.5 rounded-xl bg-[#E8A87C] text-[#1A1210] text-sm font-semibold hover:bg-[#d8976b] active:scale-95 transition cursor-pointer"
               >
                 저장
               </button>
@@ -162,312 +281,277 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({ isOpen, onClose, o
 
           <div className="border-t border-white/10" />
 
-          {/* OpenRouter Key Section */}
-          <div className="space-y-2">
-            <div
-              className={`p-3 rounded-xl bg-[#1A1210]/60 border border-white/5 ${
-                !orEditing ? 'cursor-pointer hover:bg-white/5 transition-colors' : ''
-              }`}
-              onClick={() => {
-                if (!orEditing) {
-                  setOrDraft(orKey);
-                  setOrEditing(true);
-                }
-              }}
-            >
-              <div className="text-sm font-medium text-[#F5EDE6]/70">
-                AI 키 설정 (테스트용) · OpenRouter
-              </div>
-              <div className="text-sm font-semibold text-[#E8A87C] mt-0.5">
-                {orKey ? UserPreferences.maskKey(orKey) : '설정 안 됨 · 누르면 입력'}
-              </div>
-              <div className="text-xs text-[#F5EDE6]/50 mt-1">
-                대화: {OpenRouterClient.CHAT_MODEL} · 목소리도 이 키로
+          {/* Voice & Persona Selection */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-sm font-bold text-[#F5EDE6] flex items-center gap-1.5">
+                  <Volume2 size={16} className="text-[#E8A87C]" />
+                  AI 목소리 및 성별/분위기 선택
+                </div>
+                <div className="text-xs text-[#F5EDE6]/50 mt-0.5">
+                  목소리 톤에 맞춰 AI의 말투와 대화 성격도 자동으로 어우러집니다.
+                </div>
               </div>
             </div>
 
-            {orEditing ? (
-              <div className="p-3 rounded-xl bg-[#1A1210] border border-[#E8A87C]/40 space-y-3 mt-2">
-                <div className="relative flex items-center">
-                  <input
-                    type={orVisible ? 'text' : 'password'}
-                    value={orDraft}
-                    onChange={(e) => setOrDraft(e.target.value)}
-                    placeholder="OpenRouter 키 붙여넣기 (sk-or-…)"
-                    className="w-full px-3 py-2 pr-20 rounded-lg bg-[#241A17] border border-white/10 text-sm text-[#F5EDE6] focus:outline-none focus:border-[#E8A87C]"
-                  />
-                  <div className="absolute right-2 flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => setOrVisible(!orVisible)}
-                      className="p-1 text-[#F5EDE6]/50 hover:text-[#F5EDE6]"
-                      title={orVisible ? '키 숨기기' : '키 보기'}
-                    >
-                      {orVisible ? <EyeOff size={16} /> : <Eye size={16} />}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        try {
-                          const text = await navigator.clipboard.readText();
-                          if (text) setOrDraft(text.trim());
-                        } catch {
-                          // Clipboard permission
-                        }
-                      }}
-                      className="text-xs px-2 py-1 rounded bg-[#E8A87C]/20 text-[#E8A87C] hover:bg-[#E8A87C]/30"
-                    >
-                      붙여넣기
-                    </button>
-                  </div>
-                </div>
-
-                <p className="text-xs text-[#F5EDE6]/50">키는 이 기기(브라우저)에만 저장됩니다.</p>
-
-                <div className="flex justify-end gap-2 text-xs">
-                  <button
-                    onClick={() => {
-                      setOrEditing(false);
-                      setOrDraft('');
-                    }}
-                    className="px-3 py-1.5 rounded-lg text-[#F5EDE6]/60 hover:text-[#F5EDE6]"
-                  >
-                    취소
-                  </button>
-                  <button
-                    onClick={() => handleTestOrKey(orDraft)}
-                    disabled={!orDraft.trim() || orTesting}
-                    className="px-3 py-1.5 rounded-lg bg-white/10 text-[#F5EDE6] hover:bg-white/20 disabled:opacity-40"
-                  >
-                    {orTesting ? '테스트 중…' : '키 테스트'}
-                  </button>
-                  <button
-                    onClick={handleSaveOrKey}
-                    disabled={!orDraft.trim()}
-                    className="px-3 py-1.5 rounded-lg bg-[#E8A87C] text-[#1A1210] font-medium hover:bg-[#d8976b] disabled:opacity-40"
-                  >
-                    키 저장
-                  </button>
-                </div>
-              </div>
-            ) : orKey ? (
-              <div className="flex gap-2 text-xs pt-1">
-                <button
-                  onClick={() => handleTestOrKey(orKey)}
-                  disabled={orTesting}
-                  className="px-3 py-1 rounded-lg bg-[#E8A87C]/15 text-[#E8A87C] hover:bg-[#E8A87C]/25"
-                >
-                  {orTesting ? '테스트 중…' : '키 테스트'}
-                </button>
-                <button
-                  onClick={() => {
-                    setOrDraft(orKey);
-                    setOrEditing(true);
-                  }}
-                  className="px-3 py-1 rounded-lg bg-white/5 text-[#F5EDE6]/70 hover:bg-white/10"
-                >
-                  키 변경
-                </button>
-                <button
-                  onClick={handleClearOrKey}
-                  className="px-3 py-1 rounded-lg bg-white/5 text-[#E07070] hover:bg-[#E07070]/15"
-                >
-                  키 삭제
-                </button>
-              </div>
-            ) : null}
-
-            {orTestResult && (
-              <div
-                className={`text-xs p-2.5 rounded-lg mt-2 whitespace-pre-line leading-relaxed ${
-                  orTestResult.ok
-                    ? 'bg-[#E8A87C]/15 text-[#E8A87C] border border-[#E8A87C]/30'
-                    : 'bg-[#E07070]/15 text-[#E07070] border border-[#E07070]/30'
+            {/* Gender Filter Chips */}
+            <div className="flex items-center gap-1.5 p-1 rounded-xl bg-[#1A1210]/60 border border-white/5">
+              <button
+                type="button"
+                onClick={() => setGenderFilter('all')}
+                className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer ${
+                  genderFilter === 'all'
+                    ? 'bg-[#E8A87C] text-[#1A1210] shadow'
+                    : 'text-[#F5EDE6]/60 hover:text-[#F5EDE6] hover:bg-white/5'
                 }`}
               >
-                {orTestResult.text}
-              </div>
-            )}
-          </div>
+                전체 (7개)
+              </button>
+              <button
+                type="button"
+                onClick={() => setGenderFilter('female')}
+                className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center justify-center gap-1 ${
+                  genderFilter === 'female'
+                    ? 'bg-rose-500 text-white shadow'
+                    : 'text-[#F5EDE6]/60 hover:text-[#F5EDE6] hover:bg-white/5'
+                }`}
+              >
+                <span>여성 목소리</span>
+                <span className="text-[10px] opacity-80">(4)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setGenderFilter('male')}
+                className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center justify-center gap-1 ${
+                  genderFilter === 'male'
+                    ? 'bg-sky-600 text-white shadow'
+                    : 'text-[#F5EDE6]/60 hover:text-[#F5EDE6] hover:bg-white/5'
+                }`}
+              >
+                <span>남성 목소리</span>
+                <span className="text-[10px] opacity-80">(3)</span>
+              </button>
+            </div>
 
-          {/* Voice Choice Section */}
-          <div className="space-y-2 pt-1">
-            <div className="text-sm text-[#F5EDE6]/70 font-medium">목소리 선택 (테스트용)</div>
-            <div className="space-y-2">
-              {TTS_VOICE_LIST.map((voice) => {
+            {/* Voice Cards */}
+            <div className="space-y-2.5">
+              {filteredVoices.map((voice) => {
                 const isSelected = selectedVoice === voice.option;
+                const isPlaying = previewingVoice === voice.option;
+                const isLoading = previewLoading === voice.option;
+
                 return (
-                  <label
+                  <div
                     key={voice.option}
                     onClick={() => handleSelectVoice(voice.option)}
-                    className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition ${
+                    className={`p-3.5 rounded-2xl border transition-all cursor-pointer ${
                       isSelected
-                        ? 'border-[#E8A87C] bg-[#E8A87C]/10'
-                        : 'border-white/5 bg-[#1A1210]/40 hover:bg-white/5'
+                        ? 'border-[#E8A87C] bg-[#E8A87C]/12 shadow-sm ring-1 ring-[#E8A87C]/40'
+                        : 'border-white/5 bg-[#1A1210]/40 hover:bg-[#1A1210]/80 hover:border-white/10'
                     }`}
                   >
-                    <input
-                      type="radio"
-                      name="voiceOption"
-                      checked={isSelected}
-                      onChange={() => handleSelectVoice(voice.option)}
-                      className="mt-1 accent-[#E8A87C]"
-                    />
-                    <div>
-                      <div className={`text-sm font-medium ${isSelected ? 'text-[#E8A87C]' : 'text-[#F5EDE6]'}`}>
-                        {voice.shortLabel}
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex-1 space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`text-[10px] font-bold px-1.5 py-0.5 rounded-md ${
+                              voice.gender === 'female'
+                                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                                : 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
+                            }`}
+                          >
+                            {voice.gender === 'female' ? '여성' : '남성'}
+                          </span>
+                          <span className={`text-sm font-bold ${isSelected ? 'text-[#E8A87C]' : 'text-[#F5EDE6]'}`}>
+                            {voice.name}
+                          </span>
+                          <span className="text-xs text-[#E8A87C]/90 font-medium">
+                            {voice.vibe}
+                          </span>
+                        </div>
+
+                        <p className="text-xs text-[#F5EDE6]/70 leading-relaxed">
+                          {voice.description}
+                        </p>
+
+                        <div className="flex items-center gap-2 pt-0.5">
+                          <span className="text-[11px] text-[#F5EDE6]/40">
+                            말투: <span className="text-[#F5EDE6]/60">{voice.personaStyle}</span>
+                          </span>
+                        </div>
                       </div>
-                      <div className="text-xs text-[#F5EDE6]/50">{voice.description}</div>
+
+                      {/* Preview Button */}
+                      <button
+                        type="button"
+                        onClick={(e) => handlePlayPreview(e, voice)}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition active:scale-95 flex items-center gap-1.5 shrink-0 cursor-pointer ${
+                          isPlaying
+                            ? 'bg-rose-500 text-white animate-pulse'
+                            : isSelected
+                            ? 'bg-[#E8A87C] text-[#1A1210] hover:bg-[#d8976b]'
+                            : 'bg-white/10 text-[#F5EDE6] hover:bg-white/20'
+                        }`}
+                      >
+                        {isLoading ? (
+                          <Loader2 size={12} className="animate-spin" />
+                        ) : isPlaying ? (
+                          <>
+                            <Square size={11} className="fill-current" />
+                            정지
+                          </>
+                        ) : (
+                          <>
+                            <Play size={11} className="fill-current" />
+                            미리듣기
+                          </>
+                        )}
+                      </button>
                     </div>
-                  </label>
+
+                    {/* Sample speech text preview */}
+                    <div className="mt-2.5 pt-2 border-t border-white/5 text-[11px] text-[#F5EDE6]/50 italic">
+                      "{voice.sampleText}"
+                    </div>
+                  </div>
                 );
               })}
             </div>
-            {!orKey && (
-              <p className="text-xs text-[#F5EDE6]/40 pt-1">
-                OpenRouter 키가 있어야 이 목소리로 말해요. 없으면 기본 음성.
-              </p>
-            )}
           </div>
 
           <div className="border-t border-white/10" />
 
-          {/* Gemini Key Section */}
-          <div className="space-y-2">
-            <div
-              className={`p-3 rounded-xl bg-[#1A1210]/60 border border-white/5 ${
-                !geminiEditing ? 'cursor-pointer hover:bg-white/5 transition-colors' : ''
-              }`}
-              onClick={() => {
-                if (!geminiEditing) {
-                  setGeminiDraft(geminiKey);
-                  setGeminiEditing(true);
-                }
-              }}
-            >
-              <div className="text-sm font-medium text-[#F5EDE6]/70">
-                예비 Gemini 키 (OpenRouter 키 없을 때만)
-              </div>
-              <div className="text-sm font-semibold text-[#E8A87C] mt-0.5">
-                {geminiKey ? UserPreferences.maskKey(geminiKey) : '설정 안 됨 · 누르면 입력'}
-              </div>
-              <div className="text-xs text-[#F5EDE6]/50 mt-1">
-                모델: {GeminiClient.MODEL_ID} · 기본 음성
-              </div>
+          {/* Engine & Advanced Connection */}
+          <div className="space-y-3">
+            <div className="text-sm font-bold text-[#F5EDE6] flex items-center gap-1.5">
+              <Sparkles size={16} className="text-[#E8A87C]" />
+              AI 연결 엔진 및 API 키
             </div>
 
-            {geminiEditing ? (
-              <div className="p-3 rounded-xl bg-[#1A1210] border border-[#E8A87C]/40 space-y-3 mt-2">
-                <div className="relative flex items-center">
-                  <input
-                    type={geminiVisible ? 'text' : 'password'}
-                    value={geminiDraft}
-                    onChange={(e) => setGeminiDraft(e.target.value)}
-                    placeholder="Gemini API 키 붙여넣기"
-                    className="w-full px-3 py-2 pr-20 rounded-lg bg-[#241A17] border border-white/10 text-sm text-[#F5EDE6] focus:outline-none focus:border-[#E8A87C]"
-                  />
-                  <div className="absolute right-2 flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => setGeminiVisible(!geminiVisible)}
-                      className="p-1 text-[#F5EDE6]/50 hover:text-[#F5EDE6]"
-                      title={geminiVisible ? '키 숨기기' : '키 보기'}
-                    >
-                      {geminiVisible ? <EyeOff size={16} /> : <Eye size={16} />}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        try {
-                          const text = await navigator.clipboard.readText();
-                          if (text) setGeminiDraft(text.trim());
-                        } catch {
-                          // Clipboard permission
-                        }
-                      }}
-                      className="text-xs px-2 py-1 rounded bg-[#E8A87C]/20 text-[#E8A87C] hover:bg-[#E8A87C]/30"
-                    >
-                      붙여넣기
-                    </button>
-                  </div>
+            {/* Google Gemini Card */}
+            <div
+              className={`p-3.5 rounded-2xl border transition-all ${
+                engineMode === 'gemini' ? 'bg-[#E8A87C]/5 border-[#E8A87C]/30' : 'bg-[#1A1210]/40 border-white/5'
+              }`}
+            >
+              <div className="flex items-center justify-between mb-1.5">
+                <div className="flex items-center gap-1.5 text-xs font-bold text-[#E8A87C]">
+                  Gemini 2.5 Flash Native Audio Dialog
                 </div>
-
-                <p className="text-xs text-[#F5EDE6]/50">키는 이 기기(브라우저)에만 저장됩니다.</p>
-
-                <div className="flex justify-end gap-2 text-xs">
-                  <button
-                    onClick={() => {
-                      setGeminiEditing(false);
-                      setGeminiDraft('');
-                    }}
-                    className="px-3 py-1.5 rounded-lg text-[#F5EDE6]/60 hover:text-[#F5EDE6]"
-                  >
-                    취소
-                  </button>
-                  <button
-                    onClick={() => handleTestGeminiKey(geminiDraft)}
-                    disabled={!geminiDraft.trim() || geminiTesting}
-                    className="px-3 py-1.5 rounded-lg bg-white/10 text-[#F5EDE6] hover:bg-white/20 disabled:opacity-40"
-                  >
-                    {geminiTesting ? '테스트 중…' : '키 테스트'}
-                  </button>
-                  <button
-                    onClick={handleSaveGeminiKey}
-                    disabled={!geminiDraft.trim()}
-                    className="px-3 py-1.5 rounded-lg bg-[#E8A87C] text-[#1A1210] font-medium hover:bg-[#d8976b] disabled:opacity-40"
-                  >
-                    키 저장
-                  </button>
-                </div>
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-semibold">
+                  GDP 크레딧 서버 연동 완료
+                </span>
               </div>
-            ) : geminiKey ? (
-              <div className="flex gap-2 text-xs pt-1">
+
+              <div className="p-2.5 rounded-xl bg-[#1A1210] border border-white/5 space-y-1 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-[#F5EDE6]/50">실시간 통화 모델</span>
+                  <span className="font-semibold text-[#E8A87C]">Gemini 2.5 Flash Native Audio</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[#F5EDE6]/50">통화 전송 프로토콜</span>
+                  <span className="font-semibold text-[#E8A87C]">Live API (전이중 실시간 오디오)</span>
+                </div>
+                {geminiKey ? (
+                  <div className="flex items-center justify-between pt-1 border-t border-white/5">
+                    <span className="text-[#F5EDE6]/50">맞춤 API 키</span>
+                    <span className="text-[#E8A87C] font-mono">{UserPreferences.maskKey(geminiKey)}</span>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="flex flex-wrap gap-2 text-xs pt-2">
                 <button
                   onClick={() => handleTestGeminiKey(geminiKey)}
                   disabled={geminiTesting}
-                  className="px-3 py-1 rounded-lg bg-[#E8A87C]/15 text-[#E8A87C] hover:bg-[#E8A87C]/25"
+                  className="px-3 py-1.5 rounded-lg bg-[#E8A87C] text-[#1A1210] font-semibold hover:bg-[#dca074] cursor-pointer transition shadow"
                 >
-                  {geminiTesting ? '테스트 중…' : '키 테스트'}
+                  {geminiTesting ? '연결 테스트 중…' : 'Gemini 직결 테스트'}
                 </button>
                 <button
                   onClick={() => {
                     setGeminiDraft(geminiKey);
-                    setGeminiEditing(true);
+                    setGeminiEditing(!geminiEditing);
                   }}
-                  className="px-3 py-1 rounded-lg bg-white/5 text-[#F5EDE6]/70 hover:bg-white/10"
+                  className="px-3 py-1.5 rounded-lg bg-white/5 text-[#F5EDE6]/70 hover:bg-white/10 cursor-pointer"
                 >
-                  키 변경
+                  {geminiEditing ? '키 입력 닫기' : '개별 맞춤 키 설정 (선택)'}
                 </button>
-                <button
-                  onClick={handleClearGeminiKey}
-                  className="px-3 py-1 rounded-lg bg-white/5 text-[#E07070] hover:bg-[#E07070]/15"
-                >
-                  키 삭제
-                </button>
+                {geminiKey ? (
+                  <button
+                    onClick={handleClearGeminiKey}
+                    className="px-3 py-1.5 rounded-lg bg-white/5 text-[#E07070] hover:bg-[#E07070]/15 cursor-pointer"
+                  >
+                    맞춤 키 삭제
+                  </button>
+                ) : null}
               </div>
-            ) : null}
 
-            {geminiTestResult && (
-              <div
-                className={`text-xs p-2.5 rounded-lg mt-2 whitespace-pre-line ${
-                  geminiTestResult.ok
-                    ? 'bg-[#E8A87C]/15 text-[#E8A87C] border border-[#E8A87C]/30'
-                    : 'bg-[#E07070]/15 text-[#E07070] border border-[#E07070]/30'
-                }`}
-              >
-                {geminiTestResult.text}
-              </div>
-            )}
+              {geminiTestResult && (
+                <div
+                  className={`text-xs p-2.5 rounded-lg mt-2 whitespace-pre-line leading-relaxed ${
+                    geminiTestResult.ok
+                      ? 'bg-[#E8A87C]/15 text-[#E8A87C] border border-[#E8A87C]/30'
+                      : 'bg-[#E07070]/15 text-[#E07070] border border-[#E07070]/30'
+                  }`}
+                >
+                  {geminiTestResult.text}
+                </div>
+              )}
+
+              {geminiEditing ? (
+                <div className="p-3 rounded-xl bg-[#1A1210] border border-[#E8A87C]/40 space-y-2.5 mt-2">
+                  <div className="relative flex items-center">
+                    <input
+                      type={geminiVisible ? 'text' : 'password'}
+                      value={geminiDraft}
+                      onChange={(e) => setGeminiDraft(e.target.value)}
+                      placeholder="AIzaSy… 로 시작하는 Gemini API 키"
+                      className="w-full px-3 py-2 pr-20 rounded-lg bg-[#241A17] border border-white/10 text-xs text-[#F5EDE6] focus:outline-none focus:border-[#E8A87C]"
+                    />
+                    <div className="absolute right-2 flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setGeminiVisible(!geminiVisible)}
+                        className="p-1 text-[#F5EDE6]/50 hover:text-[#F5EDE6] cursor-pointer"
+                      >
+                        {geminiVisible ? <EyeOff size={14} /> : <Eye size={14} />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex justify-end gap-2 text-xs">
+                    <button
+                      onClick={() => {
+                        setGeminiEditing(false);
+                        setGeminiDraft('');
+                      }}
+                      className="px-3 py-1.5 rounded-lg text-[#F5EDE6]/60 hover:text-[#F5EDE6] cursor-pointer"
+                    >
+                      취소
+                    </button>
+                    <button
+                      onClick={handleSaveGeminiKey}
+                      disabled={!geminiDraft.trim()}
+                      className="px-3 py-1.5 rounded-lg bg-[#E8A87C] text-[#1A1210] font-semibold hover:bg-[#d8976b] disabled:opacity-40 cursor-pointer"
+                    >
+                      저장
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
           </div>
         </div>
 
         {/* Footer */}
-        <div className="pt-4 border-t border-white/10 flex justify-end">
+        <div className="pt-4 border-t border-white/10 flex justify-end sticky bottom-0 bg-[#2A1F1B]/95 backdrop-blur">
           <button
-            onClick={onClose}
-            className="px-6 py-2.5 rounded-xl bg-white/10 text-[#F5EDE6] font-medium hover:bg-white/15 transition"
+            onClick={handleClose}
+            className="px-6 py-2.5 rounded-xl bg-[#E8A87C] text-[#1A1210] font-bold hover:bg-[#d8976b] active:scale-95 transition cursor-pointer shadow"
           >
-            닫기
+            설정 완료
           </button>
         </div>
       </div>

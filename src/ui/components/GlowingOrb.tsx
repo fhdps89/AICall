@@ -19,6 +19,7 @@ export function phaseToOrbMode(phase: CallPhase): OrbMode {
 interface GlowingOrbProps {
   mode: OrbMode;
   size?: number; // size in px, defaults to 220
+  audioLevel?: number; // 0.0 to 1.0 dynamic voice level
   onClick?: () => void;
   className?: string;
 }
@@ -26,6 +27,7 @@ interface GlowingOrbProps {
 export const GlowingOrb: React.FC<GlowingOrbProps> = ({
   mode,
   size = 220,
+  audioLevel = 0,
   onClick,
   className = '',
 }) => {
@@ -46,6 +48,11 @@ export const GlowingOrb: React.FC<GlowingOrbProps> = ({
     ? 'animate-orb-listening'
     : 'animate-orb-idle';
 
+  // Dynamic scale boost based on audio input level (up to +25%)
+  const voiceBoost = isListening ? audioLevel * 0.25 : 0;
+  const outerScale = (isSpeaking ? 1.3 : isListening ? 1.2 : 1.1) + voiceBoost;
+  const coreScale = 1 + voiceBoost * 0.5;
+
   return (
     <div
       onClick={onClick}
@@ -59,31 +66,33 @@ export const GlowingOrb: React.FC<GlowingOrbProps> = ({
     >
       {/* Outer soft glow layer */}
       <div
-        className={`absolute inset-0 rounded-full blur-2xl pointer-events-none transition-all duration-700 ${animClass}`}
+        className={`absolute inset-0 rounded-full blur-2xl pointer-events-none transition-all duration-300 ${animClass}`}
         style={{
           background: `radial-gradient(circle, ${glowColor} 0%, rgba(26,18,16,0) 70%)`,
-          transform: isSpeaking ? 'scale(1.3)' : isListening ? 'scale(1.2)' : 'scale(1.1)',
+          transform: `scale(${outerScale})`,
         }}
       />
 
       {/* Mid ring */}
       <div
-        className={`absolute rounded-full blur-md pointer-events-none transition-all duration-500 ${animClass}`}
+        className={`absolute rounded-full blur-md pointer-events-none transition-all duration-300 ${animClass}`}
         style={{
           width: `${size * 0.85}px`,
           height: `${size * 0.85}px`,
           background: `radial-gradient(circle, ${coreColor} 10%, rgba(255,176,122,0.3) 55%, transparent 75%)`,
+          transform: `scale(${coreScale})`,
         }}
       />
 
       {/* Radiant Core */}
       <div
-        className={`relative rounded-full shadow-2xl transition-all duration-300 ${animClass}`}
+        className={`relative rounded-full shadow-2xl transition-all duration-200 ${animClass}`}
         style={{
           width: `${size * 0.65}px`,
           height: `${size * 0.65}px`,
           background: `radial-gradient(circle at 45% 45%, #FFFFFF 0%, ${coreColor} 50%, #B86B3E 100%)`,
-          boxShadow: `0 0 40px ${glowColor}, inset 0 0 20px rgba(255,255,255,0.7)`,
+          boxShadow: `0 0 ${35 + audioLevel * 30}px ${glowColor}, inset 0 0 20px rgba(255,255,255,0.7)`,
+          transform: `scale(${coreScale})`,
         }}
       />
     </div>

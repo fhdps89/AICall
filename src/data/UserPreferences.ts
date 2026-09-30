@@ -1,13 +1,16 @@
 import { TtsVoiceOption } from '../types';
-import { DEFAULT_VOICE_OPTION, getTtsVoice } from '../voice/TtsVoice';
+import { DEFAULT_VOICE_OPTION, getTtsVoice, TTS_VOICES } from '../voice/TtsVoice';
 
 const PREFS_KEY_NICKNAME = 'aivoice_nickname';
 const PREFS_KEY_GEMINI_KEY = 'aivoice_gemini_api_key';
 const PREFS_KEY_OPENROUTER_KEY = 'aivoice_openrouter_api_key';
 const PREFS_KEY_TTS_VOICE = 'aivoice_tts_voice_option';
+const PREFS_KEY_PREFERRED_ENGINE = 'aivoice_preferred_engine';
 
 export const DEFAULT_NICKNAME = '친구';
 export const FIXED_VOICE_NAME = '기본 한국어 음성';
+
+export type AiEngineMode = 'auto' | 'gemini' | 'openrouter';
 
 const QUOTE_CHARS = new Set(['"', "'", '`', '“', '”', '‘', '’']);
 
@@ -77,7 +80,7 @@ export class UserPreferences {
 
   static getTtsVoiceOption(): TtsVoiceOption {
     const val = localStorage.getItem(PREFS_KEY_TTS_VOICE) as TtsVoiceOption | null;
-    if (val === '1' || val === '2' || val === '7') {
+    if (val && val in TTS_VOICES) {
       return val;
     }
     return DEFAULT_VOICE_OPTION;
@@ -87,12 +90,20 @@ export class UserPreferences {
     localStorage.setItem(PREFS_KEY_TTS_VOICE, option);
   }
 
-  static getVoiceDisplayName(): string {
-    const orKey = this.getOpenRouterApiKey();
-    if (orKey) {
-      const voice = getTtsVoice(this.getTtsVoiceOption());
-      return voice.shortLabel;
+  static getPreferredEngine(): AiEngineMode {
+    const val = localStorage.getItem(PREFS_KEY_PREFERRED_ENGINE) as AiEngineMode | null;
+    if (val === 'openrouter') {
+      return 'openrouter';
     }
-    return FIXED_VOICE_NAME;
+    return 'gemini';
+  }
+
+  static setPreferredEngine(engine: AiEngineMode): void {
+    localStorage.setItem(PREFS_KEY_PREFERRED_ENGINE, engine);
+  }
+
+  static getVoiceDisplayName(): string {
+    const voice = getTtsVoice(this.getTtsVoiceOption());
+    return `${voice.name} · ${voice.vibe}`;
   }
 }

@@ -1,12 +1,29 @@
 export type CallPhase = 'Idle' | 'Greeting' | 'Listening' | 'Thinking' | 'Speaking' | 'Ended';
 
-export type TtsVoiceOption = '2' | '1' | '7';
+export type VoiceGender = 'female' | 'male';
+
+export type TtsVoiceOption =
+  | 'kore'
+  | 'leda'
+  | 'zephyr'
+  | 'aoede'
+  | 'puck'
+  | 'charon'
+  | 'fenrir'
+  | '2'
+  | '1'
+  | '7';
 
 export interface TtsVoice {
   option: TtsVoiceOption;
   model: string;
   voice: string;
+  gender: VoiceGender;
+  name: string;
+  vibe: string;
   description: string;
+  sampleText: string;
+  personaStyle: string;
   googleStyle: boolean;
   shortLabel: string;
 }
