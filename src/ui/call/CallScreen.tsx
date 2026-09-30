@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { Mic, MicOff, PhoneOff, Send, MessageSquare, AlertCircle, Sparkles } from 'lucide-react';
+import { Mic, MicOff, PhoneOff, Send, MessageSquare, AlertCircle, Sparkles, Activity, Volume2 } from 'lucide-react';
 import { GlowingOrb, phaseToOrbMode } from '../components/GlowingOrb';
-import { VoiceCallEngine, MicStatus } from '../../voice/VoiceCallEngine';
+import { VoiceCallEngine, MicStatus, P4Telemetry } from '../../voice/VoiceCallEngine';
 import { UserPreferences } from '../../data/UserPreferences';
 import { CallPhase, ReplyLatency, ReplyOrigin, getReplyOriginLabel } from '../../types';
 import { getTtsVoice } from '../../voice/TtsVoice';
@@ -56,6 +56,10 @@ export const CallScreen: React.FC<CallScreenProps> = ({ onHangUp }) => {
   const [audioLevel, setAudioLevel] = useState(0);
   const [micStatus, setMicStatus] = useState<MicStatus>('requesting');
 
+  // P4 Real-time Observability Telemetry
+  const [telemetry, setTelemetry] = useState<P4Telemetry | null>(null);
+  const [showTelemetry, setShowTelemetry] = useState(false);
+
   // Manual speech input and quick suggestions
   const [showSimulatedInput, setShowSimulatedInput] = useState(false);
   const [manualSpeechText, setManualSpeechText] = useState('');
@@ -104,6 +108,7 @@ export const CallScreen: React.FC<CallScreenProps> = ({ onHangUp }) => {
         onVoiceFailure: (failure) => setVoiceFailureText(failure),
         onAudioLevel: (level) => setAudioLevel(level),
         onMicStatus: (status) => setMicStatus(status),
+        onP4Telemetry: (tel) => setTelemetry(tel),
       }
     );
 
@@ -198,6 +203,62 @@ export const CallScreen: React.FC<CallScreenProps> = ({ onHangUp }) => {
             {voiceInfoText}
           </div>
         )}
+
+        {/* Earphone recommendation tip */}
+        <div className="text-[11px] text-[#E8A87C]/80 bg-[#E8A87C]/10 border border-[#E8A87C]/20 px-3 py-1 rounded-full flex items-center gap-1.5 shadow-sm">
+          <span>🎧 이어폰을 착용하시면 더 선명하게 대화할 수 있어요</span>
+        </div>
+
+        {/* P4 Observability & Telemetry Inspector */}
+        <div className="w-full flex flex-col items-center">
+          <button
+            onClick={() => setShowTelemetry(!showTelemetry)}
+            className="text-[10px] text-[#E8A87C]/60 hover:text-[#E8A87C] transition flex items-center gap-1 mt-1 font-mono cursor-pointer"
+          >
+            <Activity size={11} />
+            <span>P4 실시간 오디오 관측 로그 {showTelemetry ? '▲' : '▼'}</span>
+          </button>
+
+          {showTelemetry && telemetry && (
+            <div className="w-full mt-1.5 p-2 rounded-lg bg-[#251A17] border border-[#E8A87C]/20 text-[10px] font-mono text-[#F5EDE6]/80 flex flex-col gap-1 text-left">
+              <div className="flex justify-between items-center border-b border-[#E8A87C]/10 pb-1">
+                <span className="text-[#E8A87C]">Capture → Decimate</span>
+                <span>{telemetry.captureSampleRate}Hz → {telemetry.targetSampleRate}Hz</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span>Mic RMS (실시간 음량)</span>
+                <span>{telemetry.micRms.toFixed(4)}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span>Packets Sent (16k PCM)</span>
+                <span>{telemetry.packetsSent} pkts</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span>Echo Gate</span>
+                <span className={telemetry.echoGateOpen ? 'text-emerald-400' : 'text-amber-400'}>
+                  {telemetry.echoGateOpen ? 'OPEN (마이크 송출 중)' : 'CLOSED (스피커 보호 음소거)'}
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span>First Sound Latency</span>
+                <span>{telemetry.measuredLatencyMs ? `${telemetry.measuredLatencyMs}ms (실측)` : '-'}</span>
+              </div>
+              <div className="flex flex-col gap-0.5 pt-1 border-t border-[#E8A87C]/10">
+                <span className="text-[#E8A87C]">Live Input Transcript:</span>
+                <span className="text-white bg-black/40 p-1 rounded truncate">
+                  {telemetry.lastInputTranscript || '(사용자 음성 대기 중...)'}
+                </span>
+              </div>
+              <button
+                onClick={() => engineRef.current?.playWavProof()}
+                className="mt-1 w-full py-1 rounded bg-[#E8A87C]/20 hover:bg-[#E8A87C]/30 text-[#E8A87C] text-[10px] font-semibold flex items-center justify-center gap-1 transition cursor-pointer"
+              >
+                <Volume2 size={12} />
+                <span>마이크 16kHz 변환 녹음 청취 (WAV 검증)</span>
+              </button>
+            </div>
+          )}
+        </div>
 
         {voiceFailureText && (
           <div className="text-xs text-[#E07070] text-center font-medium">

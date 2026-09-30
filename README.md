@@ -4,7 +4,7 @@
 
 ---
 
-## 🚀 현재 빌드 버전 및 모델 스펙 (v1.1.0)
+## 🚀 현재 빌드 버전 및 모델 스펙 (v1.2.1)
 
 - **실시간 양방향 음성 대화 모델 (Live API)**: `gemini-2.5-flash-native-audio-latest`
   - **공식 명칭**: **Gemini 2.5 Flash Native Audio Dialog**
@@ -35,12 +35,13 @@
   - Web Audio API `AnalyserNode`를 통해 사용자 목소리 음량(RMS)을 실시간 측정 (0.0 ~ 1.0)
   - 사용자가 말할 때 빛나는 오브가 음량에 맞춰 유기적으로 팽창 및 발광
   - 통화 중 청취 상태를 직관적으로 확인할 수 있는 7단 이퀄라이저 파형 바 표시
-- **하이브리드 음성 인식 (Hybrid STT & VAD)**:
-  - **1순위**: Gemini 2.5 Flash Native Audio 양방향 16kHz PCM 다이렉트 스트리밍 (STT 변환 지연 없이 모델이 음성을 직접 이해)
-  - **2순위**: Web Speech API (`ko-KR`) 실시간 한글 자막 피드백
-  - **3순위**: 음성 활동 감지(VAD) + `MediaRecorder` 음성 버퍼링 → Web Speech 미지원 브라우저(Safari, Firefox, 인앱 웹뷰 등) 환경에서도 `gemini-3.5-transcribe`를 통해 100% 자동 전사
-- **Barge-in (말 끊기)**:
-  - AI가 말하는 도중 사용자가 말을 시작하면 400ms 내 음성 출력을 즉시 중단하고 다시 경청 모드로 전환
+- **단일 오디오 소스(Single Ear) 실시간 음성 파이프라인**:
+  - **Live Native Audio**: Gemini 2.5 Flash Native Audio 양방향 16kHz PCM 다이렉트 스트리밍 (STT 변환 지연 없이 모델이 음성을 직접 이해)
+  - **공식 실시간 자막 직결**: Gemini Live 서버의 `inputAudioTranscription` 및 `outputAudioTranscription`을 실시간 수신하여 화면 자막에 표시 (WebSpeech 환각 자막 차단)
+  - **P4 오디오 관측 인스펙터**: 하드웨어 샘플레이트(`48kHz → 16kHz`), 실시간 RMS, 송출 패킷 수, 에코 게이트 상태, Gemini Live 수신 전사문 실시간 노출
+  - **16kHz 마이크 변환 2초 WAV 원음 검증기**: 원클릭으로 클라이언트 리샘플링 버퍼 원본을 즉시 재생하여 음성 왜곡 여부 청취 검증 가능
+- **Barge-in (말 끊기 인터럽트)**:
+  - AI가 말하는 도중 사용자가 말을 시작하면 로컬 오디오 즉각 중단 + `liveSession.sendClientContent({ turnComplete: true })` 호출로 서버 세션 실시간 인터럽트
 - **추천 대화 칩 (Quick Prompt Chips)**:
   - "안녕! 오늘 하루 어땠어?", "지금 무슨 생각해?", "나 오늘 좀 피곤했어", "따뜻한 위로 한마디 해줘" 등 원터치 발화 칩 제공
 - **텍스트 직접 입력창 (시뮬레이션/조용한 환경용)**:
@@ -103,6 +104,34 @@ npm run start
 
 ## 📝 변경 이력 (Changelog)
 
+### v1.2.1 (2026-10-01)
+- **P4 오디오 관측 인스펙터 공식 탑재**:
+  - 통화 화면에 실시간 샘플레이트(`48000Hz → 16000Hz`), 실시간 RMS, 송출 패킷 수, 에코 게이트 상태, Gemini Live 수신 전사문 실시간 노출
+- **16kHz 마이크 변환 2초 WAV 원음 검증 도구 내장**:
+  - `playWavProof`: 클라이언트가 다운샘플링한 16kHz PCM 원본을 브라우저에서 즉시 재생하여 음성 왜곡 여부를 귀로 직접 검증 가능
+- **하드코딩 제거 및 실측 레이턴시 동기화**:
+  - 발화 종료부터 첫 사운드 청크 수신까지의 실제 경과 시간(`measuredLatencyMs`) 측정 로직 구현
+- **Live 인터럽트 공식 SDK 메서드 연동**:
+  - `liveSession.sendClientContent({ turnComplete: true })` 호출로 서버 세션 인터럽트 보장
+- **폴백 모델 생존성 실측 증명**:
+  - `gemini-3.8-flash`, `gemini-3.5-transcribe`, `gemini-3.8-flash-lite-tts` API 200 OK 응답 검증 완료
+
+### v1.2.0 (2026-10-01)
+- **Grok 기획 검수 전면 수용 및 단일 오디오 소스(Single Ear) 아키텍처 구축**:
+  - Live 통화 중 WebSpeech API 및 MediaRecorder 전면 비활성화 (귀를 하나로 일원화)
+  - Gemini Live 서버의 `inputAudioTranscription` 및 `outputAudioTranscription` 활성화로 정확한 음성 전사 자막 직결
+- **하드웨어 오디오 경로 결함 해소**:
+  - `ScriptProcessor` 스피커 직결 버그 제거 (Zero-Gain 무음 노드로 격리)
+  - 7.5kHz 안티에일리어싱 저역 통과 필터(`BiquadFilterNode`) 탑재
+  - `fastUint8ToBase64` 청킹 인코딩으로 CPU 오버헤드 해소
+- **에코 및 버퍼 잔류 동기화**:
+  - `PcmAudioSink` 실제 스피커 큐 소진 시간 계산 후 마이크 게이트 오픈
+  - Barge-in 시 로컬 오디오 즉각 정지 및 서버 `{ type: 'interrupt' }` 전송
+- **UX 개선**:
+  - 통화 화면 상단에 `🎧 이어폰을 착용하시면 더 선명하게 대화할 수 있어요` 팁 배지 추가
+- **합의 문서 추가**:
+  - Grok 기획 검수 합의서 `GROK_REVIEW_RESPONSE.md` 생성 및 진단서 `v1.2.0` 승격
+
 ### v1.1.1 (2026-09-30)
 - **오디오 다운샘플링 왜곡(1/3배속 슬로모션) 해결**:
   - `downsampleTo16kHz` 선형 보간 알고리즘을 도입하여 48kHz/44.1kHz 기기 환경에서도 왜곡 없는 정밀 16,000Hz PCM 음성 스트리밍 보장
@@ -126,3 +155,11 @@ npm run start
   - 통화 화면에 추천 대화 칩(Quick Prompts) 및 마이크 재시도 안내 버튼 추가
 - **서버 엔드포인트 고도화**:
   - `/api/gemini/transcribe` 신설 및 `/api/gemini/status` 모델 식별 정보 동기화
+
+---
+
+## 📚 관련 프로젝트 관리 및 히스토리 문서
+- **[`Project_context.MD`](./Project_context.MD)**: 시스템 아키텍처, 오디오 파이프라인 다이어그램, 상세 버전 히스토리 및 개발 컨텍스트 관리 총괄 문서 (README와 상시 동기화)
+- **[`GROK_REVIEW_RESPONSE.md`](./GROK_REVIEW_RESPONSE.md)**: Grok 기획 검수에 대한 정식 기술 답변 및 실측 검증 합의서
+- **[`DIAGNOSIS_AND_SOLUTIONS.md`](./DIAGNOSIS_AND_SOLUTIONS.md)**: 물리 음향학적 원인 분석 및 아키텍처 진단 보고서
+

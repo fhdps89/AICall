@@ -388,11 +388,13 @@ async function startServer() {
           }
 
           try {
-            // Attempt Gemini 3.8 Live Native Audio connection
+            // Attempt Gemini Live Native Audio connection with dual transcription
             liveSession = await ai.live.connect({
               model: NATIVE_AUDIO_MODEL,
               config: {
                 responseModalities: [Modality.AUDIO],
+                inputAudioTranscription: {},
+                outputAudioTranscription: {},
                 speechConfig: {
                   voiceConfig: { prebuiltVoiceConfig: { voiceName } },
                 },
@@ -418,6 +420,21 @@ async function startServer() {
                         }));
                       }
                     }
+                  }
+
+                  // Forward official Gemini Live speech-to-text transcriptions
+                  if (serverMsg.serverContent?.inputTranscription?.text) {
+                    clientWs.send(JSON.stringify({
+                      type: 'input_transcript',
+                      text: serverMsg.serverContent.inputTranscription.text,
+                    }));
+                  }
+
+                  if (serverMsg.serverContent?.outputTranscription?.text) {
+                    clientWs.send(JSON.stringify({
+                      type: 'output_transcript',
+                      text: serverMsg.serverContent.outputTranscription.text,
+                    }));
                   }
 
                   if (serverMsg.serverContent?.turnComplete) {
@@ -473,6 +490,17 @@ async function startServer() {
             });
           } catch (sendErr) {
             console.error('Error forwarding text to Live session:', sendErr);
+          }
+        } else if (msg.type === 'interrupt' && liveSession) {
+          try {
+            // Signal liveSession client interrupt via official SDK method
+            if (typeof liveSession.sendClientContent === 'function') {
+              liveSession.sendClientContent({ turnComplete: true });
+            } else if (typeof liveSession.send === 'function') {
+              liveSession.send({ clientContent: { turnComplete: true } });
+            }
+          } catch (intErr) {
+            console.error('Error forwarding interrupt to Live session:', intErr);
           }
         }
       } catch (parseErr) {

@@ -50,8 +50,26 @@ export class PcmAudioSink {
     return this.audioCtx;
   }
 
+  isPlaying(): boolean {
+    if (this.isStopped) return false;
+    if (!this.audioCtx) return false;
+    return this.activeSources.length > 0 || this.audioCtx.currentTime < this.nextPlayTime;
+  }
+
+  getRemainingPlayTimeMs(): number {
+    if (!this.audioCtx || this.isStopped) return 0;
+    const diff = this.nextPlayTime - this.audioCtx.currentTime;
+    return Math.max(0, Math.round(diff * 1000));
+  }
+
+  reset(): void {
+    this.stop();
+    this.isStopped = false;
+    this.hasReportedFirstSound = false;
+  }
+
   writePcm(data: Uint8Array): void {
-    if (this.isStopped) return;
+    this.isStopped = false;
     const ctx = this.ensureAudioContext();
 
     // 16-bit LE PCM mono
