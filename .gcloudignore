@@ -1,0 +1,21 @@
+# Git
+.git
+.gitignore
+
+# Documentation archive (isolated from Cloud Run deployment packaging)
+docs/
+*.MD
+!Project_context.MD
+
+# Local build artifacts and logs
+node_modules/
+dist/
+dist-ssr/
+*.local
+*.log
+.DS_Store
+
+# Secrets and temp files
+.gemini_api_key
+.env
+.env.*
