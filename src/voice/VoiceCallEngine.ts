@@ -83,6 +83,7 @@ export interface P4Telemetry {
   lastInputTranscript: string;
   measuredLatencyMs: number | null;
   echoGateOpen: boolean;
+  languageLock?: 'ko-KR' | 'voice-only' | 'pending';
 }
 
 export interface VoiceCallEngineCallbacks {
@@ -158,6 +159,7 @@ export class VoiceCallEngine {
     lastInputTranscript: '',
     measuredLatencyMs: null,
     echoGateOpen: true,
+    languageLock: 'pending',
   };
 
   private static readonly MAX_HISTORY_TURNS = 24;
@@ -649,7 +651,7 @@ export class VoiceCallEngine {
           if (this.isRunning && this.liveConnected) {
             ws.send(JSON.stringify({
               type: 'text_prompt',
-              text: `(전화가 연결되었습니다. ${nick}님에게 다정하고 짧게 첫인사를 건네세요)`,
+              text: `(통화가 연결됐어. ${nick}에게 반말로 짧게 먼저 인사해. 외국어는 쓰지 마.)`,
             }));
           }
         }, 120);
@@ -661,6 +663,10 @@ export class VoiceCallEngine {
           const msg = JSON.parse(event.data);
 
           if (msg.type === 'ready') {
+            if (msg.languageLock) {
+              this.p4Telemetry.languageLock = msg.languageLock;
+              this.callbacks.onP4Telemetry?.({ ...this.p4Telemetry });
+            }
             this.startListening();
           } else if (msg.type === 'audio') {
             if (!this.isSpeaking) {

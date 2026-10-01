@@ -226,6 +226,12 @@ export const CallScreen: React.FC<CallScreenProps> = ({ onHangUp }) => {
                 <span>{telemetry.captureSampleRate}Hz → {telemetry.targetSampleRate}Hz</span>
               </div>
               <div className="flex justify-between items-center">
+                <span>Language Lock (언어 고정)</span>
+                <span className={telemetry.languageLock === 'ko-KR' ? 'text-emerald-400 font-semibold' : telemetry.languageLock === 'voice-only' ? 'text-amber-400 font-semibold' : 'text-zinc-400'}>
+                  {telemetry.languageLock || 'pending'}
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
                 <span>Mic RMS (실시간 음량)</span>
                 <span>{telemetry.micRms.toFixed(4)}</span>
               </div>

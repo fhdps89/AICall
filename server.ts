@@ -303,7 +303,7 @@ app.post('/api/gemini/transcribe', async (req: Request, res: Response) => {
             },
           },
           {
-            text: '이 음성을 한국어 텍스트로 그대로 전사해줘. 부가 설명 없이 받아적은 말만 출력해줘.',
+            text: '언어는 한국어(ko-KR)로 고정. 일본어·러시아어로 전사하지 마. 이 음성을 한국어 텍스트로 그대로 전사해줘. 부가 설명 없이 받아적은 말만 출력해줘.',
           },
         ],
       },
@@ -387,10 +387,103 @@ async function startServer() {
             return;
           }
 
-          try {
-            // Attempt Gemini Live Native Audio connection with dual transcription
-            liveSession = await ai.live.connect({
-              model: NATIVE_AUDIO_MODEL,
+          const createLiveCallbacks = () => ({
+            onmessage: (serverMsg: any) => {
+              if (!isConnected) return;
+              const parts = serverMsg.serverContent?.modelTurn?.parts;
+              if (Array.isArray(parts)) {
+                for (const part of parts) {
+                  if (part.inlineData?.data) {
+                    clientWs.send(JSON.stringify({
+                      type: 'audio',
+                      audio: part.inlineData.data,
+                      mimeType: part.inlineData.mimeType || 'audio/pcm;rate=24000',
+                    }));
+                  }
+                  if (part.text) {
+                    clientWs.send(JSON.stringify({
+                      type: 'text',
+                      text: part.text,
+                    }));
+                  }
+                }
+              }
+
+              // Forward official Gemini Live speech-to-text transcriptions
+              if (serverMsg.serverContent?.inputTranscription?.text) {
+                clientWs.send(JSON.stringify({
+                  type: 'input_transcript',
+                  text: serverMsg.serverContent.inputTranscription.text,
+                }));
+              }
+
+              if (serverMsg.serverContent?.outputTranscription?.text) {
+                clientWs.send(JSON.stringify({
+                  type: 'output_transcript',
+                  text: serverMsg.serverContent.outputTranscription.text,
+                }));
+              }
+
+              if (serverMsg.serverContent?.turnComplete) {
+                clientWs.send(JSON.stringify({ type: 'turnComplete' }));
+              }
+
+              if (serverMsg.serverContent?.interrupted) {
+                clientWs.send(JSON.stringify({ type: 'interrupted' }));
+              }
+            },
+            onerror: (err: any) => {
+              console.error('Gemini Live session error:', err);
+              if (isConnected) {
+                clientWs.send(JSON.stringify({ type: 'error', error: err?.message || 'Live session error' }));
+              }
+            },
+            onclose: () => {
+              if (isConnected) {
+                clientWs.send(JSON.stringify({ type: 'sessionClosed' }));
+              }
+            },
+          });
+
+          // Progressive Language Lock:
+          // Level 1: Full Korean lock (speechConfig.languageCode = 'ko-KR', input/output languageCodes = ['ko-KR'])
+          // Level 2: Korean speechConfig.languageCode = 'ko-KR' with empty transcription options {}
+          // Level 3: Voice-only without languageCode
+          const configsToTry: Array<{
+            desc: string;
+            config: any;
+            lock: 'ko-KR' | 'voice-only';
+          }> = [
+            {
+              desc: 'Full ko-KR lock (speechConfig + transcription languageCodes)',
+              config: {
+                responseModalities: [Modality.AUDIO],
+                inputAudioTranscription: { languageCodes: ['ko-KR'] },
+                outputAudioTranscription: { languageCodes: ['ko-KR'] },
+                speechConfig: {
+                  voiceConfig: { prebuiltVoiceConfig: { voiceName } },
+                  languageCode: 'ko-KR',
+                },
+                systemInstruction,
+              },
+              lock: 'ko-KR',
+            },
+            {
+              desc: 'ko-KR speechConfig with empty transcription options',
+              config: {
+                responseModalities: [Modality.AUDIO],
+                inputAudioTranscription: {},
+                outputAudioTranscription: {},
+                speechConfig: {
+                  voiceConfig: { prebuiltVoiceConfig: { voiceName } },
+                  languageCode: 'ko-KR',
+                },
+                systemInstruction,
+              },
+              lock: 'ko-KR',
+            },
+            {
+              desc: 'voice-only fallback without languageCode',
               config: {
                 responseModalities: [Modality.AUDIO],
                 inputAudioTranscription: {},
@@ -400,75 +493,41 @@ async function startServer() {
                 },
                 systemInstruction,
               },
-              callbacks: {
-                onmessage: (serverMsg: any) => {
-                  if (!isConnected) return;
-                  const parts = serverMsg.serverContent?.modelTurn?.parts;
-                  if (Array.isArray(parts)) {
-                    for (const part of parts) {
-                      if (part.inlineData?.data) {
-                        clientWs.send(JSON.stringify({
-                          type: 'audio',
-                          audio: part.inlineData.data,
-                          mimeType: part.inlineData.mimeType || 'audio/pcm;rate=24000',
-                        }));
-                      }
-                      if (part.text) {
-                        clientWs.send(JSON.stringify({
-                          type: 'text',
-                          text: part.text,
-                        }));
-                      }
-                    }
-                  }
+              lock: 'voice-only',
+            },
+          ];
 
-                  // Forward official Gemini Live speech-to-text transcriptions
-                  if (serverMsg.serverContent?.inputTranscription?.text) {
-                    clientWs.send(JSON.stringify({
-                      type: 'input_transcript',
-                      text: serverMsg.serverContent.inputTranscription.text,
-                    }));
-                  }
+          let activeLock: 'ko-KR' | 'voice-only' = 'ko-KR';
+          let connectError: any = null;
 
-                  if (serverMsg.serverContent?.outputTranscription?.text) {
-                    clientWs.send(JSON.stringify({
-                      type: 'output_transcript',
-                      text: serverMsg.serverContent.outputTranscription.text,
-                    }));
-                  }
+          for (const attempt of configsToTry) {
+            try {
+              liveSession = await ai.live.connect({
+                model: NATIVE_AUDIO_MODEL,
+                config: attempt.config,
+                callbacks: createLiveCallbacks(),
+              });
+              activeLock = attempt.lock;
+              console.log(`[Gemini Live] Successfully connected with: ${attempt.desc} (languageLock: ${activeLock})`);
+              break;
+            } catch (err: any) {
+              connectError = err;
+              console.warn(`[Gemini Live] Attempt with "${attempt.desc}" rejected:`, err?.message || err);
+            }
+          }
 
-                  if (serverMsg.serverContent?.turnComplete) {
-                    clientWs.send(JSON.stringify({ type: 'turnComplete' }));
-                  }
-
-                  if (serverMsg.serverContent?.interrupted) {
-                    clientWs.send(JSON.stringify({ type: 'interrupted' }));
-                  }
-                },
-                onerror: (err: any) => {
-                  console.error('Gemini Live session error:', err);
-                  if (isConnected) {
-                    clientWs.send(JSON.stringify({ type: 'error', error: err?.message || 'Live session error' }));
-                  }
-                },
-                onclose: () => {
-                  if (isConnected) {
-                    clientWs.send(JSON.stringify({ type: 'sessionClosed' }));
-                  }
-                },
-              },
-            });
-
+          if (liveSession) {
             clientWs.send(JSON.stringify({
               type: 'ready',
               model: NATIVE_AUDIO_MODEL,
               modelName: 'Gemini 2.5 Flash Native Audio Dialog',
+              languageLock: activeLock,
             }));
-          } catch (initErr: any) {
-            console.error('Failed to establish Gemini Live session:', initErr);
+          } else {
+            console.error('Failed to establish Gemini Live session across all language configurations:', connectError);
             clientWs.send(JSON.stringify({
               type: 'fallback_required',
-              error: initErr?.message || 'Live connect failed, falling back to HTTP dialog',
+              error: connectError?.message || 'Live connect failed, falling back to HTTP dialog',
             }));
           }
         } else if (msg.type === 'realtime_audio' && liveSession) {

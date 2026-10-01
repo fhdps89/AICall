@@ -4,6 +4,20 @@
 
 ---
 
+### v1.2.2 (2026-10-01 KST) — 한국어 귀 고정 (Korean Ear Lock)
+- **Gemini Live 세션 언어 고정 (`server.ts`)**:
+  - `speechConfig`에 `languageCode: 'ko-KR'` 명시 및 입출력 오디오 전사(`inputAudioTranscription`, `outputAudioTranscription`)에 `languageCodes: ['ko-KR']` 고정 적용.
+  - 점진적 폴백 체계 구축: `ko-KR` 전사 옵션 거절 시 빈 전사 객체(`{}`) 및 `speechConfig.languageCode: 'ko-KR'` 유지, 최종 거절 시 세션 종료 없이 `voice-only` 모드로 안전 폴백.
+- **페르소나 프롬프트 귀 고정 및 반말 일치 (`PersonaPrompt.ts`, `VoiceCallEngine.ts`)**:
+  - `PersonaPrompt.systemInstruction`에 외국어(일본어/러시아어/중국어/영어) 오인식 판단 금지, 가나/키릴/한자/라틴 문자 발생 시 오인식 재청취 규칙 명시.
+  - 첫인사 `text_prompt`를 반말 및 외국어 금지 지시(`(통화가 연결됐어. ${nick}에게 반말로 짧게 먼저 인사해. 외국어는 쓰지 마.)`)로 통일하여 초기 언어 드리프트 원천 차단.
+- **폴백 전사 언어 고정 (`/api/gemini/transcribe`)**:
+  - 전사 프롬프트 첫 줄에 `언어는 한국어(ko-KR)로 고정. 일본어·러시아어로 전사하지 마.` 추가. Live 세션 중 텍스트 프롬프트로 재주입하지 않는 단일 귀(Single Ear) 원칙 엄수.
+- **P4 오디오 관측 인스펙터에 Language Lock 표시 (`CallScreen.tsx`)**:
+  - 실시간 세션 언어 고정 상태(`ko-KR` / `voice-only`)를 인스펙터 패널에 실시간 노출.
+
+---
+
 ### v1.2.1 (2026-10-01 KST) — 실측 관측성 및 실증 도구 장착
 - **P4 오디오 관측 인스펙터 공식 탑재 (`CallScreen.tsx`)**:
   - 통화 화면 상단에 접이식 인스펙터 패널 추가.
