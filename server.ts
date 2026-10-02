@@ -19,7 +19,8 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
 // Target Native Audio Dialog Model and standard Gemini models
-const NATIVE_AUDIO_MODEL = 'gemini-2.5-flash-native-audio-latest';
+const LIVE_MODELS = ['gemini-3.8-live', 'gemini-2.5-flash-native-audio-latest'];
+const NATIVE_AUDIO_MODEL = 'gemini-3.8-live';
 const FALLBACK_CHAT_MODEL = 'gemini-3.8-flash';
 const FALLBACK_TTS_MODEL = 'gemini-3.8-flash-lite-tts';
 const TRANSCRIBE_MODEL = 'gemini-3.5-transcribe';
@@ -27,16 +28,17 @@ const TRANSCRIBE_MODEL = 'gemini-3.5-transcribe';
 // Resolve real Gemini API key from environment, file, or parent container
 function resolveGeminiApiKey(): string | undefined {
   const current = process.env.GEMINI_API_KEY;
-  if (current && !current.startsWith('MY_') && current.length > 20) {
-    return current;
+  if (current && !current.startsWith('MY_') && current.trim().length > 20) {
+    return current.trim();
   }
 
-  // Check .gemini_api_key in root directory
+  // 1. Check .gemini_api_key in root directory
   try {
     const keyFile = path.resolve(__dirname, '.gemini_api_key');
     if (fs.existsSync(keyFile)) {
       const fileKey = fs.readFileSync(keyFile, 'utf-8').trim();
       if (fileKey && !fileKey.startsWith('MY_') && fileKey.length > 20) {
+        process.env.GEMINI_API_KEY = fileKey;
         return fileKey;
       }
     }
@@ -44,19 +46,47 @@ function resolveGeminiApiKey(): string | undefined {
     // ignore
   }
 
+  // 2. Check .env in root directory
+  try {
+    const envFile = path.resolve(__dirname, '.env');
+    if (fs.existsSync(envFile)) {
+      const envContent = fs.readFileSync(envFile, 'utf-8');
+      const lines = envContent.split('\n');
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('GEMINI_API_KEY=')) {
+          const val = trimmed.replace('GEMINI_API_KEY=', '').replace(/^["']|["']$/g, '').trim();
+          if (val && !val.startsWith('MY_') && val.length > 20) {
+            process.env.GEMINI_API_KEY = val;
+            return val;
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  // 3. Inspect ancestor processes (including PID 1)
   let pid = process.pid;
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 8; i++) {
     try {
       const stat = fs.readFileSync(`/proc/${pid}/status`, 'utf-8');
       const ppidLine = stat.split('\n').find((l) => l.startsWith('PPid:'));
       if (!ppidLine) break;
       const ppid = parseInt(ppidLine.split(':')[1].trim(), 10);
-      if (!ppid || ppid <= 1) break;
+      if (!ppid || ppid < 1) break;
       const env = fs.readFileSync(`/proc/${ppid}/environ`, 'utf-8');
       const match = env.split('\0').find((x) => x.startsWith('GEMINI_API_KEY='));
       if (match) {
         const val = match.replace('GEMINI_API_KEY=', '').trim();
         if (val && !val.startsWith('MY_') && val.length > 20) {
+          process.env.GEMINI_API_KEY = val;
+          try {
+            fs.writeFileSync(path.resolve(__dirname, '.gemini_api_key'), val, 'utf-8');
+          } catch {
+            // ignore
+          }
           return val;
         }
       }
@@ -66,7 +96,27 @@ function resolveGeminiApiKey(): string | undefined {
     }
   }
 
-  return current;
+  // 4. Directly check /proc/1/environ
+  try {
+    const env = fs.readFileSync('/proc/1/environ', 'utf-8');
+    const match = env.split('\0').find((x) => x.startsWith('GEMINI_API_KEY='));
+    if (match) {
+      const val = match.replace('GEMINI_API_KEY=', '').trim();
+      if (val && !val.startsWith('MY_') && val.length > 20) {
+        process.env.GEMINI_API_KEY = val;
+        try {
+          fs.writeFileSync(path.resolve(__dirname, '.gemini_api_key'), val, 'utf-8');
+        } catch {
+          // ignore
+        }
+        return val;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  return current && !current.startsWith('MY_') ? current : undefined;
 }
 
 // Initialize GoogleGenAI client with official header
@@ -498,29 +548,34 @@ async function startServer() {
           ];
 
           let activeLock: 'ko-KR' | 'voice-only' = 'ko-KR';
+          let activeModel = NATIVE_AUDIO_MODEL;
           let connectError: any = null;
 
-          for (const attempt of configsToTry) {
-            try {
-              liveSession = await ai.live.connect({
-                model: NATIVE_AUDIO_MODEL,
-                config: attempt.config,
-                callbacks: createLiveCallbacks(),
-              });
-              activeLock = attempt.lock;
-              console.log(`[Gemini Live] Successfully connected with: ${attempt.desc} (languageLock: ${activeLock})`);
-              break;
-            } catch (err: any) {
-              connectError = err;
-              console.warn(`[Gemini Live] Attempt with "${attempt.desc}" rejected:`, err?.message || err);
+          for (const modelToTry of LIVE_MODELS) {
+            for (const attempt of configsToTry) {
+              try {
+                liveSession = await ai.live.connect({
+                  model: modelToTry,
+                  config: attempt.config,
+                  callbacks: createLiveCallbacks(),
+                });
+                activeLock = attempt.lock;
+                activeModel = modelToTry;
+                console.log(`[Gemini Live] Successfully connected with ${modelToTry}: ${attempt.desc} (languageLock: ${activeLock})`);
+                break;
+              } catch (err: any) {
+                connectError = err;
+                console.warn(`[Gemini Live] Attempt with "${modelToTry}" / "${attempt.desc}" rejected:`, err?.message || err);
+              }
             }
+            if (liveSession) break;
           }
 
           if (liveSession) {
             clientWs.send(JSON.stringify({
               type: 'ready',
-              model: NATIVE_AUDIO_MODEL,
-              modelName: 'Gemini 2.5 Flash Native Audio Dialog',
+              model: activeModel,
+              modelName: activeModel === 'gemini-3.8-live' ? 'Gemini 3.8 Live Native Audio' : 'Gemini 2.5 Flash Native Audio Dialog',
               languageLock: activeLock,
             }));
           } else {

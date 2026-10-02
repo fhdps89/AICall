@@ -1,10 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Eye, EyeOff, X, Check, Sparkles, Volume2, Play, Square, Loader2 } from 'lucide-react';
+import { X, Check, Sparkles, Volume2, Play, Square, Loader2, CheckCircle2, AlertCircle, RefreshCw } from 'lucide-react';
 import { UserPreferences, AiEngineMode } from '../../data/UserPreferences';
 import { TtsVoiceOption, VoiceGender, TtsVoice } from '../../types';
 import { TTS_VOICE_LIST, getTtsVoice } from '../../voice/TtsVoice';
 import { GeminiClient } from '../../voice/GeminiClient';
-import { OpenRouterClient } from '../../voice/OpenRouterClient';
 
 interface SettingsSheetProps {
   isOpen: boolean;
@@ -17,23 +16,12 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({ isOpen, onClose, o
   const [nicknameSavedNotice, setNicknameSavedNotice] = useState(false);
 
   // Engine mode
-  const [engineMode, setEngineMode] = useState<AiEngineMode>(UserPreferences.getPreferredEngine());
+  const [engineMode] = useState<AiEngineMode>(UserPreferences.getPreferredEngine());
 
-  // Gemini state
-  const [geminiKey, setGeminiKey] = useState(UserPreferences.getGeminiApiKey() || '');
-  const [geminiEditing, setGeminiEditing] = useState(false);
-  const [geminiDraft, setGeminiDraft] = useState('');
-  const [geminiVisible, setGeminiVisible] = useState(false);
+  // Gemini server status
+  const [geminiStatus, setGeminiStatus] = useState<{ available: boolean; modelName?: string; defaultModel?: string } | null>(null);
   const [geminiTesting, setGeminiTesting] = useState(false);
   const [geminiTestResult, setGeminiTestResult] = useState<{ ok: boolean; text: string } | null>(null);
-
-  // OpenRouter state
-  const [orKey, setOrKey] = useState(UserPreferences.getOpenRouterApiKey() || '');
-  const [orEditing, setOrEditing] = useState(false);
-  const [orDraft, setOrDraft] = useState('');
-  const [orVisible, setOrVisible] = useState(false);
-  const [orTesting, setOrTesting] = useState(false);
-  const [orTestResult, setOrTestResult] = useState<{ ok: boolean; text: string } | null>(null);
 
   // Voice choice & gender filter
   const [selectedVoice, setSelectedVoice] = useState<TtsVoiceOption>(UserPreferences.getTtsVoiceOption());
@@ -41,6 +29,14 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({ isOpen, onClose, o
   const [previewingVoice, setPreviewingVoice] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      GeminiClient.checkStatus().then((status) => {
+        setGeminiStatus(status);
+      });
+    }
+  }, [isOpen]);
 
   // Stop preview audio when sheet closes or unmounts
   useEffect(() => {
@@ -70,12 +66,6 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({ isOpen, onClose, o
 
   const currentVoice = getTtsVoice(selectedVoice);
 
-  const handleSelectEngine = (mode: AiEngineMode) => {
-    setEngineMode(mode);
-    UserPreferences.setPreferredEngine(mode);
-    onSaved();
-  };
-
   const handleSaveNickname = () => {
     UserPreferences.setNickname(nickname);
     setNicknameSavedNotice(true);
@@ -93,7 +83,6 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({ isOpen, onClose, o
   const handlePlayPreview = async (e: React.MouseEvent, voice: TtsVoice) => {
     e.stopPropagation();
 
-    // If already playing this voice, stop it
     if (previewingVoice === voice.option) {
       handleStopPreview();
       return;
@@ -103,8 +92,7 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({ isOpen, onClose, o
     setPreviewLoading(voice.option);
 
     try {
-      const apiKey = geminiKey.trim() || undefined;
-      const res = await GeminiClient.executeTts(voice.sampleText, voice.voice, apiKey);
+      const res = await GeminiClient.executeTts(voice.sampleText, voice.voice);
       if (!res || !res.audioBase64) {
         throw new Error('음성 데이터 생성 실패');
       }
@@ -133,59 +121,12 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({ isOpen, onClose, o
     }
   };
 
-  // Gemini key actions
-  const handleSaveGeminiKey = () => {
-    UserPreferences.setGeminiApiKey(geminiDraft);
-    setGeminiKey(UserPreferences.getGeminiApiKey() || '');
-    setGeminiEditing(false);
-    setGeminiDraft('');
-    setGeminiTestResult(null);
-    onSaved();
-  };
-
-  const handleClearGeminiKey = () => {
-    UserPreferences.setGeminiApiKey(null);
-    setGeminiKey('');
-    setGeminiEditing(false);
-    setGeminiDraft('');
-    setGeminiTestResult(null);
-    onSaved();
-  };
-
-  const handleTestGeminiKey = async (keyToTest: string) => {
+  const handleTestGeminiKey = async () => {
     setGeminiTesting(true);
     setGeminiTestResult(null);
-    const res = await GeminiClient.testKey(keyToTest);
+    const res = await GeminiClient.testKey();
     setGeminiTesting(false);
     setGeminiTestResult({ ok: res.ok, text: res.label });
-  };
-
-  // OpenRouter key actions
-  const handleSaveOrKey = () => {
-    UserPreferences.setOpenRouterApiKey(orDraft);
-    setOrKey(UserPreferences.getOpenRouterApiKey() || '');
-    setOrEditing(false);
-    setOrDraft('');
-    setOrTestResult(null);
-    onSaved();
-  };
-
-  const handleClearOrKey = () => {
-    UserPreferences.setOpenRouterApiKey(null);
-    setOrKey('');
-    setOrEditing(false);
-    setOrDraft('');
-    setOrTestResult(null);
-    onSaved();
-  };
-
-  const handleTestOrKey = async (keyToTest: string) => {
-    setOrTesting(true);
-    setOrTestResult(null);
-    const voice = getTtsVoice(selectedVoice);
-    const res = await OpenRouterClient.testKey(keyToTest, voice);
-    setOrTesting(false);
-    setOrTestResult({ ok: res.ok, text: res.label });
   };
 
   const filteredVoices = TTS_VOICE_LIST.filter((v) => {
@@ -429,7 +370,7 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({ isOpen, onClose, o
               AI 연결 엔진 및 API 키
             </div>
 
-            {/* Google Gemini Card */}
+            {/* Google Gemini Server Connection Card */}
             <div
               className={`p-3.5 rounded-2xl border transition-all ${
                 engineMode === 'gemini' ? 'bg-[#E8A87C]/5 border-[#E8A87C]/30' : 'bg-[#1A1210]/40 border-white/5'
@@ -437,110 +378,61 @@ export const SettingsSheet: React.FC<SettingsSheetProps> = ({ isOpen, onClose, o
             >
               <div className="flex items-center justify-between mb-1.5">
                 <div className="flex items-center gap-1.5 text-xs font-bold text-[#E8A87C]">
-                  Gemini 2.5 Flash Native Audio Dialog
+                  {geminiStatus?.modelName || 'Gemini 실시간 AI 음성 대화'}
                 </div>
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-semibold">
-                  GDP 크레딧 서버 연동 완료
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-semibold flex items-center gap-1">
+                  <CheckCircle2 size={11} />
+                  서버 연동 완료
                 </span>
               </div>
 
               <div className="p-2.5 rounded-xl bg-[#1A1210] border border-white/5 space-y-1 text-xs">
                 <div className="flex items-center justify-between">
                   <span className="text-[#F5EDE6]/50">실시간 통화 모델</span>
-                  <span className="font-semibold text-[#E8A87C]">Gemini 2.5 Flash Native Audio</span>
+                  <span className="font-semibold text-[#E8A87C]">Gemini 3.8 Live / 2.5 Flash</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-[#F5EDE6]/50">통화 전송 프로토콜</span>
                   <span className="font-semibold text-[#E8A87C]">Live API (전이중 실시간 오디오)</span>
                 </div>
-                {geminiKey ? (
-                  <div className="flex items-center justify-between pt-1 border-t border-white/5">
-                    <span className="text-[#F5EDE6]/50">맞춤 API 키</span>
-                    <span className="text-[#E8A87C] font-mono">{UserPreferences.maskKey(geminiKey)}</span>
-                  </div>
-                ) : null}
+                <div className="flex items-center justify-between">
+                  <span className="text-[#F5EDE6]/50">서버 키 상태</span>
+                  <span className="font-semibold text-emerald-400">정상 활성화됨</span>
+                </div>
               </div>
 
               <div className="flex flex-wrap gap-2 text-xs pt-2">
                 <button
-                  onClick={() => handleTestGeminiKey(geminiKey)}
+                  onClick={handleTestGeminiKey}
                   disabled={geminiTesting}
-                  className="px-3 py-1.5 rounded-lg bg-[#E8A87C] text-[#1A1210] font-semibold hover:bg-[#dca074] cursor-pointer transition shadow"
+                  className="px-3.5 py-1.5 rounded-lg bg-[#E8A87C] text-[#1A1210] font-semibold hover:bg-[#dca074] cursor-pointer transition shadow flex items-center gap-1.5"
                 >
-                  {geminiTesting ? '연결 테스트 중…' : 'Gemini 직결 테스트'}
+                  {geminiTesting ? (
+                    <>
+                      <Loader2 size={13} className="animate-spin" />
+                      연결 테스트 중…
+                    </>
+                  ) : (
+                    <>
+                      <RefreshCw size={13} />
+                      Gemini 서버 연결 테스트
+                    </>
+                  )}
                 </button>
-                <button
-                  onClick={() => {
-                    setGeminiDraft(geminiKey);
-                    setGeminiEditing(!geminiEditing);
-                  }}
-                  className="px-3 py-1.5 rounded-lg bg-white/5 text-[#F5EDE6]/70 hover:bg-white/10 cursor-pointer"
-                >
-                  {geminiEditing ? '키 입력 닫기' : '개별 맞춤 키 설정 (선택)'}
-                </button>
-                {geminiKey ? (
-                  <button
-                    onClick={handleClearGeminiKey}
-                    className="px-3 py-1.5 rounded-lg bg-white/5 text-[#E07070] hover:bg-[#E07070]/15 cursor-pointer"
-                  >
-                    맞춤 키 삭제
-                  </button>
-                ) : null}
               </div>
 
               {geminiTestResult && (
                 <div
-                  className={`text-xs p-2.5 rounded-lg mt-2 whitespace-pre-line leading-relaxed ${
+                  className={`text-xs p-2.5 rounded-lg mt-2 whitespace-pre-line leading-relaxed flex items-start gap-1.5 ${
                     geminiTestResult.ok
                       ? 'bg-[#E8A87C]/15 text-[#E8A87C] border border-[#E8A87C]/30'
                       : 'bg-[#E07070]/15 text-[#E07070] border border-[#E07070]/30'
                   }`}
                 >
-                  {geminiTestResult.text}
+                  {geminiTestResult.ok ? <CheckCircle2 size={14} className="shrink-0 mt-0.5" /> : <AlertCircle size={14} className="shrink-0 mt-0.5" />}
+                  <span>{geminiTestResult.text}</span>
                 </div>
               )}
-
-              {geminiEditing ? (
-                <div className="p-3 rounded-xl bg-[#1A1210] border border-[#E8A87C]/40 space-y-2.5 mt-2">
-                  <div className="relative flex items-center">
-                    <input
-                      type={geminiVisible ? 'text' : 'password'}
-                      value={geminiDraft}
-                      onChange={(e) => setGeminiDraft(e.target.value)}
-                      placeholder="AIzaSy… 로 시작하는 Gemini API 키"
-                      className="w-full px-3 py-2 pr-20 rounded-lg bg-[#241A17] border border-white/10 text-xs text-[#F5EDE6] focus:outline-none focus:border-[#E8A87C]"
-                    />
-                    <div className="absolute right-2 flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => setGeminiVisible(!geminiVisible)}
-                        className="p-1 text-[#F5EDE6]/50 hover:text-[#F5EDE6] cursor-pointer"
-                      >
-                        {geminiVisible ? <EyeOff size={14} /> : <Eye size={14} />}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="flex justify-end gap-2 text-xs">
-                    <button
-                      onClick={() => {
-                        setGeminiEditing(false);
-                        setGeminiDraft('');
-                      }}
-                      className="px-3 py-1.5 rounded-lg text-[#F5EDE6]/60 hover:text-[#F5EDE6] cursor-pointer"
-                    >
-                      취소
-                    </button>
-                    <button
-                      onClick={handleSaveGeminiKey}
-                      disabled={!geminiDraft.trim()}
-                      className="px-3 py-1.5 rounded-lg bg-[#E8A87C] text-[#1A1210] font-semibold hover:bg-[#d8976b] disabled:opacity-40 cursor-pointer"
-                    >
-                      저장
-                    </button>
-                  </div>
-                </div>
-              ) : null}
             </div>
           </div>
         </div>
