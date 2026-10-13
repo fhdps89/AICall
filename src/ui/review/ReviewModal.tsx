@@ -151,7 +151,7 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
               </span>
             </div>
             <h2 className="text-lg sm:text-xl font-bold text-white mt-1 flex items-center gap-2">
-              <span>통화 복기 & 실수 분석 리포트 (B-4)</span>
+              <span>통화 복기 & 실수 분석</span>
             </h2>
           </div>
           <button

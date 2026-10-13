@@ -94,7 +94,7 @@ export const LectureModal: React.FC<LectureModalProps> = ({ user, lecture, onClo
       <div className="w-full max-w-2xl max-h-[92vh] overflow-y-auto bg-[#161D2A] border border-slate-800 rounded-2xl shadow-2xl">
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800">
           <div>
-            <div className="text-xs font-bold text-sky-400">오늘 아침 강의 (B-7) · {lecture.date}</div>
+            <div className="text-xs font-bold text-sky-400">오늘 아침 강의 · {lecture.date}</div>
             <div className="text-lg font-black text-white">{lecture.title || "아침 강의"}</div>
           </div>
           <button onClick={onClose} className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 cursor-pointer">

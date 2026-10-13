@@ -75,7 +75,7 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({ user, on
             <Headphones className="w-5 h-5" />
           </div>
           <div>
-            <div className="text-xs font-bold text-sky-400">오늘 아침 강의 (B-7)</div>
+            <div className="text-xs font-bold text-sky-400">오늘 아침 강의</div>
             <div className="text-lg font-black text-white">
               {loading
                 ? "불러오는 중…"

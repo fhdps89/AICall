@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { useDevMode, setDevMode } from "../../data/devMode";
 import {
   X,
   Save,
@@ -41,6 +42,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 }) => {
   const [formData, setFormData] = useState<PromptPlaceholders>(placeholders);
   const [saving, setSaving] = useState(false);
+  const devMode = useDevMode();
   const [activeTab, setActiveTab] = useState<"prompts" | "models" | "recordings" | "feed" | "usage">("prompts");
   const [enablePartialStt, setEnablePartialStt] = useState<boolean>(() => {
     return localStorage.getItem("onecall_enable_partial_transcribe") !== "false";
@@ -126,6 +128,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           >
             프롬프트 변수 입력 (빈칸 채우기)
           </button>
+          {devMode && (
           <button
             type="button"
             onClick={() => setActiveTab("models")}
@@ -135,8 +138,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 : "border-transparent text-slate-400 hover:text-slate-200"
             }`}
           >
-            연동 모델 및 보안 정보 (Part B-1)
+            개발자: 모델·보안
           </button>
+          )}
           <button
             type="button"
             onClick={() => setActiveTab("recordings")}
@@ -146,7 +150,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 : "border-transparent text-slate-400 hover:text-slate-200"
             }`}
           >
-            녹음 보관함 (Storage Chunks)
+            녹음 보관함
           </button>
           <button
             type="button"
@@ -157,7 +161,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 : "border-transparent text-slate-400 hover:text-slate-200"
             }`}
           >
-            그록봇 피드 (B-8)
+            그록봇 피드
           </button>
           <button
             type="button"
@@ -168,13 +172,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 : "border-transparent text-slate-400 hover:text-slate-200"
             }`}
           >
-            사용량·예상 비용 (B-10)
+            사용량·예상 비용
           </button>
         </div>
 
         {/* Body */}
         <div className="p-6 overflow-y-auto flex-1">
-          {activeTab === "usage" ? (
+          {activeTab === "models" && !devMode ? null : activeTab === "usage" ? (
             <UsagePanel userId={userId} />
           ) : activeTab === "feed" ? (
             <FeedSettingsPanel userId={userId} />
@@ -424,7 +428,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       {/* sttPartial preview */}
                       {sess.sttPartial && sess.sttPartial.length > 0 && (
                         <div className="pt-1.5 border-t border-slate-800 text-[10px] text-purple-300">
-                          <span className="font-bold text-purple-400 block mb-0.5">1분 단위 전사 (gemini-3.5-transcribe):</span>
+                          <span className="font-bold text-purple-400 block mb-0.5">1분 단위 받아쓰기:</span>
                           {sess.sttPartial.map((stt, sIdx) => (
                             <div key={sIdx} className="bg-purple-950/20 border border-purple-800/30 p-1.5 rounded mb-1">
                               <span className="font-mono text-[9px] text-purple-400 mr-1.5">[{stt.timeRange}]</span>
@@ -439,6 +443,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               )}
             </div>
           )}
+        </div>
+
+        {/* 개발자 메뉴 (기본 꺼짐) */}
+        <div className="px-5 py-2.5 border-t border-slate-800 flex items-center justify-end">
+          <button
+            type="button"
+            onClick={() => {
+              const next = !devMode;
+              setDevMode(next);
+              if (!next && activeTab === "models") setActiveTab("prompts");
+            }}
+            className="text-[11px] text-slate-500 hover:text-slate-300 cursor-pointer"
+          >
+            {devMode ? "개발자 메뉴 끄기" : "개발자 메뉴"}
+          </button>
         </div>
       </div>
     </div>

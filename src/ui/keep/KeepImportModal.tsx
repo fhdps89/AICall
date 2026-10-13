@@ -76,7 +76,7 @@ export const KeepImportModal: React.FC<{ user: User; onClose: () => void; onSave
       <div className="w-full max-w-3xl max-h-[92vh] overflow-y-auto bg-[#161D2A] border border-slate-800 rounded-2xl shadow-2xl">
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800">
           <div>
-            <div className="text-xs font-bold text-emerald-400">Keep 가져오기 (B-10)</div>
+            <div className="text-xs font-bold text-emerald-400">Keep 가져오기</div>
             <div className="text-lg font-black text-white">English mistake log 붙여넣기</div>
           </div>
           <button onClick={onClose} className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 cursor-pointer">

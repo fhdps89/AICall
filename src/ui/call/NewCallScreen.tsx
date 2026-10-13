@@ -1,5 +1,6 @@
 import { recordUsage } from "../../services/usage/usageService";
 import React, { useState, useEffect, useRef } from "react";
+import { useDevMode } from "../../data/devMode";
 import {
   GoalData,
   createCallSession,
@@ -60,6 +61,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
   onEndCall,
   onExit,
 }) => {
+  const devMode = useDevMode();
   const sessionIdRef = useRef<string>(`call-${Date.now()}`);
   const [status, setStatus] = useState<"connecting" | "connected" | "reconnecting" | "closed" | "error">("connecting");
   const [statusMessage, setStatusMessage] = useState<string>("튜터 연결 준비 중...");
@@ -336,10 +338,12 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
               {currentLesson.index}과. {currentLesson.title}
             </span>
           </div>
-          <div className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-1.5 font-mono">
-            <Shield className="w-3 h-3 text-emerald-400" />
-            <span>gemini-3.8-live · 세션 재개 & 컨텍스트 압축 ON</span>
-          </div>
+          {devMode && (
+            <div className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-1.5 font-mono">
+              <Shield className="w-3 h-3 text-emerald-400" />
+              <span>gemini-3.8-live · 세션 재개 & 컨텍스트 압축 ON</span>
+            </div>
+          )}
         </div>
 
         {/* Status Pill */}

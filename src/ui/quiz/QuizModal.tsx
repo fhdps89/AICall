@@ -344,7 +344,7 @@ export const QuizModal: React.FC<QuizModalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h3 className="text-sm font-bold text-white">오늘의 복습 퀴즈 (B-6)</h3>
+                <h3 className="text-sm font-bold text-white">오늘의 복습 퀴즈</h3>
                 {!isFinished && (
                   <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-amber-400 border border-slate-700">
                     {currentIndex + 1} / {queue.length}
@@ -506,7 +506,7 @@ export const QuizModal: React.FC<QuizModalProps> = ({
                         {isGrading ? (
                           <>
                             <Loader2 className="w-4 h-4 animate-spin" />
-                            <span>gemini-3.8-flash 채점 중...</span>
+                            <span>채점 중...</span>
                           </>
                         ) : (
                           <>
@@ -549,7 +549,7 @@ export const QuizModal: React.FC<QuizModalProps> = ({
                         {isTranscribing && (
                           <span className="text-amber-400 flex items-center justify-center gap-1.5">
                             <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            <span>gemini-3.5-transcribe 음성 받아쓰기 중...</span>
+                            <span>음성 받아쓰는 중...</span>
                           </span>
                         )}
                         {isGrading && (

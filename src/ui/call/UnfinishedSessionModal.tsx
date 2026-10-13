@@ -130,7 +130,7 @@ export const UnfinishedSessionModal: React.FC<UnfinishedSessionModalProps> = ({
 
           <div className="text-[11px] text-slate-400 flex items-center gap-1.5 pt-1">
             <Database className="w-3.5 h-3.5 text-emerald-400" />
-            <span>IndexedDB 및 Cloud Storage에 음성 파일이 안전하게 보관되어 있습니다.</span>
+            <span>녹음은 안전하게 저장돼 있어요.</span>
           </div>
         </div>
 
@@ -142,7 +142,7 @@ export const UnfinishedSessionModal: React.FC<UnfinishedSessionModalProps> = ({
             className="flex-1 py-3 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-lg shadow-amber-500/20 active:scale-95"
           >
             <Sparkles className="w-4 h-4 text-slate-950" />
-            <span>복기 시작 (B-4 리포트 생성)</span>
+            <span>복기 시작</span>
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
 

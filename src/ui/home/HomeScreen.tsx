@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { useDevMode } from "../../data/devMode";
 import { User } from "firebase/auth";
 import {
   GoalData,
@@ -56,6 +57,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   onOpenSettings,
   onLogout,
 }) => {
+  const devMode = useDevMode();
   const [selectedPromptGoal, setSelectedPromptGoal] = useState<GoalData | null>(null);
   const [showPromptModal, setShowPromptModal] = useState(false);
   const [promptViewMode, setPromptViewMode] = useState<"raw" | "hydrated">("hydrated");
@@ -138,9 +140,11 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <span className="font-bold text-sm text-white tracking-tight">One Call English</span>
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 font-medium">
-                  1단계 뼈대
-                </span>
+                {devMode && (
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 font-medium">
+                    개발자 모드
+                  </span>
+                )}
               </div>
               <p className="text-[11px] text-slate-400 font-mono truncate max-w-[200px] sm:max-w-none">
                 {user.email}
@@ -175,7 +179,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
               <Calendar className="w-4 h-4 text-amber-400" />
-              <span>요일별 집중 루틴 (B-9)</span>
+              <span>요일별 집중 루틴</span>
             </div>
             <span className="text-[11px] text-slate-400">
               오늘: <strong className="text-amber-400">{todayRoutine.dayName}</strong> ({todayRoutine.title})
@@ -227,7 +231,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               </div>
               <div>
                 <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold text-amber-400">간격 반복 & 퀴즈 (B-5·B-6)</span>
+                  <span className="text-xs font-bold text-amber-400">복습 & 퀴즈</span>
                   <span className="text-[11px] text-slate-400">
                     보류 {dueMistakes.filter((m) => m.status === "deferred").length}개 · 오늘 복습 대상 {dueMistakes.filter((m) => m.status === "reviewing").length}개
                   </span>
@@ -264,6 +268,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               >
                 <span>Keep 가져오기</span>
               </button>
+              {devMode && (<>
               <button
                 onClick={() => setShowSttBench(true)}
                 className="px-3 py-2 rounded-xl bg-violet-500/15 hover:bg-violet-500/25 text-violet-300 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer border border-violet-500/30"
@@ -277,6 +282,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                 <Wrench className="w-3.5 h-3.5 text-amber-400" />
                 <span>{showDebugSection ? "디버그 닫기" : "임시 디버그"}</span>
               </button>
+              </>)}
             </div>
           </div>
 
@@ -289,7 +295,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           )}
 
           {/* Temporary Debug Tool (B-5 requirement 2): "이 실수 강의 들었음 처리" */}
-          {showDebugSection && (
+          {devMode && showDebugSection && (
             <div className="pt-3 border-t border-slate-800/80 space-y-3">
               <div className="flex items-center justify-between text-xs text-slate-400">
                 <span className="font-semibold text-amber-300 flex items-center gap-1.5">
@@ -451,6 +457,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                   </select>
                 </div>
 
+                {devMode && (
                 <button
                   onClick={() => {
                     setSelectedPromptGoal(todayGoal);
@@ -461,6 +468,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                   <FileText className="w-3.5 h-3.5 text-amber-400" />
                   <span>원문 튜터 프롬프트 확인</span>
                 </button>
+                )}
               </div>
 
               {/* Start Call CTA (B-2 requirement) */}
@@ -472,7 +480,8 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                 <span>오늘 수업 통화 시작하기 ({currentLesson.index}과: {currentLesson.title})</span>
               </button>
 
-              {/* Status info */}
+              {/* Status info (developer only) */}
+              {devMode && (
               <div className="pt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs border-t border-slate-800/70 text-slate-400">
                 <div className="flex items-center gap-2">
                   <CheckCircle className="w-4 h-4 text-emerald-400" />
@@ -482,6 +491,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                   GoAway 자동 재연결 지원
                 </div>
               </div>
+              )}
             </div>
           ) : (
             <div className="text-center py-6 text-slate-400 text-sm">
@@ -543,6 +553,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                         ))}
                       </select>
 
+                      {devMode && (
                       <button
                         onClick={() => {
                           setSelectedPromptGoal(goal);
@@ -553,6 +564,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                         <span>프롬프트 원문</span>
                         <ChevronRight className="w-3 h-3" />
                       </button>
+                      )}
                     </div>
 
                     <button
