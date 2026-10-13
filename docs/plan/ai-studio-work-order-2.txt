@@ -1,0 +1,16 @@
+[One Call English 작업 지시서 2] 기획 v4 기준 정리 (새 기능 없음)
+
+이 앱의 기준 스펙은 저장소 docs/plan/implementation_plan_v4.md의 Part B야. v2.0.0 때 예전 기획으로 만든 부분 중 v4와 어긋나는 것을 정리해 줘. 새 기능은 만들지 마.
+
+1) 복기(/api/review) 프롬프트에서 "인식이 약간 틀렸으면 적당히 다듬어라"는 지시를 없애고, 반대로 이렇게 바꿔:
+   "myPhrase must copy the learner's words exactly as transcribed, including grammar mistakes. Never correct, clean up, or paraphrase myPhrase."
+   (실수가 틀린 그대로 기록되는 게 이 앱의 핵심이야.)
+2) 받아쓰기(/api/gemini/transcribe)의 "한국어(ko-KR)로 고정" 문구를 없애고, 영어 발화를 VERBATIM으로 받아쓰게 바꿔:
+   "Transcribe this audio verbatim in English. Keep every grammar mistake, filler word, repetition and false start exactly as spoken. Do not correct anything. Output only the transcript."
+   모델 이름은 models.ts의 GEMINI_STT_MODEL을 쓰고 바꾸지 마.
+3) 텔레그램 기능을 모두 지워 줘: server.ts의 /api/telegram/send, MorningPodcastModal의 텔레그램 버튼과 상태, storage.ts와 types의 telegramBotToken·telegramChatId. (나중에 그록봇이 읽는 피드 주소로 대신할 거야.)
+4) metadata.json의 name을 "One Call English", description을 "AI 코치와 실수 루프로 영어를 키우는 AI 전화영어"로 바꿔.
+5) 설정 화면에서 API 키를 브라우저에 입력·저장하는 칸이 있으면 숨기고, 서버는 GEMINI_API_KEY Secret만 쓰게 해 줘. (customApiKey를 받는 코드는 지금은 남겨 둬도 돼.)
+
+손대지 말 것: src/config/models.ts의 모델 이름, src/voice/의 오디오 처리(16kHz 변환, 에코 게이트, 말 끊기), docs/plan/ 폴더.
+끝나면 README.md와 Project_context.MD의 버전 히스토리에 한 줄로 기록하고, 바꾼 파일 목록과 내가 프리뷰에서 확인할 방법을 알려 줘.

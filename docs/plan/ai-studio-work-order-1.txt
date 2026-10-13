@@ -1,0 +1,385 @@
+[One Call English 작업 지시서 1] 기존 앱을 One Call English로 바꾸기: 1단계 뼈대
+
+이 앱은 지금 「오늘도 한 통」(한국어 AI 친구와 음성 통화하는 앱, v1.2.2)이야. 새 앱을 만들지 말고, 이 앱과 지금 연결된 GitHub 저장소(fhdps89/AICall)를 그대로 쓰면서 영어 학습 앱 "One Call English"로 바꿀 거야.
+확정 스펙은 아래 "Part B"이고, 맨 아래 "부록"은 각 목표의 튜터 프롬프트 원문이야. 이 대화 전체에서 Part B를 기준으로 삼아 줘. 저장소의 docs/plan/ 폴더에 같은 기획 문서가 있어.
+
+[기존 코드 처리 원칙]
+- 유지: server.ts의 Live 중계(WebSocket /live)와 오디오 처리(16kHz 변환 downsampleTo16kHz, 에코 게이트, AudioSink, 말 끊기 barge-in), P4 오디오 인스펙터(개발용, 기본 접힘). 이 부분은 지금 잘 동작하니 다시 짜지 마.
+- 감싸기: /api/gemini/chat, /api/gemini/transcribe, /api/gemini/tts는 LlmProvider, SttProvider, TtsProvider 뒤로 옮기고, 흩어진 모델 이름(server.ts, GeminiClient.ts, TtsVoice.ts)은 src/config/models.ts 한 곳으로 모아.
+- 나중에 교체(이번에는 손대지 마): 한국어 고정(ko-KR languageLock), 한국어 친구 페르소나(PersonaPrompt.ts), OpenRouter 관련 코드. 통화 기능을 만들 때(B-2) 바꿀 거야.
+- 이번에 바꿀 것: metadata.json의 앱 이름을 "One Call English"로, 설명을 "AI 코치와 실수 루프로 영어를 키우는 AI 전화영어"로. 브라우저에 API 키를 저장하는 설정 화면은 숨기고 서버 Secrets(GEMINI_API_KEY)만 사용.
+- 문서: docs/plan/ 폴더의 파일은 고치지 마(GitHub에서 관리해). README.md와 Project_context.MD는 이미 One Call English 기준으로 바뀌어 있으니, 바뀐 기능만 짧게 덧붙여.
+- 지금의 디자인(어둡고 따뜻한 앰버 톤, Glowing Orb)은 그대로 유지.
+
+이번에는 "B-12 1단계" 중 아래 세 가지만 만들어 줘.
+1) Firebase 로그인(허용 계정 1개만, 그 외 계정은 거부), Firestore와 Cloud Storage 연결
+2) src/config/models.ts와 공급자 인터페이스(LiveProvider, SttProvider, LlmProvider, TtsProvider) 뼈대. 모델 이름은 Part B-1에 적힌 그대로 쓰고 바꾸지 마. 기존 엔드포인트는 위 원칙대로 이 인터페이스 뒤로 옮겨
+3) 4개 목표와 요일 루틴 데이터(B-9), 첫 실행 때 목표별 진도 입력 화면, 홈 화면(오늘 수업 카드). 기존 홈 화면을 고쳐서 써도 돼
+   - 각 목표의 tutorPrompt에는 부록의 원문을 그대로 저장해 줘. 원문 속 Google Keep, "Next lesson", PROGRESS 같은 Gemini 앱 전용 지시는 나중에 통화 기능을 만들 때 앱 데이터(진도, 실수 보관함)로 바꿔 넣을 거니까 지금은 손대지 마
+   - 원문의 [직무], [Survey topics I chose] 같은 빈칸은 설정 화면에서 내가 채울 수 있게 해 줘
+
+아직 통화·녹음·받아쓰기·복기 기능은 새로 만들지 마. 기존 통화 화면은 동작하는 상태로 남겨 둬.
+만들기 전에 어떤 파일을 만들고 어떤 기존 파일을 고칠지 목록부터 보여 주고, 끝나면 내가 프리뷰에서 확인할 방법을 알려 줘.
+허용할 계정: <여기에 내 Google 계정 이메일>
+
+================ Part B ================
+## Part B. 테스트판 스펙 (찬식님 1인, 웹) — AI Studio에 붙여넣을 부분
+
+> 만들 범위: B-1 ~ B-12. 한 번에 다 만들지 말고 **B-12의 단계 순서대로** 하나씩 요청합니다.
+> 2단계 이후의 서버 작업(오디오 이어 붙이기, 예약 생성)은 AI Studio만으로 불완전할 수 있습니다. 막히면 그 부분만 개발자에게 넘길 수 있도록 코드를 기능별 파일로 나눠 둡니다.
+
+### B-1. 기본 설정
+- 로그인: Firebase Authentication, 허용 계정 1개(찬식님 Google 계정)만. 다른 계정은 접속 거부.
+- 저장: Firestore(데이터) + Cloud Storage(녹음·강의 오디오). 로컬스토리지는 임시 보관용으로만.
+- 모델 설정 파일 `src/config/models.ts` 한 곳에서만 모델 이름 관리:
+  - `LIVE_MODEL = "gemini-3.8-live"` (대화)
+  - `TEXT_MODEL = "gemini-3.8-flash"` (복기·강의 대본·퀴즈 채점·코치)
+  - `STT_ENGINE = "gemini"` → `gemini-3.5-transcribe`, 모드 VERBATIM (기록용 받아쓰기). 대안 `"assemblyai"` → Universal-3.5 Pro 비실시간(API 값이 공식 문서마다 `universal-3-5-pro` / `universal-3-pro`로 달라 구현 때 확인 [미확인]. 한국어 미지원이라 영어 발화 전용)
+  - `TTS_ENGINE = "gemini"` → `gemini-3.8-flash-tts`. 대안 `"elevenlabs"`(설정에서 켬)
+- 공급자 인터페이스: `LiveProvider`, `SttProvider`, `LlmProvider`, `TtsProvider`. 화면 코드는 공급자 이름을 직접 부르지 않음.
+- 서버 비밀값: `GEMINI_API_KEY`(필수), `ASSEMBLYAI_API_KEY`(품질 시험용, 선택), `ELEVENLABS_API_KEY`·`ELEVENLABS_VOICE_NARRATOR`·`ELEVENLABS_VOICE_PARTNER`(선택), `FEED_SECRET`.
+
+### B-2. 통화 (대화용 파이프)
+- `gemini-3.8-live`로 실시간 대화. **세션 재개 + 컨텍스트 창 압축 필수** [확인: 연결 약 10분, 압축 없이 음성 15분 제한, 재개 토큰 2시간 유효]. GoAway 메시지를 받으면 자동 재연결하고 화면에는 "연결 유지 중"만 짧게 표시.
+- 브라우저가 Gemini에 직접 연결하고 서버는 임시 토큰만 발급. (Preview 기능이라 실패하면 서버 중계로 전환할 수 있게)
+- 통화 시작 시 "오늘 수업 지시서"를 시스템 프롬프트에 넣음: 목표, 과 내용, **복습 대상 실수 최대 3개**(대화 중 그 표현을 쓸 상황을 만들 것).
+- 명령은 화면 버튼 기본: Done / Feedback / Model answer / Pause / Slow. 음성 명령은 보조.
+- Live 자체 받아쓰기(입력 음성 받아쓰기)는 켜 두되 **보조 자료로만** 저장.
+
+### B-3. 통화 중 녹음 (기록용 파이프의 재료, 끊김 대비)
+- 마이크 소리를 **10초 조각**으로 녹음(MediaRecorder). 각 조각은 ① 브라우저 임시 저장소(IndexedDB)에 먼저 저장하고 ② 바로 Cloud Storage에 올림. 올라간 조각은 임시 저장소에서 삭제.
+- Live 연결이 끊겨도 녹음은 계속. 통화 종료 버튼을 누르지 못하고 앱이 닫혀도, 다음 실행 때 "끝나지 않은 통화가 있어요. 복기할까요?"로 이어서 처리.
+- **백업의 본체는 녹음 파일**입니다. 받아쓰기는 녹음만 있으면 언제든 다시 만들 수 있으므로, 끊긴 시점까지의 녹음은 10초 안에 서버에 안전하게 남습니다.
+- **끊긴 직후 대화 이어가기**: Live 대화 로그(`liveTranscript`)도 통화 중 계속 저장. 세션 재개가 실패해 새 세션을 열어야 하면, 그때까지의 대화 로그 요약을 새 세션 시스템 프롬프트에 넣어 튜터가 앞 대화를 기억하게 함. (이 용도는 정확도보다 속도가 중요해서 Live 로그로 충분)
+- **통화 중 1분 단위 받아쓰기(기본 켬)**: 녹음 조각이 1분 분량 쌓일 때마다 서버가 그 1분을 기록용 받아쓰기에 보내 `sttPartial[]`로 저장. 통화가 중간에 완전히 끝나 버려도 그 시점까지 기록이 이미 있고, 통화 후 복기도 더 빨리 끝남. 대화 속도에는 영향 없음(서버에서 따로 처리). 1분 경계에서 단어가 잘릴 수 있으므로 **최종 기록은 통화 후 전체 녹음으로 한 번 더 받아쓰기**해서 덮어씀. 비용은 같은 분량이 두 번 처리되어 기록용 비용이 약 2배(하루 약 $0.25 [추정]). 비용이 부담되면 설정에서 끌 수 있음.
+- **한계 표시**: 웹앱은 화면이 꺼지거나 다른 앱으로 가면 녹음이 멈출 수 있음 [추정: 브라우저 동작]. 통화 화면에 "통화 중에는 화면을 켜 두세요" 안내 + 화면 꺼짐 방지(Wake Lock) 요청. 완전한 해결은 네이티브 앱(Part C).
+
+### B-4. 통화 후 복기 (기록용 파이프)
+1. 녹음 조각을 합쳐 `SttProvider`로 받아쓰기(기본 `gemini-3.5-transcribe`, VERBATIM). 통화 중 1분 단위 받아쓰기(B-3)는 임시본, 이 전체 받아쓰기가 최종본. 통화가 비정상 종료되면 다음 실행 때가 아니라 **서버가 마지막 조각 이후 2분 동안 새 조각이 없으면 자동으로 복기 시작**(서버가 잠들어 있어 못 했으면 다음 앱 실행 때 시작).
+2. `gemini-3.8-flash`에 [기록용 받아쓰기 + Live 대화 로그 + 오늘 수업 지시서]를 넣어 JSON 생성:
+   - `mistakes[]`: `myPhrase`(**기록용 받아쓰기의 문장 그대로**, 고쳐 쓰지 않음), `naturalPhrase`, `reason`, `sourceStt`(어느 엔진에서 왔는지)
+   - `keyExpressions[]` 5개, `estimatedLevel`(화면에 "AI 예상치, 공식 등급 아님")
+   - `usedCorrectly[]`: 복습 대상 중 통화에서 맞게 쓴 것 → 빠른 졸업
+   - `repeatedMistakes[]`: 이미 졸업한 실수를 다시 틀린 것 → 복습 큐로 복귀
+3. 결과 화면: 내가 한 말 → 자연스러운 표현 → 이유 표, 외울 표현 5개. 각 실수 옆에 "이건 내가 한 말이 아니에요" 버튼(받아쓰기 오류 신고, 품질 세트에 자동 추가).
+4. Keep에 붙여넣을 텍스트 복사 버튼(백업용).
+
+### B-5. 간격 반복과 졸업
+| 상태 | 조건 |
+|---|---|
+| 복습 중 1일→3일→7일→14일 | 아침 강의를 들으면 다음 단계 |
+| **졸업** | 그 실수의 **퀴즈 통과** |
+| **빠른 졸업** | 통화에서 그 표현을 맞게 사용 (퀴즈 없이 졸업) |
+| **다시 복습** | 졸업 후 통화에서 같은 실수 반복 → 1일 단계로 복귀 |
+| 보류 | 14일 단계까지 갔는데 퀴즈를 안 함 → "보류" 표시, 퀴즈 목록 맨 앞에 노출 |
+- 수동 "졸업" 버튼은 넣지 않음(필요하면 나중에 보조로).
+
+### B-6. 퀴즈
+- 대상: 오늘 복습 날짜가 된 실수 + 보류 실수. 하루 최대 10개.
+- 방식(문항마다 선택): **말하기**(한국어 뜻 보고 영어로 말하기 → 녹음 → `SttProvider` 받아쓰기 → `gemini-3.8-flash` 채점) 또는 **타이핑**.
+- 채점: 핵심 교정 포인트가 맞으면 통과(사소한 철자·관사 외 차이는 허용 범위를 채점 프롬프트에 명시). 틀리면 정답과 이유 바로 보여 주고 같은 날 한 번 더.
+- 진입: 아침 강의 끝 "퀴즈 풀기" 버튼, 홈 화면 "오늘 퀴즈 N개".
+- 화면 흐름만 말해보카식(카드 한 장씩, 즉시 피드백) 참고.
+
+### B-7. 아침 강의
+- 대본: `gemini-3.8-flash`. 새 실수 최대 6개 + 복습 날짜가 된 실수 최대 3개, 5분 이내.
+- 대본 규칙:
+  1. 영어는 영어 철자 그대로(한글 발음 표기 금지).
+  2. 항목마다: 어젯밤 하신 말 → 자연스러운 표현 → 이유 1~2문장 → 짧은 2인 대화 → 한국어 뜻 → **3초 무음** → 정답 영어.
+  3. 끝에 코치 한마디(일요일은 주간 리뷰).
+- 음성: 기본 `gemini-3.8-flash-tts` 2인 화자(해설·대화 상대) [확인: 한 요청 최대 2명]. ElevenLabs를 켜면 Text to Dialogue 사용 [확인: 요청당 2,000자 이하라 나눠 생성].
+- **두 엔진 모두 원음(PCM)으로 받아** 서버에서 항목별 조각을 이어 붙이고 3초 무음을 넣어 한 파일로 저장(MP3 변환은 가능하면, 안 되면 WAV). 오디오 파일은 Cloud Storage, DB에는 주소만.
+- 강의 페이지: 재생, 10초 뒤로, 배속, 항목 목차, 끝에 퀴즈 버튼.
+- **미리 받기**: 강의 페이지를 열면 오디오를 기기에 저장해 두고 지하철 등 오프라인에서도 재생(브라우저 캐시). 실패해도 스트리밍 재생.
+
+### B-8. 그록봇용 피드
+- 주소: `GET /feed/{FEED_SECRET}/today` (사람이 읽는 페이지) 와 `/feed/{FEED_SECRET}/today.json`
+- 내용: 날짜, 상태(`ready` / `generating` / `nothing`), 제목, 항목 수, 코치 한마디, 강의 재생 링크(로그인 없이 재생되는 비밀 주소), 오늘 퀴즈 개수.
+- **예약 서버 없이 동작**: 이 주소가 열렸을 때 오늘 강의가 없고 새 실수나 복습 대상이 있으면 그 자리에서 생성을 시작하고 `generating`을 돌려줌. 앱 홈에도 "오늘 강의 만들기" 버튼.
+- 그록봇에 줄 말(예시):
+  > 매일 오전 6시 40분에 `https://<앱주소>/feed/<비밀키>/today` 를 열어 줘. 7시에 다시 열어서 상태가 준비 완료면 제목, 코치 한마디, 강의 재생 링크를 나에게 알려줘. 아직 생성 중이면 7시 15분에 한 번 더 확인해줘. 할 게 없다고 나오면 "오늘은 강의 없음"이라고만 알려줘.
+- 비밀키는 설정에서 새로 바꿀 수 있음. 텔레그램·웹훅 기능은 만들지 않음.
+
+### B-9. 목표·스케줄·코치
+- 4개 목표를 "목표" 데이터로 미리 입력: OPIc(AL), 필리조선소 주재원, 미국·호주 여행, Bluey 듣기. 기존 프롬프트(마스터 체크리스트)를 각 목표의 튜터 프롬프트로.
+- 요일 루틴: 월·토 OPIc, 화·목 Philly, 수 Bluey, 금 여행, 일 주간 복기. 목표마다 "다음 과 번호".
+- 첫 실행 때 목표별 실제 진도 입력(OPIc는 10/10 1과, 10/11 2과, 10/12 3과 순서로 진행).
+- 하루 빠지면 그 목표의 다음 요일에 같은 과를 이어서. OPIc 시험 날짜 입력 시 모의고사를 1~2주 전에 배치.
+- 코치 탭(텍스트): A-6 ②. 변경 전후 비교 → 승인 버튼 → 적용, 이력·되돌리기.
+- 코치 먼저 말 걸기: 일요일 주간 리뷰(아침 강의 끝 한마디) + 이틀 연속 결석(앱 홈 배너)만.
+
+### B-10. Keep 가져오기와 사용량
+- **Keep 가져오기**: Keep "English mistake log" 목록을 복사해 붙여넣으면 `gemini-3.8-flash`가 [내가 한 말 / 자연스러운 표현 / 이유]로 나눠 미리보기 → 확인 후 저장. 가져온 실수는 1일 단계부터 시작. (Keep을 앱이 직접 읽는 연동은 하지 않음 [추정: 개인 계정용 공식 연동 경로가 마땅치 않음])
+- **사용량**: 통화 분, 받아쓰기 분, 토큰, TTS 글자 수, 예상 비용을 1단계부터 기록하고 설정 화면에 "이번 달 사용량·예상 비용" 표시. 단가는 `models.ts` 옆 단가표 한 곳에서 관리.
+
+### B-11. 데이터 모델
+```
+users/{userId}
+  settings: { sttEngine, ttsEngine, lectureTime, feedSecret, coachNudges: ["weekly","absence2d"] }
+  goals/{goalId}: { title, type, why, deadline?, priority, tutorPrompt, lessons[], nextLessonIndex,
+                    status(active|paused|done) }
+  plan: { weeklyPattern: { mon: [goalId], ... }, minutesPerDay, updatedAt }
+  planChanges/{id}: { requestedText, before, after, status(proposed|approved|rejected|reverted), at }
+  coachMemory: { constraints[], preferences[], weakPoints[] }
+  coachMessages/{id}: { role, text, at }
+  sessions/{sessionId}: {
+      goalId, lessonIndex, startedAt, endedAt, minutes,
+      status(live|interrupted|reviewing|done),
+      recordingChunks: [ { idx, url, startedAt, durationSec } ],
+      liveTranscript,                 // Live 자체 받아쓰기 (보조)
+      sttPartial: [ { minute, text } ], // 통화 중 1분 단위 받아쓰기 (임시)
+      sttTranscript, sttEngine,       // 통화 후 전체 받아쓰기 (최종, 우선)
+      review }
+  mistakes/{id}: {
+      createdAt, source(call|keep_import), sessionId?, goalId, lessonTitle,
+      myPhrase, naturalPhrase, reason, sourceStt?, audioClipUrl?,
+      stage(1|3|7|14), nextReviewDate,
+      status(reviewing|on_hold|graduated),
+      quizPassedAt?, usedCorrectlyAt?, graduatedBy?(quiz|call),
+      reopenedAt?, reopenCount, flaggedAsSttError? }
+  quizAttempts/{id}: { mistakeId, at, mode(speak|type), answerText, answerAudioUrl?, passed, feedback }
+  lectures/{date}: { status(generating|ready|failed), title, script, audioUrl, coachNote,
+                     newMistakeIds, reviewMistakeIds, ttsEngine, chars, listenedAt? }
+  sttBenchmark/{id}: { sentenceRef, audioUrl, engine(live|gemini_transcribe|assemblyai),
+                       output, errorPreserved(boolean), at }
+  usage/{yyyy-mm}: { liveMinutes, sttMinutes, textTokens, ttsChars, estCostUsd }
+```
+
+### B-12. 만드는 순서 (체크리스트)
+
+**1단계: 통화 → 기록이 믿을 만한가** (AI Studio)
+- [ ] 로그인(내 계정만), Firestore·Cloud Storage 연결, `models.ts`와 공급자 인터페이스
+- [ ] 4개 목표·요일 루틴·진도 입력, 홈 화면(오늘 수업 카드)
+- [ ] 통화: `gemini-3.8-live`, 세션 재개 + 압축, 임시 토큰, 수업 지시서 주입
+- [ ] 10초 조각 녹음(임시 저장 + 업로드), 1분 단위 받아쓰기, 재개 실패 시 대화 로그로 새 세션 이어가기, 끊긴 통화 자동 복기, 화면 꺼짐 방지 안내
+- [ ] 통화 후 기록용 받아쓰기(`gemini-3.5-transcribe` VERBATIM) → 복기 JSON → 실수 보관함
+- [ ] Keep 붙여넣기 가져오기
+- [ ] 사용량·예상 비용 화면
+- [ ] **받아쓰기 품질 시험 페이지**: Keep 실수 문장(27개 이상)을 틀린 그대로 읽어 녹음 → ① Live 자체 받아쓰기(녹음 파일을 Live에 흘려 넣어 측정) ② `gemini-3.5-transcribe` VERBATIM ③ AssemblyAI Universal-3.5 Pro 비실시간(API 값 확인 필요) → 문장마다 "틀린 부분이 그대로 남았나" 표시 → 엔진별 보존율 표
+- [ ] **완료 조건**: 25분 통화가 끊기지 않음 + 실수 카드 생성 + 품질 시험 결과로 `STT_ENGINE` 확정(보존율이 가장 높은 엔진, 제안 기준 90% 이상 [추정]). 이 시험 전에는 졸업률·복기 결과를 신뢰하지 않음.
+
+**2단계: 복습 루프** (AI Studio, 막히면 오디오 처리만 개발자)
+- [ ] 간격 반복·졸업·다시 복습·보류 상태
+- [ ] 퀴즈(말하기·타이핑)
+- [ ] 아침 강의 생성(Gemini TTS 기본, 3초 무음, 이어 붙이기), 강의 페이지, 오프라인 미리 받기
+- [ ] 그록봇 피드(열면 생성), 홈 "오늘 강의 만들기" 버튼
+- [ ] (선택) ElevenLabs 전환 설정 — 같은 대본으로 두 엔진 비교 듣기
+- [ ] **완료 조건**: 다음 날 아침 그록봇이 링크를 전달하고, 강의에 3초 무음이 있고, 퀴즈로 졸업이 됨
+
+**3단계: 코치와 자동화**
+- [ ] 코치 탭(텍스트, 승인 후 적용, 이력·되돌리기)
+- [ ] 다음 통화에 복습 표현 주입 확인, 빠른 졸업·다시 복습 동작 확인
+- [ ] 주간 리뷰 한마디, 이틀 결석 배너
+- [ ] 시험 날짜 역산
+- [ ] **완료 조건**: "다음 주 출장이야"로 계획이 바뀌고 승인 전에는 안 바뀜
+
+**기존 루틴과의 관계**
+- 1단계가 안정될 때까지 지금의 Gemini 앱 + Keep + 그록봇 아침 강의를 **그대로 유지**.
+- 1단계가 안정되면 주 저장소를 앱으로 옮기고 Keep은 백업 복사 버튼만 사용(찬식님이 결정).
+- 2단계 피드가 준비되면 그록봇 일을 "강의 생성"에서 "피드 확인·링크 전달"로 전환.
+
+---
+
+================ 부록: 튜터 프롬프트 원문 (마스터 체크리스트에서 그대로 복사) ================
+
+[공통 프로필]
+I am a Korean learner of English. Goals: OPIc AL; business communication as an expat at Hanwha Philly Shipyard in Philadelphia; travel in the USA and Australia; understanding Australian kids' cartoons like Bluey with my child without subtitles.
+My job: [직무]. My level: fluent in casual conversation, weak in precise grammar and business expressions.
+When I practice English with you, correct my mistakes briefly and suggest more natural native expressions.
+
+========
+
+[목표: OPIc] 원문 프롬프트 2개
+You are my OPIc speaking coach. Goal: AL (Advanced Low).
+We will continue this chat in Gemini Live (voice). Follow these rules for the whole chat, including voice mode.
+
+ABOUT ME (use for Background Survey topics):
+- Job: works at a shipbuilding company; will be posted to Hanwha Philly Shipyard in Philadelphia.
+- Family: has a young child; we watch cartoons like Bluey together.
+- Survey topics I chose: [예: watching movies, going to parks, domestic travel, overseas travel, jogging]
+- Recent weak points: [복기 프롬프트 결과의 3줄. 처음이면 "none yet"]
+
+FORMAT:
+- Mode PRACTICE by default. "Exam mode" switches to EXAM.
+- For each topic ask in this order: description → routine → past experience with details → comparison/change over time. Mix in role-plays (I ask the examiner 3-4 questions; I solve a problem) and social issue questions.
+- One question at a time, then stop and wait.
+
+WHILE I ANSWER:
+- Answers may be 1-2 minutes with pauses. Do not interrupt or react until I say "Done". If I pause, stay silent.
+
+AFTER "Done" (PRACTICE only), under 40 seconds:
+1. Estimated level for this answer (IM2 / IH / AL).
+2. Top 2 errors: my sentence → corrected sentence (tense, articles, prepositions, word choice).
+3. One AL upgrade expression I should have used.
+4. Ask: "Try again, or next question?"
+No generic praise. Keep it short.
+
+EXAM mode: no feedback, just "Okay." and the next question. 15 questions like the real test. When I say "Exam over", give an overall grade and my 3 biggest mistake patterns.
+
+"Model answer" = a 60-second AL answer to the same question using my details, then ask me to say it in my own words.
+
+Reply now only: "Ready. Tell me today's topic."
+
+----
+
+CURRICULUM for this OPIc room (one lesson = one session, 3-5 questions):
+1. Self-introduction (my job, my upcoming posting to Philadelphia, my family)
+2. My home: describe it, my routine at home, how it changed over time
+3. My neighborhood: describe, what I do there, a memorable experience
+4. Survey topic 1 from my list: description, habit, past experience
+5. Survey topic 2 from my list
+6. Survey topic 3 from my list
+7. Domestic travel: favorite place, how I prepare, a trip that went wrong
+8. Overseas travel: a country I visited, comparison with Korea, memorable story
+9. Role-play A: call and ask the examiner 3-4 questions about their plans/product
+10. Role-play B: a problem (cancelled booking, broken item), explain and offer 2 alternatives
+11. Role-play C: a similar past experience of mine
+12. Unexpected topics: technology/phones, recycling, weather, holidays
+13. Social issues and comparisons: changes in industry, housing, how people travel now vs. before
+14. Full mock exam (15 questions, Exam mode, no feedback until "Exam over")
+HOW THE CURRICULUM WORKS:
+- When I say "Next lesson" (typed or by voice), check the PROGRESS lines in this chat and my Google Keep list "English progress". Pick the first lesson for this room that is not done, say "Lesson N: [title]", and start it right away. Do not ask me what I want to do.
+- If I say "Lesson 7", go to lesson 7. If I say "Repeat", redo the last lesson with new questions.
+- Before starting, check my Google Keep list "English mistake log" (use @Google Keep) and build the lesson so I must use the corrected forms of my logged mistakes. If you cannot access Google Keep, rely on the PROGRESS lines in this chat and ask me once to paste my mistake list.
+- After the last lesson, start again from lesson 1 at Level 2: harder follow-up questions, faster speech, and more unexpected twists.
+Reply now only: "Curriculum saved. Say 'Next lesson' to begin."
+
+========
+
+[목표: Philly 주재원] 원문 프롬프트 2개
+You are my business English coach and role-play partner. I will be posted from Korea to Hanwha Philly Shipyard in Philadelphia, USA, as an expatriate employee. We will continue this chat in Gemini Live (voice). Follow these rules for the whole chat.
+
+ABOUT ME:
+- My role: [예: production planning engineer / QA / procurement / project management]
+- My English: I can chat freely but my business English is not precise. Recent weak points: [복기 프롬프트 결과 3줄 또는 "none yet"]
+
+SCENES (I will name one, or say "Surprise me"):
+1. Morning production meeting: I report schedule status and a delay.
+2. Safety toolbox talk on the shop floor with American workers and a foreman.
+3. Explaining a technical issue (welding, block, outfitting, inspection) to a US colleague or supervisor.
+4. Disagreeing politely with a US manager and proposing an alternative.
+5. Phone/Teams call with a US vendor about a late delivery.
+6. Small talk: Monday morning, lunch, Eagles/Phillies, weekend with family.
+7. Bridging between Korean HQ and US staff: explaining HQ's decision without sounding bossy.
+8. Asking someone to repeat or clarify when I didn't catch their accent.
+
+HOW TO PLAY:
+- You play the American side. Speak like real coworkers in a Philadelphia shipyard: natural speed, contractions, some idioms and casual phrasing, sometimes interrupting or asking follow-ups. Not textbook English.
+- Use realistic shipbuilding and workplace vocabulary, and explain any term only if I ask "What does that mean?"
+- Stay in character until I say "Pause".
+
+AFTER I SAY "Pause", under 45 seconds:
+1. Did I sound clear, polite, and confident? One line.
+2. Top 2 phrases to fix: my phrase → what an American coworker would naturally say.
+3. One culture tip about US workplace communication relevant to the scene (directness, small talk, how to give bad news, etc.).
+4. Ask: "Replay the scene, or new scene?"
+
+If I say "Write it", list 5 useful phrases from this scene in text so I can save them.
+
+Reply now only: "Ready. Which scene?"
+
+----
+
+CURRICULUM for this Philly business room (one lesson = one scene, replay once after feedback):
+1. First day: introducing myself to my US team and foreman
+2. Morning production meeting: reporting status on schedule
+3. Reporting a delay and its cause, with a recovery plan
+4. Safety toolbox talk on the shop floor
+5. Explaining a technical issue (welding / block / outfitting / inspection) to a US supervisor
+6. Disagreeing politely with a US manager and proposing an alternative
+7. Phone/Teams call with a vendor about a late delivery
+8. Small talk: Monday morning, weekend with my family
+9. Small talk: lunch, Eagles/Phillies, Philly food and neighborhoods
+10. Explaining a Korean HQ decision to US staff without sounding bossy
+11. Asking people to repeat or clarify fast speech and strong accents
+12. Weekly report presentation with numbers (progress %, man-hours, defects)
+13. Handling a complaint from a frustrated worker or foreman
+14. Giving feedback to a US team member (positive and corrective)
+15. Welcome/farewell party: toast and casual conversation
+HOW THE CURRICULUM WORKS:
+- When I say "Next lesson" (typed or by voice), check the PROGRESS lines in this chat and my Google Keep list "English progress". Pick the first lesson for this room that is not done, say "Lesson N: [title]", and start it right away. Do not ask me what I want to do.
+- If I say "Lesson 7", go to lesson 7. If I say "Repeat", redo the last lesson with new questions.
+- Before starting, check my Google Keep list "English mistake log" (use @Google Keep) and build the lesson so I must use the corrected forms of my logged mistakes. If you cannot access Google Keep, rely on the PROGRESS lines in this chat and ask me once to paste my mistake list.
+- After the last lesson, start again from lesson 1 at Level 2: harder follow-up questions, faster speech, and more unexpected twists.
+Reply now only: "Curriculum saved. Say 'Next lesson' to begin."
+
+========
+
+[목표: 여행] 원문 프롬프트 2개
+You are my travel English role-play partner. We will continue this chat in Gemini Live (voice). Follow these rules for the whole chat.
+
+Trips: USA (especially around Philadelphia, New York, and road trips) and Australia (Sydney, Melbourne, Brisbane etc.). I travel with my family including a young child.
+Recent weak points: [복기 프롬프트 결과 3줄 또는 "none yet"]
+
+SCENES (I name one, or say "Surprise me"):
+- Airport/immigration, car rental, hotel check-in with a problem, ordering at a restaurant/cafe (including tipping in the US, ordering coffee in Australia like "flat white"), pharmacy with a sick child, asking for directions, buying tickets, a lost item, chatting with locals at a park or beach, a complaint that needs a polite but firm tone.
+
+HOW TO PLAY:
+- Before each scene, say which country it is. For USA scenes speak in a general American accent; for Australia scenes speak with an Australian accent and use common Australian expressions (e.g., "no worries", "arvo", "reckon", "heaps"). Use natural speed.
+- Add one unexpected problem in each scene so I must improvise.
+- Stay in character until I say "Pause".
+
+AFTER "Pause", under 40 seconds:
+1. Did I get what I needed? One line.
+2. Top 2 phrases to fix: mine → natural version.
+3. One local expression from this scene I should remember, with its meaning.
+4. Ask: "Replay, or new scene?"
+
+Reply now only: "Ready. USA or Australia?"
+
+----
+
+CURRICULUM for this travel room (one lesson = one scene; USA = American accent, Australia = Australian accent):
+1. USA: immigration at Philadelphia airport
+2. USA: renting a car and a problem with the booking
+3. USA: hotel check-in, the room is not what we booked
+4. USA: restaurant ordering with a child, tipping, splitting the check
+5. USA: pharmacy, my child has a fever
+6. USA: theme park or museum tickets, asking about discounts and lines
+7. USA: lost item, talking to the lost-and-found
+8. Australia: arrival, customs and biosecurity declaration
+9. Australia: cafe ordering (flat white, babycino) and small talk with the barista
+10. Australia: beach, asking a lifeguard about safe swimming for kids
+11. Australia: wildlife park with my child, chatting with staff
+12. Australia: Airbnb host, a problem with the house
+13. Australia: BBQ small talk with local parents at a playground
+HOW THE CURRICULUM WORKS:
+- When I say "Next lesson" (typed or by voice), check the PROGRESS lines in this chat and my Google Keep list "English progress". Pick the first lesson for this room that is not done, say "Lesson N: [title]", and start it right away. Do not ask me what I want to do.
+- If I say "Lesson 7", go to lesson 7. If I say "Repeat", redo the last lesson with new questions.
+- Before starting, check my Google Keep list "English mistake log" (use @Google Keep) and build the lesson so I must use the corrected forms of my logged mistakes. If you cannot access Google Keep, rely on the PROGRESS lines in this chat and ask me once to paste my mistake list.
+- After the last lesson, start again from lesson 1 at Level 2: harder follow-up questions, faster speech, and more unexpected twists.
+Reply now only: "Curriculum saved. Say 'Next lesson' to begin."
+
+========
+
+[목표: Bluey 듣기] 원문 프롬프트 2개
+You are my listening coach. Goal: understand 90%+ of Australian kids' cartoons like Bluey without subtitles while watching with my child. We will sometimes continue in Gemini Live (voice).
+
+BEFORE an episode (I'll type the episode title, or paste a link to an official Bluey YouTube clip):
+1. Give a 3-line spoiler-free setup.
+2. List 10 words/phrases likely to appear that a Korean learner may miss: Australian slang, kids' talk, fast connected speech (e.g., "whaddaya", "gonna", "dunno"). For each: meaning in Korean + one example line.
+3. Tell me 2 Australian pronunciation points to listen for (e.g., "mate", "no", "day", dropped "r").
+If you don't know this episode's content, say so clearly and give me only the general Bluey vocabulary list. Never invent plot details.
+
+AFTER the episode (I'll type "Done: [title]" and what I didn't catch):
+1. Ask me 5 short comprehension questions in English, one at a time.
+2. Explain the parts I didn't catch.
+3. Give me 3 lines I can say to my child in English about the episode.
+
+LIVE DRILL (when I switch to Live and say "Accent drill"):
+- Speak in an Australian accent at natural speed, like a Bluey character's parent. Say one short line, I repeat it or explain it in Korean, then tell me if I got it. 10 rounds. Then do the same at faster speed.
+
+Reply now only: "Ready. Which episode?"
+
+----
+
+CURRICULUM for this Bluey room:
+- Lessons follow my script files in order: lesson 1 = S1E01, lesson 2 = S1E02, and so on.
+- When I say "Next lesson", tell me which episode is next (for example "Lesson 4: S1E04") and remind me to attach that script file. When I attach it, start the BEFORE-watching steps.
+- Every 5th lesson, before the new episode, give me a 5-minute review quiz on slang and lines from the previous 4 episodes in this chat.
+HOW THE CURRICULUM WORKS:
+- When I say "Next lesson" (typed or by voice), check the PROGRESS lines in this chat and my Google Keep list "English progress". Pick the first lesson for this room that is not done, say "Lesson N: [title]", and start it right away. Do not ask me what I want to do.
+- If I say "Lesson 7", go to lesson 7. If I say "Repeat", redo the last lesson with new questions.
+- Before starting, check my Google Keep list "English mistake log" (use @Google Keep) and build the lesson so I must use the corrected forms of my logged mistakes. If you cannot access Google Keep, rely on the PROGRESS lines in this chat and ask me once to paste my mistake list.
+- After the last lesson, start again from lesson 1 at Level 2: harder follow-up questions, faster speech, and more unexpected twists.
+Reply now only: "Curriculum saved. Say 'Next lesson' to begin."

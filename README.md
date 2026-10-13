@@ -1,6 +1,9 @@
 # 오늘도 한 통 (One Call English) — AI 1:1 전화영어 올인원 랩
 
 > **버전**: `v2.1.0` | **빌드**: `20261013-multilingual-1410` | **최종 갱신**: 2026-10-13 (KST)
+>
+> **기준 기획 (2026-10-13~)**: [`docs/plan/implementation_plan_v4.md`](./docs/plan/implementation_plan_v4.md) Part B · 진행 가이드 [`docs/plan/ai-studio-build-guide.md`](./docs/plan/ai-studio-build-guide.md) · 현재 앱과의 차이 [`docs/plan/gap-v2.1.0-vs-plan-v4.md`](./docs/plan/gap-v2.1.0-vs-plan-v4.md)  
+> 아래 기능 중 텔레그램 발송, 3분 팟캐스트, 수동 "복습 완료"는 v2.0.0 때 예전 기획으로 만든 것이며 v4 기준으로 바뀔 예정입니다(차이표 참고).
 
 여러 도구(Claude, Gemini Live, Google Keep, Grok, ElevenLabs, Telegram)로 분산되어 있던 실전 영어회화 학습 파이프라인을 **단 하나의 통합 웹/모바일 앱에서 원클릭으로 완벽하게 자동화**한 AI 1:1 전화영어 플랫폼입니다.
 
