@@ -25,6 +25,8 @@ export interface LiveSessionOptions {
   resumeToken?: string;
   voiceName?: string;
   onMediaStreamReady?: (stream: MediaStream) => void;
+  /** Mic failed; the session stays connected. Show guidance only. */
+  onMicWarning?: (message: string) => void;
   onTranscriptLogged?: (item: LiveTranscriptItem, allTranscripts: LiveTranscriptItem[]) => void;
 }
 

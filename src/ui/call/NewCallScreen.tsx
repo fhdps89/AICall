@@ -75,6 +75,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
   // Mic/connection failure: Korean guidance + [다시 시도]/[나가기]
   const [connectError, setConnectError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState<number>(0);
+  const [micWarning, setMicWarning] = useState<string | null>(null);
   const sessionCreatedRef = useRef<boolean>(false);
 
   const transcriptsEndRef = useRef<HTMLDivElement>(null);
@@ -116,6 +117,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
     const currentSessionId = sessionIdRef.current;
 
     setConnectError(null);
+    setMicWarning(null);
 
     const systemPrompt = buildTodayLessonSystemPrompt(
       goal,
@@ -165,6 +167,10 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
               setLastPartialSnippet(stt.transcript);
             },
           });
+        },
+        onMicWarning: (m) => {
+          if (isCancelled) return;
+          setMicWarning(m);
         },
         onAudioData: () => {
           if (isCancelled) return;
@@ -220,7 +226,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
       .catch((err) => {
         if (!isCancelled) {
           setStatus("error");
-          const m = err?.code === "MIC_UNAVAILABLE" ? err.message : "연결하지 못했어요. 인터넷을 확인하고 다시 시도해 주세요.";
+          const m = err?.userMessage || "연결하지 못했어요. 인터넷을 확인하고 다시 시도해 주세요.";
           setStatusMessage(m);
           setConnectError(m);
         }
@@ -377,6 +383,20 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
           <Smartphone className="w-4 h-4 text-amber-400 shrink-0" />
           <span className="truncate">화면을 켜 두세요. 대화는 10초마다 자동 저장돼요.</span>
         </div>
+
+        {/* Mic guidance (call stays connected without mic) */}
+        {micWarning && !connectError && (
+          <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-200 text-xs flex items-center justify-between gap-2">
+            <span>{micWarning} 튜터 목소리는 계속 들을 수 있어요.</span>
+            <button
+              type="button"
+              onClick={() => setAttempt((a) => a + 1)}
+              className="shrink-0 px-2 py-1 rounded-lg bg-rose-500/20 border border-rose-500/40 font-bold"
+            >
+              다시 시도
+            </button>
+          </div>
+        )}
 
         {/* Reconnect notice banner */}
         {status === "reconnecting" && (

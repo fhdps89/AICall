@@ -59,27 +59,51 @@ export class GeminiLiveProvider implements LiveProvider {
       this.resumeHandle = options.resumeToken;
     }
 
+    console.log("[Live] stage=connect_start");
+
+    // Mic is decoupled from the session: start it in parallel and never let it
+    // block or fail the connection. On failure we only show guidance.
+    const micPromise = this.initAudioCapture()
+      .then(() => console.log("[Live] stage=mic_ready"))
+      .catch((err: any) => {
+        console.warn("[Live] stage=mic_failed", err?.cause || err);
+        this.options?.onMicWarning?.(
+          err?.message || "마이크를 쓸 수 없어요. 튜터 목소리는 들을 수 있지만 말하려면 마이크를 확인해 주세요."
+        );
+      });
+
     try {
-      await this.initAudioCapture();
-      await this.initAudioPlayback();
+      await this.initAudioPlayback().catch((err) => {
+        console.warn("[Live] stage=playback_init_failed", err);
+      });
+      console.log("[Live] stage=establish_connection");
       await this.establishConnection();
+      console.log("[Live] stage=connected path=" + this.connectionPath);
     } catch (err: any) {
       console.error("[GeminiLiveProvider] Connect failed:", err);
       // Release anything half-opened so a retry starts clean.
       await this.disconnect().catch(() => {});
-      this.options.onStatusChange("error", err?.code === "MIC_UNAVAILABLE" ? err.message : "연결하지 못했어요. 인터넷을 확인하고 다시 시도해 주세요.");
+      this.options?.onStatusChange(
+        "error",
+        err?.userMessage || "연결하지 못했어요. 인터넷을 확인하고 다시 시도해 주세요."
+      );
       throw err;
     }
+    await micPromise;
   }
 
   private async establishConnection(): Promise<void> {
     // 1. Try Ephemeral Token direct connection (2-1 requirement 1, 2, 3)
     let directSucceeded = false;
+    console.log("[Live] stage=token_fetch");
     try {
+      const tokenAbort = new AbortController();
+      const tokenTimer = setTimeout(() => tokenAbort.abort(), 8000);
       const tokenRes = await fetch("/api/gemini/token", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-      });
+        signal: tokenAbort.signal,
+      }).finally(() => clearTimeout(tokenTimer));
       const tokenData = await tokenRes.json();
 
       if (tokenData.ok && tokenData.token) {
@@ -172,7 +196,6 @@ export class GeminiLiveProvider implements LiveProvider {
             outputAudioTranscription: {},
             sessionResumption: {
               handle: this.resumeHandle || undefined,
-              transparent: true,
             },
             contextWindowCompression: {
               slidingWindow: {},
@@ -211,18 +234,45 @@ export class GeminiLiveProvider implements LiveProvider {
    * Fallback connection via Server Proxy WebSocket
    */
   private async connectViaServerProxy(): Promise<void> {
+    const PROXY_READY_TIMEOUT_MS = 15000;
     return new Promise((resolve, reject) => {
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const host = window.location.host;
       const wsUrl = `${protocol}//${host}/api/gemini/live`;
+      console.log("[Live] stage=proxy_open", wsUrl);
 
       const socket = new WebSocket(wsUrl);
+      let settled = false;
+
+      const fail = (reason: string, userMessage: string) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(readyTimer);
+        console.warn("[Live] stage=proxy_failed", reason);
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onerror = null;
+        socket.onclose = null;
+        try {
+          socket.close();
+        } catch {
+          // ignore
+        }
+        if (this.ws === socket) this.ws = null;
+        const e: any = new Error(reason);
+        e.userMessage = userMessage;
+        reject(e);
+      };
+
+      const readyTimer = setTimeout(() => {
+        fail(
+          `proxy ready timeout (${PROXY_READY_TIMEOUT_MS / 1000}s)`,
+          "튜터 연결이 너무 오래 걸려요. 잠시 후 다시 시도해 주세요."
+        );
+      }, PROXY_READY_TIMEOUT_MS);
 
       socket.onopen = () => {
-        this.ws = socket;
-        this.wireWebSocketEvents(false);
-
-        // Send init message to server with resumeHandle
+        console.log("[Live] stage=proxy_socket_open, sending init");
         socket.send(
           JSON.stringify({
             type: "init",
@@ -234,37 +284,50 @@ export class GeminiLiveProvider implements LiveProvider {
         );
       };
 
+      // NOTE: do NOT call wireWebSocketEvents before 'ready'. It replaces
+      // onmessage, which previously swallowed the 'ready' message and made
+      // the call hang forever on "연결 준비 중".
       socket.onmessage = (event) => {
+        let data: any;
         try {
-          const data = JSON.parse(event.data);
-          if (data.type === "ready") {
-            this.isConnected = true;
-            this.isReconnecting = false;
-            this.connectionPath = "proxy";
-            // 5) Log path
-            console.log("[Live] path=proxy");
-            this.options?.onStatusChange("connected", "Gemini 3.8 Live 연결됨 (서버 중계)");
-            resolve();
-          } else if (data.type === "fallback_required" || data.type === "error") {
-            reject(new Error(data.error || "Server proxy live connection failed"));
-          } else {
-            this.handleIncomingMessage(data, false);
-          }
+          data = JSON.parse(event.data);
         } catch (err) {
           console.error("[GeminiLiveProvider] Failed to parse proxy message:", err);
+          return;
+        }
+        if (settled) return;
+        if (data.type === "ready") {
+          settled = true;
+          clearTimeout(readyTimer);
+          this.ws = socket;
+          this.wireWebSocketEvents(false);
+          this.isConnected = true;
+          this.isReconnecting = false;
+          this.connectionPath = "proxy";
+          console.log("[Live] path=proxy model=" + (data.model || "?"));
+          this.options?.onStatusChange("connected", "Gemini 3.8 Live 연결됨 (서버 중계)");
+          resolve();
+        } else if (data.type === "fallback_required" || data.type === "error") {
+          fail(
+            `server: ${data.type} ${data.error || ""}`,
+            data.userMessage || "튜터 서버에 연결하지 못했어요. 잠시 후 다시 시도해 주세요."
+          );
+        } else {
+          // Early audio/transcripts before ready are ignored.
+          console.log("[Live] proxy message before ready ignored:", data.type);
         }
       };
 
       socket.onerror = (err) => {
-        if (!this.isConnected) {
-          reject(err);
-        } else {
-          this.handleDisconnect("proxy error");
-        }
+        console.warn("[Live] proxy socket error before ready", err);
+        fail("proxy socket error", "튜터 서버에 연결하지 못했어요. 인터넷을 확인하고 다시 시도해 주세요.");
       };
 
-      socket.onclose = () => {
-        this.handleDisconnect("proxy closed");
+      socket.onclose = (event) => {
+        fail(
+          `proxy closed before ready (${event.code} ${event.reason || ""})`,
+          "튜터 서버 연결이 끊겼어요. 다시 시도해 주세요."
+        );
       };
     });
   }

@@ -25,6 +25,8 @@ app.use(express.json({ limit: '10mb' }));
 // Target Native Audio Dialog Model (Part B-1: gemini-3.8-live)
 const LIVE_MODELS = ['gemini-3.8-live'];
 const NATIVE_AUDIO_MODEL = 'gemini-3.8-live';
+// Server-side Live connect timeout; shorter than the client's 15s proxy ready timeout.
+const LIVE_CONNECT_TIMEOUT_MS = 6000; // x2 config attempts = 12s < client 15s
 const FALLBACK_CHAT_MODEL = 'gemini-3.8-flash';
 const FALLBACK_TTS_MODEL = 'gemini-3.8-flash-lite-tts';
 const TRANSCRIBE_MODEL = 'gemini-3.5-transcribe';
@@ -46,97 +48,96 @@ export function getBuildVersion(): string {
 }
 
 // Resolve real Gemini API key from environment, file, or parent container
+// Names AI Studio / Cloud Run / SDK conventions may use for the Gemini key.
+const GEMINI_KEY_NAMES = ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'API_KEY', 'GOOGLE_GENAI_API_KEY', 'VITE_GEMINI_API_KEY'];
+let lastKeySource: string = 'none';
+let loggedKeySource = '';
+
+function isUsableKey(v: string | undefined | null): v is string {
+  if (!v) return false;
+  const t = v.trim().replace(/^["']|["']$/g, '');
+  return t.length >= 10 && !t.startsWith('MY_') && !/^(undefined|null|your_|placeholder)/i.test(t);
+}
+
+function pickFromEnvPairs(pairs: Array<[string, string]>, origin: string): string | undefined {
+  for (const name of GEMINI_KEY_NAMES) {
+    const hit = pairs.find(([k]) => k === name);
+    if (hit && isUsableKey(hit[1])) {
+      lastKeySource = `${origin}:${name}`;
+      return hit[1].trim().replace(/^["']|["']$/g, '');
+    }
+  }
+  return undefined;
+}
+
+function parseDotenv(content: string): Array<[string, string]> {
+  return content.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#') && l.includes('='))
+    .map((l) => { const i = l.indexOf('='); return [l.slice(0, i).replace(/^export\s+/, '').trim(), l.slice(i + 1).trim()] as [string, string]; });
+}
+
+/**
+ * Resolve the Gemini key at call time (secrets can be injected after boot).
+ * Order: process.env (all known names) -> key/.env files -> ancestor /proc environ.
+ * Never writes the key to disk.
+ */
 function resolveGeminiApiKey(): string | undefined {
-  const current = process.env.GEMINI_API_KEY;
-  if (current && !current.startsWith('MY_') && current.trim().length > 20) {
-    return current.trim();
+  const found = resolveGeminiApiKeyInner();
+  if (found && !process.env.GEMINI_API_KEY) process.env.GEMINI_API_KEY = found;
+  if (!found) lastKeySource = 'none';
+  if (loggedKeySource !== lastKeySource) {
+    loggedKeySource = lastKeySource;
+    console.log(`[Gemini key] source=${lastKeySource}` + (found ? ` len=${found.length}` : ` (checked env names: ${GEMINI_KEY_NAMES.join(', ')})`));
   }
+  return found;
+}
 
-  // 1. Check .gemini_api_key in root directory
-  try {
-    const keyFile = path.resolve(__dirname, '.gemini_api_key');
-    if (fs.existsSync(keyFile)) {
-      const fileKey = fs.readFileSync(keyFile, 'utf-8').trim();
-      if (fileKey && !fileKey.startsWith('MY_') && fileKey.length > 20) {
-        process.env.GEMINI_API_KEY = fileKey;
-        return fileKey;
+function resolveGeminiApiKeyInner(): string | undefined {
+  const fromEnv = pickFromEnvPairs(Object.entries(process.env).map(([k, v]) => [k, v ?? '']), 'env');
+  if (fromEnv) return fromEnv;
+
+  const dirs = Array.from(new Set([__dirname, process.cwd(), path.resolve(__dirname, '..')]));
+  for (const dir of dirs) {
+    try {
+      const keyFile = path.resolve(dir, '.gemini_api_key');
+      if (fs.existsSync(keyFile)) {
+        const v = fs.readFileSync(keyFile, 'utf-8').trim();
+        if (isUsableKey(v)) { lastKeySource = `file:${keyFile}`; return v; }
       }
-    }
-  } catch {
-    // ignore
-  }
-
-  // 2. Check .env in root directory
-  try {
-    const envFile = path.resolve(__dirname, '.env');
-    if (fs.existsSync(envFile)) {
-      const envContent = fs.readFileSync(envFile, 'utf-8');
-      const lines = envContent.split('\n');
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith('GEMINI_API_KEY=')) {
-          const val = trimmed.replace('GEMINI_API_KEY=', '').replace(/^["']|["']$/g, '').trim();
-          if (val && !val.startsWith('MY_') && val.length > 20) {
-            process.env.GEMINI_API_KEY = val;
-            return val;
-          }
+    } catch { /* ignore */ }
+    for (const f of ['.env.local', '.env']) {
+      try {
+        const envFile = path.resolve(dir, f);
+        if (fs.existsSync(envFile)) {
+          const v = pickFromEnvPairs(parseDotenv(fs.readFileSync(envFile, 'utf-8')), `file:${envFile}`);
+          if (v) return v;
         }
-      }
+      } catch { /* ignore */ }
     }
-  } catch {
-    // ignore
   }
 
-  // 3. Inspect ancestor processes (including PID 1)
+  // Ancestor processes (incl. PID 1), for runtimes that only set env on the launcher.
+  const seen = new Set<number>();
   let pid = process.pid;
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 10; i++) {
     try {
       const stat = fs.readFileSync(`/proc/${pid}/status`, 'utf-8');
       const ppidLine = stat.split('\n').find((l) => l.startsWith('PPid:'));
-      if (!ppidLine) break;
-      const ppid = parseInt(ppidLine.split(':')[1].trim(), 10);
-      if (!ppid || ppid < 1) break;
-      const env = fs.readFileSync(`/proc/${ppid}/environ`, 'utf-8');
-      const match = env.split('\0').find((x) => x.startsWith('GEMINI_API_KEY='));
-      if (match) {
-        const val = match.replace('GEMINI_API_KEY=', '').trim();
-        if (val && !val.startsWith('MY_') && val.length > 20) {
-          process.env.GEMINI_API_KEY = val;
-          try {
-            fs.writeFileSync(path.resolve(__dirname, '.gemini_api_key'), val, 'utf-8');
-          } catch {
-            // ignore
-          }
-          return val;
-        }
-      }
+      const ppid = ppidLine ? parseInt(ppidLine.split(':')[1].trim(), 10) : 0;
+      if (!ppid || ppid < 1 || seen.has(ppid)) break;
+      seen.add(ppid);
       pid = ppid;
-    } catch {
-      break;
-    }
+    } catch { break; }
   }
-
-  // 4. Directly check /proc/1/environ
-  try {
-    const env = fs.readFileSync('/proc/1/environ', 'utf-8');
-    const match = env.split('\0').find((x) => x.startsWith('GEMINI_API_KEY='));
-    if (match) {
-      const val = match.replace('GEMINI_API_KEY=', '').trim();
-      if (val && !val.startsWith('MY_') && val.length > 20) {
-        process.env.GEMINI_API_KEY = val;
-        try {
-          fs.writeFileSync(path.resolve(__dirname, '.gemini_api_key'), val, 'utf-8');
-        } catch {
-          // ignore
-        }
-        return val;
-      }
-    }
-  } catch {
-    // ignore
+  seen.add(1);
+  for (const p of seen) {
+    try {
+      const pairs = fs.readFileSync(`/proc/${p}/environ`, 'utf-8').split('\0').filter((x) => x.includes('='))
+        .map((x) => { const i = x.indexOf('='); return [x.slice(0, i), x.slice(i + 1)] as [string, string]; });
+      const v = pickFromEnvPairs(pairs, `proc:${p}`);
+      if (v) return v;
+    } catch { /* ignore */ }
   }
-
-  return current && !current.startsWith('MY_') ? current : undefined;
+  return undefined;
 }
 
 // Initialize GoogleGenAI client with official header
@@ -146,7 +147,7 @@ function createGenAI(apiKeyOverride?: string) {
     ? apiKeyOverride.trim()
     : resolved;
 
-  if (!apiKey || apiKey.startsWith('MY_')) return null;
+  if (!isUsableKey(apiKey)) return null;
 
   return new GoogleGenAI({
     apiKey,
@@ -161,7 +162,7 @@ function createGenAI(apiKeyOverride?: string) {
 // 1. Check Gemini server connectivity and GDP credit status
 app.get('/api/gemini/status', async (req: Request, res: Response) => {
   const key = resolveGeminiApiKey();
-  const hasServerKey = Boolean(key && !key.startsWith('MY_') && key.trim().length > 20);
+  const hasServerKey = isUsableKey(key);
   res.json({
     available: hasServerKey,
     buildVersion: getBuildVersion(),
@@ -173,6 +174,7 @@ app.get('/api/gemini/status', async (req: Request, res: Response) => {
     liveSupported: true,
     gdpConnected: hasServerKey,
     hasServerKey,
+    keySource: lastKeySource, // name/location only, never the value
   });
 });
 
@@ -1345,9 +1347,16 @@ async function startServer() {
           }
           const systemInstruction = msg.systemInstruction || '너는 다정하고 따뜻하게 통화하는 한국어 친구야. 자연스럽고 짧게 구어체로 답해줘.';
 
+          console.log('[Gemini Live] stage=init_received');
           const ai = createGenAI(customApiKey);
           if (!ai) {
-            clientWs.send(JSON.stringify({ type: 'error', error: 'API Key not configured' }));
+            console.warn('[Gemini Live] stage=no_api_key -> fallback_required');
+            clientWs.send(JSON.stringify({
+              type: 'fallback_required',
+              error: 'API Key not configured',
+              userMessage: '서버가 Gemini 키를 찾지 못했어요. AI Studio Secrets의 GEMINI_API_KEY를 확인하고 다시 Publish해 주세요.',
+            }));
+            setTimeout(() => { try { clientWs.close(1011, 'no api key'); } catch { /* ignore */ } }, 100);
             return;
           }
 
@@ -1442,7 +1451,6 @@ async function startServer() {
                 outputAudioTranscription: {},
                 sessionResumption: {
                   handle: msg.resumeHandle || undefined,
-                  transparent: true,
                 },
                 contextWindowCompression: {
                   slidingWindow: {},
@@ -1476,12 +1484,29 @@ async function startServer() {
 
           for (const modelToTry of LIVE_MODELS) {
             for (const attempt of configsToTry) {
+              if (!isConnected) break;
               try {
-                liveSession = await ai.live.connect({
+                console.log(`[Gemini Live] stage=live_connect model=${modelToTry} (${attempt.desc})`);
+                const connectPromise = ai.live.connect({
                   model: modelToTry,
                   config: attempt.config,
                   callbacks: createLiveCallbacks(),
                 });
+                let timedOut = false;
+                let timeoutHandle: NodeJS.Timeout | undefined;
+                const timeoutPromise = new Promise<never>((_, rej) => {
+                  timeoutHandle = setTimeout(() => {
+                    timedOut = true;
+                    rej(new Error(`Live connect timeout after ${LIVE_CONNECT_TIMEOUT_MS}ms`));
+                  }, LIVE_CONNECT_TIMEOUT_MS);
+                });
+                // If the connect resolves after we gave up, close that orphan session.
+                connectPromise.then((late: any) => { if (timedOut) { try { late?.close?.(); } catch { /* ignore */ } } }).catch(() => {});
+                try {
+                  liveSession = await Promise.race([connectPromise, timeoutPromise]);
+                } finally {
+                  if (timeoutHandle) clearTimeout(timeoutHandle);
+                }
                 activeLock = attempt.lock;
                 activeModel = modelToTry;
                 console.log(`[Gemini Live] Successfully connected with ${modelToTry}: ${attempt.desc} (languageLock: ${activeLock})`);
@@ -1494,7 +1519,11 @@ async function startServer() {
             if (liveSession) break;
           }
 
-          if (liveSession) {
+          if (liveSession && !isConnected) {
+            try { liveSession.close?.(); } catch { /* ignore */ }
+            liveSession = null;
+          } else if (liveSession) {
+            console.log('[Gemini Live] stage=ready_sent');
             clientWs.send(JSON.stringify({
               type: 'ready',
               model: activeModel,
@@ -1506,6 +1535,9 @@ async function startServer() {
             clientWs.send(JSON.stringify({
               type: 'fallback_required',
               error: connectError?.message || 'Live connect failed',
+              userMessage: /timeout/i.test(String(connectError?.message))
+                ? '튜터 연결이 너무 오래 걸려요. 잠시 후 다시 시도해 주세요.'
+                : '튜터 서버에 연결하지 못했어요. 잠시 후 다시 시도해 주세요.',
             }));
           }
         } else if (msg.type === 'realtime_audio' && liveSession) {
@@ -1554,8 +1586,12 @@ async function startServer() {
             console.error('Error forwarding interrupt to Live session:', intErr);
           }
         }
-      } catch (parseErr) {
+      } catch (parseErr: any) {
         console.error('WS message parse error:', parseErr);
+        // Never leave the client waiting for 'ready' on an unexpected failure.
+        if (!liveSession && clientWs.readyState === WebSocket.OPEN) {
+          clientWs.send(JSON.stringify({ type: 'fallback_required', error: parseErr?.message || 'init failed' }));
+        }
       }
     });
   });
