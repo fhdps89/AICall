@@ -15,6 +15,7 @@ import {
   advanceMistakeAfterLesson,
 } from "../firebase/db";
 import { authFetch, authJson } from "../api/authFetch";
+import { recordUsage } from "../usage/usageService";
 
 export type LectureStatus = "generating" | "ready" | "failed";
 
@@ -151,6 +152,10 @@ export async function syncLectureFromServer(uid: string, date = getKSTToday()): 
     updatedAt: new Date().toISOString(),
   };
   await setDoc(lectureRef(uid, date), readyDoc, { merge: true });
+  if (current?.status !== "ready") {
+    // B-10 usage: lecture script tokens + TTS chars (once per lecture)
+    recordUsage(uid, { textTokens: lecture.textTokens || 0, ttsChars: lecture.chars || 0, ttsEngine: "gemini" });
+  }
 
   // Mark new mistakes as used so tomorrow's lecture won't repeat them
   for (const id of lecture.newMistakeIds || []) {

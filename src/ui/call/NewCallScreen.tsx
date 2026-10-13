@@ -1,3 +1,4 @@
+import { recordUsage } from "../../services/usage/usageService";
 import React, { useState, useEffect, useRef } from "react";
 import {
   GoalData,
@@ -230,6 +231,8 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
         connectionPath: stats.connectionPath,
         directFailCount: stats.directFailCount,
       }).catch((err) => console.warn("[NewCallScreen] finalizeCallSession error:", err));
+      // B-10 usage: call minutes
+      recordUsage(userId, { liveMinutes: callDuration / 60 });
     }
 
     await providerRef.current.disconnect();

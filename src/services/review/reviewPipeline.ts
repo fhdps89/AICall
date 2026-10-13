@@ -20,6 +20,7 @@
  *    - Updates session document with review data and status done.
  */
 
+import { recordUsage } from "../usage/usageService";
 import {
   getSessionById,
   saveSessionReview,
@@ -138,6 +139,14 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
       if (data.ok && typeof data.transcript === "string" && data.transcript.trim()) {
         sttFinalText = data.transcript.trim();
         sourceStt = "sttFinal";
+        // B-10 usage: verbatim transcription minutes (from session start/end)
+        getSessionById(userId, sessionId)
+          .then((sd) => {
+            const end = sd?.endedAt || sd?.lastChunkAt;
+            const mins = sd?.startedAt && end ? Math.max(0, (Date.parse(end) - Date.parse(sd.startedAt)) / 60000) : 0;
+            if (mins > 0) return recordUsage(userId, { sttMinutes: mins, sttEngine: "gemini" });
+          })
+          .catch(() => {});
         console.log(`[ReviewPipeline] Final verbatim transcribe successful (${sttFinalText.length} chars)`);
       }
     } catch (sttErr) {
@@ -221,6 +230,12 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
   }
 
   const review: SessionReviewData = reviewJson.review;
+  if (reviewJson.usage) {
+    recordUsage(userId, {
+      textInputTokens: reviewJson.usage.inputTokens || 0,
+      textOutputTokens: reviewJson.usage.outputTokens || 0,
+    });
+  }
 
   onProgress?.("3/3 복기 결과 및 실수 보관함 저장 중...");
 

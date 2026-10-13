@@ -34,6 +34,7 @@ import {
 import { QuizModal } from "../quiz/QuizModal";
 import { MorningLectureCard } from "../lecture/MorningLectureCard";
 import { syncFeed } from "../../services/feed/feedService";
+import { KeepImportModal } from "../keep/KeepImportModal";
 
 interface HomeScreenProps {
   user: User;
@@ -66,6 +67,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const [advancingId, setAdvancingId] = useState<string | null>(null);
   const [debugToast, setDebugToast] = useState<string | null>(null);
   const [showQuizModal, setShowQuizModal] = useState<boolean>(false);
+  const [showKeepImport, setShowKeepImport] = useState<boolean>(false);
 
   const loadMistakes = async () => {
     try {
@@ -253,6 +255,12 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               >
                 <Play className="w-3.5 h-3.5 fill-current" />
                 <span>퀴즈 풀기 ({Math.min(dueMistakes.length, 10)}개)</span>
+              </button>
+              <button
+                onClick={() => setShowKeepImport(true)}
+                className="px-3 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer border border-emerald-500/30"
+              >
+                <span>Keep 가져오기</span>
               </button>
               <button
                 onClick={() => setShowDebugSection(!showDebugSection)}
@@ -605,6 +613,15 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {/* B-10 Keep import */}
+      {showKeepImport && (
+        <KeepImportModal
+          user={user}
+          onClose={() => setShowKeepImport(false)}
+          onSaved={() => loadMistakes()}
+        />
       )}
 
       {/* B-6 Spaced Repetition Quiz Modal */}

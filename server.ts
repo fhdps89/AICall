@@ -799,6 +799,10 @@ STRICT ANALYSIS RULES (Part B-4):
         lessonTitle: lessonTitle || '',
         generatedAt: new Date().toISOString(),
       },
+      usage: {
+        inputTokens: response.usageMetadata?.promptTokenCount || 0,
+        outputTokens: response.usageMetadata?.candidatesTokenCount || 0,
+      },
       elapsedMs: elapsed,
     });
   } catch (err: any) {
@@ -1173,6 +1177,82 @@ app.get('/feed/:secret/audio/:file', (req: Request, res: Response) => {
   }
   res.set('X-Robots-Tag', 'noindex');
   res.type('audio/wav').sendFile(file);
+});
+
+// B-10 Keep import: split pasted Keep "English mistake log" text into [내가 한 말 / 자연스러운 표현 / 이유]
+app.post('/api/keep/parse', requireAuth, async (req: Request, res: Response) => {
+  const { text } = req.body || {};
+  if (typeof text !== 'string' || !text.trim()) {
+    res.status(400).json({ ok: false, error: '붙여넣은 Keep 텍스트가 없습니다.' });
+    return;
+  }
+  if (text.length > 60000) {
+    res.status(400).json({ ok: false, error: '텍스트가 너무 깁니다(6만 자 이하로 나눠 주세요).' });
+    return;
+  }
+  const ai = createGenAI();
+  if (!ai) {
+    res.status(500).json({ ok: false, error: 'Gemini 서버 연동이 준비되지 않았습니다.' });
+    return;
+  }
+  try {
+    const prompt = `아래는 사용자가 Google Keep "English mistake log" 목록에서 복사한 텍스트입니다.
+각 실수 항목을 [내가 한 말 / 자연스러운 표현 / 이유]로 나누세요.
+
+규칙:
+1. myPhrase(내가 한 말)는 텍스트에 적힌 틀린 문장을 글자 그대로 옮기세요. 절대 고치거나 다듬지 마세요.
+2. naturalPhrase(자연스러운 표현)가 텍스트에 있으면 그대로, 없으면 자연스러운 영어로 제안하세요.
+3. reason(이유)은 텍스트에 있으면 그대로, 없으면 한국어 1문장으로 쓰세요.
+4. 실수가 아닌 줄(제목, 날짜, 빈 줄, 메모)은 버리세요. 항목 수를 임의로 합치거나 나누지 마세요.
+5. 원래 순서를 지키세요.
+
+[Keep 텍스트]
+${text}`;
+    const response = await ai.models.generateContent({
+      model: FALLBACK_CHAT_MODEL, // gemini-3.8-flash
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            items: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  myPhrase: { type: Type.STRING },
+                  naturalPhrase: { type: Type.STRING },
+                  reason: { type: Type.STRING },
+                },
+                required: ['myPhrase', 'naturalPhrase', 'reason'],
+              },
+            },
+          },
+          required: ['items'],
+        },
+      },
+    });
+    const parsed = JSON.parse(response.text?.trim() || '{}');
+    const items = (Array.isArray(parsed.items) ? parsed.items : [])
+      .filter((it: any) => it && typeof it.myPhrase === 'string' && it.myPhrase.trim())
+      .map((it: any) => ({
+        myPhrase: String(it.myPhrase).trim(),
+        naturalPhrase: String(it.naturalPhrase || '').trim(),
+        reason: String(it.reason || '').trim(),
+      }));
+    res.json({
+      ok: true,
+      items,
+      usage: {
+        inputTokens: response.usageMetadata?.promptTokenCount || 0,
+        outputTokens: response.usageMetadata?.candidatesTokenCount || 0,
+      },
+    });
+  } catch (err: any) {
+    console.error('[KeepParse] error:', err);
+    res.status(500).json({ ok: false, error: err?.message || 'Keep 텍스트 분석 실패' });
+  }
 });
 
 app.get(['/healthz', '/api/health', '/health'], (_req: Request, res: Response) => {
