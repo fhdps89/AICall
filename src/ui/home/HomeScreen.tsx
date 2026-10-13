@@ -35,6 +35,7 @@ import { QuizModal } from "../quiz/QuizModal";
 import { MorningLectureCard } from "../lecture/MorningLectureCard";
 import { syncFeed } from "../../services/feed/feedService";
 import { KeepImportModal } from "../keep/KeepImportModal";
+import { SttBenchmarkModal } from "../sttBench/SttBenchmarkModal";
 
 interface HomeScreenProps {
   user: User;
@@ -68,6 +69,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const [debugToast, setDebugToast] = useState<string | null>(null);
   const [showQuizModal, setShowQuizModal] = useState<boolean>(false);
   const [showKeepImport, setShowKeepImport] = useState<boolean>(false);
+  const [showSttBench, setShowSttBench] = useState<boolean>(false);
 
   const loadMistakes = async () => {
     try {
@@ -261,6 +263,12 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                 className="px-3 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer border border-emerald-500/30"
               >
                 <span>Keep 가져오기</span>
+              </button>
+              <button
+                onClick={() => setShowSttBench(true)}
+                className="px-3 py-2 rounded-xl bg-violet-500/15 hover:bg-violet-500/25 text-violet-300 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer border border-violet-500/30"
+              >
+                <span>받아쓰기 품질 시험</span>
               </button>
               <button
                 onClick={() => setShowDebugSection(!showDebugSection)}
@@ -614,6 +622,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           </div>
         </div>
       )}
+
+      {/* 1-F STT quality benchmark */}
+      {showSttBench && <SttBenchmarkModal user={user} onClose={() => setShowSttBench(false)} />}
 
       {/* B-10 Keep import */}
       {showKeepImport && (

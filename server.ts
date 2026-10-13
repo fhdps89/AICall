@@ -9,6 +9,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { GoogleGenAI, Modality, Type } from '@google/genai';
 import { requireAuth } from './server/auth.ts';
 import { startLectureJob, readLectureState, lectureAudioPath, kstToday } from './server/lecture.ts';
+import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive } from './server/sttBench.ts';
 import { isValidFeedSecret, writeFeedSync, feedForSecret, buildFeedToday, feedAudioFile, renderFeedHtml } from './server/feed.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1252,6 +1253,41 @@ ${text}`;
   } catch (err: any) {
     console.error('[KeepParse] error:', err);
     res.status(500).json({ ok: false, error: err?.message || 'Keep 텍스트 분석 실패' });
+  }
+});
+
+// 1-F STT quality benchmark (auth required)
+app.get('/api/stt-bench/engines', requireAuth, (_req: Request, res: Response) => {
+  res.json({ ok: true, engines: { live: true, gemini_transcribe: true, assemblyai: assemblyAvailable() } });
+});
+
+app.post('/api/stt-bench/transcribe', requireAuth, async (req: Request, res: Response) => {
+  const { engine, audioBase64, mimeType = 'audio/webm', pcm16kBase64 } = req.body || {};
+  const ai = createGenAI();
+  const start = performance.now();
+  try {
+    let output = '';
+    if (engine === 'gemini_transcribe') {
+      if (!ai || typeof audioBase64 !== 'string') throw new Error('Gemini 또는 오디오 없음');
+      output = await transcribeGemini(ai, TRANSCRIBE_MODEL, audioBase64, String(mimeType));
+    } else if (engine === 'assemblyai') {
+      if (!assemblyAvailable()) {
+        res.json({ ok: false, skipped: true, error: 'ASSEMBLYAI_API_KEY 없음' });
+        return;
+      }
+      if (typeof audioBase64 !== 'string') throw new Error('오디오 없음');
+      output = await transcribeAssembly(Buffer.from(audioBase64, 'base64'));
+    } else if (engine === 'live') {
+      if (!ai || typeof pcm16kBase64 !== 'string') throw new Error('Gemini 또는 PCM 오디오 없음');
+      output = await transcribeLive(ai, NATIVE_AUDIO_MODEL, pcm16kBase64);
+    } else {
+      res.status(400).json({ ok: false, error: 'unknown engine' });
+      return;
+    }
+    res.json({ ok: true, engine, output, elapsedMs: Math.round(performance.now() - start) });
+  } catch (err: any) {
+    console.warn(`[SttBench] ${engine} error:`, err?.message || err);
+    res.status(500).json({ ok: false, engine, error: err?.message || '받아쓰기 실패' });
   }
 });
 
