@@ -317,7 +317,11 @@ app.post('/api/gemini/chat', async (req: Request, res: Response) => {
       });
     }
 
-    const model = requestedModel || FALLBACK_CHAT_MODEL;
+    // Only allow known text models; arbitrary client-supplied model names could hit expensive models.
+    const ALLOWED_CHAT_MODELS = new Set<string>([FALLBACK_CHAT_MODEL]);
+    const model = typeof requestedModel === 'string' && ALLOWED_CHAT_MODELS.has(requestedModel)
+      ? requestedModel
+      : FALLBACK_CHAT_MODEL;
     const response = await ai.models.generateContent({
       model,
       contents,
