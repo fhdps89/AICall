@@ -15,6 +15,7 @@ import {
   batchInitGoals,
   updateGoalProgress,
   getUnfinishedSessions,
+  markSessionPendingReview,
   checkAndMarkInterruptedSessions,
   GoalData,
   UserProfileData,
@@ -36,8 +37,9 @@ import { UnfinishedSessionModal } from "./ui/call/UnfinishedSessionModal";
 import { InitialProgressModal } from "./ui/onboarding/InitialProgressModal";
 import { SettingsModal } from "./ui/settings/SettingsModal";
 import { ReviewModal } from "./ui/review/ReviewModal";
+import { ReviewFlowScreen } from "./ui/review/ReviewFlowScreen";
 import { LiveTranscriptItem } from "./services/providers/types";
-import { Loader2, Sparkles, FileAudio } from "lucide-react";
+import { Loader2 } from "lucide-react";
 
 interface ActiveReviewState {
   review: SessionReviewData;
@@ -71,6 +73,11 @@ export const App: React.FC = () => {
   const [isGeneratingReview, setIsGeneratingReview] = useState<boolean>(false);
   const [reviewProgressStep, setReviewProgressStep] = useState<string>("");
   const [activeReviewData, setActiveReviewData] = useState<ActiveReviewState | null>(null);
+  // Failed review: kept so the in-app card can retry the same session
+  const [reviewFailure, setReviewFailure] = useState<{
+    message: string;
+    retry: () => void;
+  } | null>(null);
   const [homeRefreshKey, setHomeRefreshKey] = useState<number>(0);
 
   // Placeholders for prompts
@@ -240,40 +247,43 @@ export const App: React.FC = () => {
 
     if (!user || !endedGoal) return;
 
-    // Trigger B-4 Post-Call Review Pipeline
-    setIsGeneratingReview(true);
-    setReviewProgressStep("1/3 녹음 조각 병합 및 최종 전사(gemini-3.5-transcribe) 진행 중...");
-
-    try {
-      const result = await runPostCallReview({
-        userId: user.uid,
-        sessionId: finalSessionId,
-        goal: endedGoal,
-        lessonIndex: endedLesson,
-        placeholders,
-        audioBlobs,
-        liveTranscript: transcripts,
-        onProgress: (step) => setReviewProgressStep(step),
-      });
-
-      const lessonTitle = endedGoal.lessons.find((l) => l.index === endedLesson)?.title || `${endedLesson}과`;
-
-      setActiveReviewData({
-        review: result.review,
-        sttFinal: result.sttFinal,
-        goalId: endedGoal.id,
-        lessonIndex: endedLesson,
-        goalTitle: endedGoal.title,
-        lessonTitle,
-        sessionId: finalSessionId,
-      });
-    } catch (err: any) {
-      console.error("[App] Post-call review generation failed:", err);
-      alert(`복기 리포트 생성 중 문제가 발생했습니다: ${err?.message || "알 수 없는 오류"}`);
-    } finally {
-      setIsGeneratingReview(false);
-      setReviewProgressStep("");
-    }
+    const sessionUser = user;
+    const lessonTitle = endedGoal.lessons.find((l) => l.index === endedLesson)?.title || `${endedLesson}과`;
+    const run = async () => {
+      setReviewFailure(null);
+      setIsGeneratingReview(true);
+      setReviewProgressStep("1/3 녹음을 정리하고 받아쓰는 중...");
+      try {
+        const result = await runPostCallReview({
+          userId: sessionUser.uid,
+          sessionId: finalSessionId,
+          goal: endedGoal,
+          lessonIndex: endedLesson,
+          placeholders,
+          audioBlobs,
+          liveTranscript: transcripts,
+          onProgress: (step) => setReviewProgressStep(step),
+        });
+        setActiveReviewData({
+          review: result.review,
+          sttFinal: result.sttFinal,
+          goalId: endedGoal.id,
+          lessonIndex: endedLesson,
+          goalTitle: endedGoal.title,
+          lessonTitle,
+          sessionId: finalSessionId,
+        });
+      } catch (err: any) {
+        console.error("[App] Post-call review generation failed:", err);
+        // Keep the session reopenable from 끝나지 않은 통화 (finalize marked it done).
+        markSessionPendingReview(sessionUser.uid, finalSessionId).catch(() => {});
+        setReviewFailure({ message: err?.message || "알 수 없는 오류", retry: run });
+      } finally {
+        setIsGeneratingReview(false);
+        setReviewProgressStep("");
+      }
+    };
+    await run();
   };
 
   // B-4: Handle "복기 시작" from Unfinished Session Modal
@@ -311,40 +321,43 @@ export const App: React.FC = () => {
     }
 
     // Otherwise generate post-call review for the unfinished session
-    setIsGeneratingReview(true);
-    setReviewProgressStep("1/3 저장된 녹음 조각 병합 및 gemini-3.5-transcribe 전사 중...");
+    const sessionUser = user;
+    const run = async () => {
+      setReviewFailure(null);
+      setIsGeneratingReview(true);
+      setReviewProgressStep("1/3 저장된 녹음을 정리하고 받아쓰는 중...");
+      try {
+        const result = await runPostCallReview({
+          userId: sessionUser.uid,
+          sessionId: session.id,
+          goal: matchedGoal,
+          lessonIndex: session.lessonIndex,
+          placeholders,
+          liveTranscript: session.liveTranscript,
+          onProgress: (step) => setReviewProgressStep(step),
+        });
 
-    try {
-      const result = await runPostCallReview({
-        userId: user.uid,
-        sessionId: session.id,
-        goal: matchedGoal,
-        lessonIndex: session.lessonIndex,
-        placeholders,
-        liveTranscript: session.liveTranscript,
-        onProgress: (step) => setReviewProgressStep(step),
-      });
+        setActiveReviewData({
+          review: result.review,
+          sttFinal: result.sttFinal,
+          goalId: matchedGoal.id,
+          lessonIndex: session.lessonIndex,
+          goalTitle: matchedGoal.title,
+          lessonTitle,
+          sessionId: session.id,
+        });
 
-      setActiveReviewData({
-        review: result.review,
-        sttFinal: result.sttFinal,
-        goalId: matchedGoal.id,
-        lessonIndex: session.lessonIndex,
-        goalTitle: matchedGoal.title,
-        lessonTitle,
-        sessionId: session.id,
-      });
-
-      // Refresh unfinished sessions
-      const remaining = await getUnfinishedSessions(user.uid);
-      setUnfinishedSessions(remaining);
-    } catch (err: any) {
-      console.error("[App] Unfinished session review failed:", err);
-      alert(`복기 리포트 생성 실패: ${err?.message || "알 수 없는 오류"}`);
-    } finally {
-      setIsGeneratingReview(false);
-      setReviewProgressStep("");
-    }
+        const remaining = await getUnfinishedSessions(sessionUser.uid);
+        setUnfinishedSessions(remaining);
+      } catch (err: any) {
+        console.error("[App] Unfinished session review failed:", err);
+        setReviewFailure({ message: err?.message || "알 수 없는 오류", retry: run });
+      } finally {
+        setIsGeneratingReview(false);
+        setReviewProgressStep("");
+      }
+    };
+    await run();
   };
 
   // 1. Initial Auth Loading State
@@ -400,25 +413,18 @@ export const App: React.FC = () => {
         onLogout={handleLogout}
       />
 
-      {/* Generating Review Loading Overlay */}
-      {isGeneratingReview && (
-        <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center text-slate-100">
-          <div className="relative mb-5">
-            <div className="w-16 h-16 rounded-2xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center animate-pulse">
-              <Sparkles className="w-8 h-8 text-amber-400" />
-            </div>
-            <Loader2 className="w-6 h-6 text-amber-400 animate-spin absolute -bottom-2 -right-2 bg-slate-900 rounded-full p-1" />
-          </div>
-          <h3 className="text-base font-bold text-white mb-1.5">
-            통화 복기 & 실수 분석 리포트 생성 중...
-          </h3>
-          <p className="text-xs text-amber-300 font-medium max-w-sm">
-            {reviewProgressStep || "gemini-3.5-transcribe 최종 받아쓰기 및 gemini-3.8-flash 분석이 진행되고 있습니다."}
-          </p>
-          <p className="text-[11px] text-slate-500 mt-3 font-mono">
-            VERBATIM 전사 검증 및 실수 보관함 동기화
-          </p>
-        </div>
+      {/* Dedicated post-call review flow: loading → (ReviewModal) | in-app failure card */}
+      {(isGeneratingReview || reviewFailure) && (
+        <ReviewFlowScreen
+          loading={isGeneratingReview}
+          progressStep={reviewProgressStep}
+          errorMessage={reviewFailure?.message || null}
+          onRetry={() => reviewFailure?.retry()}
+          onLater={() => {
+            setReviewFailure(null);
+            setHomeRefreshKey((prev) => prev + 1);
+          }}
+        />
       )}
 
       {/* Review Modal Screen (B-4 requirement 3) */}

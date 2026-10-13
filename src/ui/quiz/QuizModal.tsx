@@ -1,3 +1,4 @@
+import { authFetch } from "../../services/api/authFetch";
 import React, { useState, useEffect, useRef } from "react";
 import { User } from "firebase/auth";
 import {
@@ -223,9 +224,8 @@ export const QuizModal: React.FC<QuizModalProps> = ({
       reader.readAsDataURL(blob);
 
       const audioBase64 = await base64Promise;
-      const res = await fetch("/api/gemini/transcribe-final", {
+      const res = await authFetch("/api/gemini/transcribe-final", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           audioBase64,
           mimeType: "audio/webm",

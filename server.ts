@@ -602,7 +602,7 @@ app.get('/api/recordings/file', (req: Request, res: Response) => {
 });
 
 // B-4 Final Full-Audio Transcription endpoint via gemini-3.5-transcribe (VERBATIM)
-app.post('/api/gemini/transcribe-final', async (req: Request, res: Response) => {
+app.post('/api/gemini/transcribe-final', requireAuth, async (req: Request, res: Response) => {
   const start = performance.now();
   const { audioBase64, mimeType = 'audio/webm', customApiKey } = req.body || {};
 
@@ -653,7 +653,7 @@ app.post('/api/gemini/transcribe-final', async (req: Request, res: Response) => 
 });
 
 // 6. Post-Call Review & Mistake Log Generation (Gemini 3.8 Flash structured JSON) - B-4 Specification
-app.post('/api/review', async (req: Request, res: Response) => {
+app.post('/api/review', requireAuth, async (req: Request, res: Response) => {
   const start = performance.now();
   const {
     trackId,
@@ -671,7 +671,7 @@ app.post('/api/review', async (req: Request, res: Response) => {
 
   const ai = createGenAI(customApiKey);
   if (!ai) {
-    res.status(500).json({ ok: false, error: 'Gemini API 연동이 준비되지 않았습니다.' });
+    res.status(503).json({ ok: false, code: 'NO_SERVER_KEY', error: '서버에 Gemini 키가 없어요. AI Studio Secrets에 GEMINI_API_KEY를 넣어 주세요.' });
     return;
   }
 

@@ -1,3 +1,4 @@
+import { authFetch } from "../api/authFetch";
 /**
  * B-4 Post-Call Review Pipeline
  * 
@@ -126,9 +127,8 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
   if (finalAudioBlob && finalAudioBlob.size > 1000) {
     try {
       const base64 = await blobToBase64(finalAudioBlob);
-      const res = await fetch("/api/gemini/transcribe-final", {
+      const res = await authFetch("/api/gemini/transcribe-final", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           audioBase64: base64,
           mimeType: finalAudioBlob.type || "audio/webm",
@@ -207,9 +207,8 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
   const currentLessonTitle = goal.lessons.find((l) => l.index === lessonIndex)?.title || `${lessonIndex}과`;
 
   // Step 5: Call /api/review
-  const reviewResponse = await fetch("/api/review", {
+  const reviewResponse = await authFetch("/api/review", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       trackId: goal.id,
       goalId: goal.id,
@@ -224,7 +223,7 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
     }),
   });
 
-  const reviewJson = await reviewResponse.json();
+  const reviewJson = await reviewResponse.json().catch(() => ({} as any));
   if (!reviewJson.ok || !reviewJson.review) {
     throw new Error(reviewJson.error || "복기 리포트 생성에 실패했습니다.");
   }
