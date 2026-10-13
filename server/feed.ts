@@ -7,7 +7,8 @@
 import fs from 'fs';
 import path from 'path';
 import type { GoogleGenAI } from '@google/genai';
-import { DATA_DIR, LectureMistakeInput, kstToday, readLectureState, startLectureJob, lectureAudioPath } from './lecture.ts';
+import { DATA_DIR, kstToday, readLectureState, startLectureJob, lectureAudioPath } from './lecture.ts';
+import type { LectureMistakeInput } from './lecture.ts';
 import { safeEqual } from './auth.ts';
 
 const FEED_FILE = path.join(DATA_DIR, 'feed.json');
