@@ -119,7 +119,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const currentDayIndex = new Date().getDay();
 
   // Find goal for today
-  const todayGoal = goals.find((g) => g.id === todayRoutine.goalId);
+  // Track cards can switch today's lesson to another track (single call button on top).
+  const [overrideGoalId, setOverrideGoalId] = useState<string | null>(null);
+  const todayGoal = goals.find((g) => g.id === (overrideGoalId || todayRoutine.goalId));
   const currentLesson = todayGoal?.lessons.find(
     (l) => l.index === (todayGoal.nextLessonIndex || 1)
   );
@@ -413,7 +415,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             </div>
           </div>
 
-          {todayRoutine.isReviewDay ? (
+          {todayRoutine.isReviewDay && !overrideGoalId ? (
             <div className="relative z-10 py-6 text-center space-y-3">
               <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center mx-auto">
                 <Calendar className="w-6 h-6" />
@@ -431,6 +433,14 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                   <span className="text-amber-300 font-semibold">{todayGoal.title}</span>
                   <span className="text-slate-600">·</span>
                   <span>총 {todayGoal.lessons.length}개 과 중 {currentLesson.index}번째</span>
+                  {overrideGoalId && (
+                    <button
+                      onClick={() => setOverrideGoalId(null)}
+                      className="ml-1 text-[11px] text-slate-400 underline hover:text-white cursor-pointer"
+                    >
+                      오늘 루틴으로 되돌리기
+                    </button>
+                  )}
                 </div>
                 <h2 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
                   {currentLesson.index}과. {currentLesson.title}
@@ -507,7 +517,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               <Layers className="w-4 h-4 text-amber-400" />
               <span>4대 집중 트랙 현황</span>
             </h3>
-            <span className="text-[11px] text-slate-400">각 목표별 다음 과 번호 관리 및 통화</span>
+            <span className="text-[11px] text-slate-400">다른 트랙으로 하고 싶으면 바꾸기를 누르세요</span>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -567,13 +577,19 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                       )}
                     </div>
 
-                    <button
-                      onClick={() => onStartCall(goal, nextIdx)}
-                      className="w-full py-2 px-3 rounded-xl bg-slate-800 hover:bg-amber-500 hover:text-slate-950 text-amber-300 text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer border border-slate-700 hover:border-amber-400"
-                    >
-                      <PhoneCall className="w-3.5 h-3.5" />
-                      <span>{nextIdx}과 통화 시작</span>
-                    </button>
+                    {todayGoal?.id === goal.id ? (
+                      <div className="w-full py-2 text-center text-[11px] text-amber-400 font-semibold">오늘 수업으로 선택됨</div>
+                    ) : (
+                      <button
+                        onClick={() => {
+                          setOverrideGoalId(goal.id);
+                          window.scrollTo({ top: 0, behavior: "smooth" });
+                        }}
+                        className="w-full py-2 px-3 rounded-xl text-slate-400 hover:text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer border border-slate-800 hover:border-slate-600"
+                      >
+                        <span>이 트랙으로 바꾸기</span>
+                      </button>
+                    )}
                   </div>
                 </div>
               );
