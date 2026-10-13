@@ -15,6 +15,16 @@ import { SentenceSplitter } from './SentenceSplitter';
 import { UtteranceWindow } from './UtteranceWindow';
 import { UserPreferences } from '../data/UserPreferences';
 
+export interface VoiceCallContext {
+  trackId?: string;
+  lessonNum?: number;
+  lessonTitle?: string;
+  systemInstruction?: string;
+  starterPrompt?: string;
+  voiceName?: string;
+  languageCode?: string;
+}
+
 interface SpeechRecognitionEventLike {
   results: {
     length: number;
@@ -165,13 +175,17 @@ export class VoiceCallEngine {
   private static readonly MAX_HISTORY_TURNS = 24;
   private static readonly BARGE_IN_ARM_DELAY_MS = 400;
 
+  private callContext?: VoiceCallContext;
+  private conversationTurns: Array<{ role: 'user' | 'model'; text: string; timestamp: number }> = [];
+
   constructor(
     nicknameProvider: () => string,
     apiKeyProvider: () => string | null,
     openRouterKeyProvider: () => string | null,
     voiceProvider: () => TtsVoice,
     isMutedProvider: () => boolean,
-    callbacks: VoiceCallEngineCallbacks
+    callbacks: VoiceCallEngineCallbacks,
+    callContext?: VoiceCallContext
   ) {
     this.nicknameProvider = nicknameProvider;
     this.apiKeyProvider = apiKeyProvider;
@@ -179,6 +193,11 @@ export class VoiceCallEngine {
     this.voiceProvider = voiceProvider;
     this.isMutedProvider = isMutedProvider;
     this.callbacks = callbacks;
+    this.callContext = callContext;
+  }
+
+  public getConversationTurns(): Array<{ role: 'user' | 'model'; text: string; timestamp: number }> {
+    return [...this.conversationTurns];
   }
 
   async start(): Promise<void> {
@@ -631,7 +650,9 @@ export class VoiceCallEngine {
       const validVoices = ['Kore', 'Puck', 'Charon', 'Fenrir', 'Zephyr'];
       const voiceOption = this.currentVoice || this.voiceProvider();
       let voiceName = 'Kore';
-      if (voiceOption?.voice) {
+      if (this.callContext?.voiceName) {
+        voiceName = this.callContext.voiceName;
+      } else if (voiceOption?.voice) {
         const match = validVoices.find(v => v.toLowerCase() === voiceOption.voice.toLowerCase());
         if (match) voiceName = match;
       }
@@ -639,19 +660,25 @@ export class VoiceCallEngine {
       ws.onopen = () => {
         this.liveConnected = true;
         this.callbacks.onReplyOrigin({ kind: 'Ai' });
+
+        const sysInst = this.callContext?.systemInstruction || PersonaPrompt.systemInstruction(nick, voiceOption);
+        const langCode = this.callContext?.languageCode || 'en-US';
+
         ws.send(JSON.stringify({
           type: 'init',
           apiKey: customApiKey || undefined,
           voiceName,
-          systemInstruction: PersonaPrompt.systemInstruction(nick, voiceOption),
+          languageCode: langCode,
+          systemInstruction: sysInst,
         }));
 
         // Send initial greeting prompt
         setTimeout(() => {
           if (this.isRunning && this.liveConnected) {
+            const starter = this.callContext?.starterPrompt || `(통화가 연결됐어. ${nick}에게 반말로 짧게 먼저 인사해.)`;
             ws.send(JSON.stringify({
               type: 'text_prompt',
-              text: `(통화가 연결됐어. ${nick}에게 반말로 짧게 먼저 인사해. 외국어는 쓰지 마.)`,
+              text: starter,
             }));
           }
         }, 120);
@@ -694,13 +721,22 @@ export class VoiceCallEngine {
             this.pcmSink?.writePcm(bytes);
           } else if (msg.type === 'input_transcript') {
             // Authentic speech recognition result from Gemini Live itself!
+            if (msg.text && msg.text.trim()) {
+              this.conversationTurns.push({ role: 'user', text: msg.text.trim(), timestamp: Date.now() });
+            }
             this.p4Telemetry.lastInputTranscript = msg.text;
             this.callbacks.onPartialText(msg.text);
             this.callbacks.onP4Telemetry?.({ ...this.p4Telemetry });
           } else if (msg.type === 'output_transcript') {
             // AI output transcription from Gemini Live
+            if (msg.text && msg.text.trim()) {
+              this.conversationTurns.push({ role: 'model', text: msg.text.trim(), timestamp: Date.now() });
+            }
             this.callbacks.onPartialText(msg.text);
           } else if (msg.type === 'text') {
+            if (msg.text && msg.text.trim()) {
+              this.conversationTurns.push({ role: 'model', text: msg.text.trim(), timestamp: Date.now() });
+            }
             this.callbacks.onPartialText(msg.text);
           } else if (msg.type === 'interrupted') {
             this.cancelActiveAudio();
@@ -971,6 +1007,8 @@ export class VoiceCallEngine {
     if (!this.isRunning || this.isMutedProvider()) return;
     const cleaned = text.trim();
     if (!cleaned) return;
+
+    this.conversationTurns.push({ role: 'user', text: cleaned, timestamp: Date.now() });
 
     if (this.isSpeaking) {
       this.triggerBargeIn('manual user input');

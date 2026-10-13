@@ -4,6 +4,57 @@
 
 ---
 
+### [2026-10-13 KST] v2.1.0 — Part B-12 1단계 뼈대 구축 완료
+- **Firebase 단일 계정 접근 제어 & 클라우드 스토리지 연동 (`B-1`, `B-11`)**:
+  - `episode.kim@gmail.com` 1인 전용 Google 로그인 인증 체계 구현 (`src/services/firebase/auth.ts`).
+  - 비인가 계정으로 로그인 시 즉시 세션 차단, 자동 로그아웃 및 전용 에러 메시지(`UnauthorizedUserError`) 반환.
+  - Firestore 엔티티 스키마 청사진(`firebase-blueprint.json`) 작성 및 단일 사용자 ABAC 보안 규칙(`firestore.rules`) 배포 완료.
+  - Firestore 에러 표준화 함수(`handleFirestoreError`) 및 Cloud Storage 오디오 버킷 연동(`src/services/firebase/storage.ts`).
+- **Part B-1 모델 설정 및 공급자 인터페이스 뼈대 (`models.ts`, `providers/`)**:
+  - `src/config/models.ts` 내 확정 모델명 및 엔진 선언:
+    - `LIVE_MODEL = "gemini-3.8-live"`
+    - `TEXT_MODEL = "gemini-3.8-flash"`
+    - `STT_ENGINE = "gemini"` (`gemini-3.5-transcribe`, 모드 `VERBATIM`) / 대안 `universal-3-5-pro` (AssemblyAI)
+    - `TTS_ENGINE = "gemini"` (`gemini-3.8-flash-tts`) / 대안 `elevenlabs`
+    - B-10 사용량 산출용 단가표(`PRICING_RATES`) 일원화 관리.
+  - 공급자 인터페이스 추상화: `LiveProvider`, `SttProvider`, `LlmProvider`, `TtsProvider` 정의 (`src/services/providers/types.ts`) 및 팩토리 분리. UI 컴포넌트가 공급자 벤더명을 직접 호출하지 않도록 아키텍처 격리.
+- **4대 목표 데이터 영구 보존 & 요일 루틴 엔진 (`B-9`, `부록`)**:
+  - 4개 목표 커리큘럼 내장 (`src/data/defaultGoals.ts`): OPIc AL (14과), 필리조선소 주재원 (15과), 미국·호주 여행 (13과), Bluey 듣기 (12과).
+  - 마스터 체크리스트 부록 원문 튜터 프롬프트(Google Keep 연동 및 Gemini 앱 특화 지시사항 포함) 100% 무삭제 원문 보존.
+  - 프롬프트 커스텀 변수 슬롯 처리기(`src/data/promptCustomizer.ts`): 원문의 `[직무]`, `[Survey topics I chose]`, `[My role in Philly]`, `[Recent weak points]`를 설정 화면에서 사용자가 직접 입력하여 동적으로 치환 가능하도록 지원.
+  - B-9 요일별 루틴 엔진: 월·토 OPIc, 화·목 Philly, 수 Bluey, 금 여행, 일 주간 복기.
+- **첫 실행 진도 설정 모달 & 홈 화면 오늘 수업 카드 (`src/ui/`)**:
+  - 첫 로그인 시 목표별 진도를 설정하는 `InitialProgressModal` 구현 (OPIc 10/10 1과, 10/11 2과, 10/12 3과 진행 히스토리를 반영한 추천 및 커스텀 선택).
+  - 오늘 요일에 맞춘 `오늘의 추천 수업 카드` 실시간 렌더링, 현재 진행 과명, 목표 설명, 진도 변경 드롭다운 제공.
+  - 원문 튜터 프롬프트 뷰어 모달(부록 원본 vs 변수 치환본 토글 보기) 및 환경설정 모달 제공.
+- **통화·녹음·복기 격리 원칙 준수**:
+  - 사용자 지시에 따라 1단계에서는 통화/녹음/STT/복기 엔진을 선제 실행하지 않고 뼈대와 데이터 파이프라인에 집중.
+
+---
+
+### v2.0.0 (2026-10-13 KST) — AI 1:1 전화영어 올인원 랩 전면 탈바꿈
+- **4대 집중 트랙 및 10/10~1/9 일자별 커리큘럼 탑재 (`src/data/curriculums.ts`, `src/data/schedule.ts`)**:
+  - 🎯 **OPIc 코치**: 1~14과 (자기소개, 집/동네 묘사, 설문 3종, 롤플레이 A/B/C, 돌발 주제, 사회 이슈 비교, 실전 모의고사 15문항).
+  - 🏭 **Philly 출근 (한화 필리 조선소)**: 1~15과 (첫 출근 인사, 생산 회의, 지연 보고/만회 계획, 안전 Toolbox Talk, 용접/블록 결함, 공손한 반대, 벤더 전화, Eagles/Phillies 스몰토크, 본사 결정 전달 등).
+  - ✈️ **여행 (미국 · 호주)**: 1~13과 (미국 입국심사, 렌터카, 호텔 컴플레인, 레스토랑 주문/팁, 약국 아이 해열제, 호주 검역, 로컬 카페 Flat white, 본다이 해변 안전, 놀이터 BBQ 스몰토크).
+  - 🦘 **Bluey 리스닝**: S1E01~S1E13 (3줄 줄거리, 호주 슬랭 10개, 호주 모음 발음 포인트, 5편 단위 누적 퀴즈 및 섀도잉 악센트 드릴).
+  - **주간 루틴 및 날짜 계산**: 월(OPIc), 화(Philly), 수(Bluey), 목(Philly), 금(여행), 토(OPIc 모의고사), 일(주간 복기).
+- **통화 종료 후 자동 복기 & Mistake Log 생성 (`POST /api/review`, `ReviewModal.tsx`)**:
+  - Gemini 3.8 Flash의 정밀 JSON Schema를 활용해 대화 트랜스크립트 전체를 1회 정밀 분석.
+  - `[내가 한 말 -> 자연스러운 원어민 표현 -> 이유]` 교정 표, 오늘 꼭 외울 표현 5선(상황/예문), 예상 OPIc 레벨(IM2/IH/AL), Google Keep 양식 자동 생성.
+- **Google Keep 스타일 카드형 Mistake Vault (`MistakeVaultModal.tsx`, `AppStorage.ts`)**:
+  - 로컬스토리지 영구 보존 및 트랙별 필터링, 복습 완료 체크박스, 원클릭 Keep 전체 복사, 개별 표현 원어민 TTS 발음 청취 기능 지원.
+- **아침 7시 맞춤형 복습 팟캐스트 & 텔레그램 연동 (`POST /api/podcast`, `POST /api/telegram/send`, `MorningPodcastModal.tsx`)**:
+  - 미완료 실수를 엮어 출근길에 듣는 3분 1:1 맞춤형 오디오 강의 스크립트 자동 생성.
+  - Gemini 3.8 Flash Lite TTS 고음질 음성 합성 및 앱 내 플레이어(재생/일시정지/10초 앞뒤 이동) 제공.
+  - 텔레그램 봇 토큰 및 Chat ID 등록 시 텔레그램으로 오디오 파일 자동 전송 지원.
+- **전화 통화 엔진 확장 (`src/voice/VoiceCallEngine.ts`, `CallScreen.tsx`)**:
+  - `VoiceCallContext`를 통해 트랙별 전문 시스템 프롬프트, 원어민 악센트 보이스(Kore, Puck, Charon, Zephyr), 레슨 시작 프롬프트 주입.
+  - 통화 중 원터치 음성 명령어 툴바 지원 ("Next lesson", "Answer starts/Done", "Feedback", "Pause", "Model answer", "Slower").
+  - 전체 통화 트랜스크립트 실시간 누적 수집 후 통화 종료 시 복기 엔진으로 자동 전달.
+
+---
+
 ### v1.2.2 (2026-10-01 KST) — 한국어 귀 고정 (Korean Ear Lock)
 - **Gemini Live 세션 언어 고정 (`server.ts`)**:
   - `speechConfig`에 `languageCode: 'ko-KR'` 명시 및 입출력 오디오 전사(`inputAudioTranscription`, `outputAudioTranscription`)에 `languageCodes: ['ko-KR']` 고정 적용.

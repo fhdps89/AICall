@@ -6,7 +6,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
-import { GoogleGenAI, Modality } from '@google/genai';
+import { GoogleGenAI, Modality, Type } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,6 +24,22 @@ const NATIVE_AUDIO_MODEL = 'gemini-3.8-live';
 const FALLBACK_CHAT_MODEL = 'gemini-3.8-flash';
 const FALLBACK_TTS_MODEL = 'gemini-3.8-flash-lite-tts';
 const TRANSCRIBE_MODEL = 'gemini-3.5-transcribe';
+
+// Dynamic Build Version tracking mtime in KST
+export function getBuildVersion(): string {
+  try {
+    const stat = fs.statSync(__filename);
+    const mtime = new Date(stat.mtime.getTime() + 9 * 3600000); // KST
+    const Y = mtime.getUTCFullYear();
+    const M = String(mtime.getUTCMonth() + 1).padStart(2, '0');
+    const D = String(mtime.getUTCDate()).padStart(2, '0');
+    const h = String(mtime.getUTCHours()).padStart(2, '0');
+    const m = String(mtime.getUTCMinutes()).padStart(2, '0');
+    return `${Y}${M}${D}-multilingual-${h}${m}`;
+  } catch {
+    return '20261013-multilingual-1410';
+  }
+}
 
 // Resolve real Gemini API key from environment, file, or parent container
 function resolveGeminiApiKey(): string | undefined {
@@ -144,6 +160,7 @@ app.get('/api/gemini/status', async (req: Request, res: Response) => {
   const hasServerKey = Boolean(key && !key.startsWith('MY_') && key.trim().length > 20);
   res.json({
     available: hasServerKey,
+    buildVersion: getBuildVersion(),
     defaultModel: NATIVE_AUDIO_MODEL,
     liveModel: NATIVE_AUDIO_MODEL,
     modelName: 'Gemini 2.5 Flash Native Audio Dialog',
@@ -376,6 +393,246 @@ app.post('/api/gemini/transcribe', async (req: Request, res: Response) => {
   }
 });
 
+// 6. Post-Call Review & Mistake Log Generation (Gemini 3.8 Flash structured JSON)
+app.post('/api/review', async (req: Request, res: Response) => {
+  const start = performance.now();
+  const { trackId, lessonNum, lessonTitle, turns, customApiKey } = req.body || {};
+
+  const ai = createGenAI(customApiKey);
+  if (!ai) {
+    res.status(500).json({ ok: false, error: 'Gemini API 연동이 준비되지 않았습니다.' });
+    return;
+  }
+
+  try {
+    const formattedTranscript = Array.isArray(turns) && turns.length > 0
+      ? turns.map((t: any) => `${t.role === 'model' ? 'AI Coach' : 'Learner'}: ${t.text}`).join('\n')
+      : '(No conversation recorded)';
+
+    const systemInstruction = `You are an expert English speaking coach.
+The voice session is over for Room: ${trackId || 'General'}, Lesson: ${lessonNum || 1} (${lessonTitle || 'Lesson'}).
+Review everything the learner said in this conversation transcript.
+
+Respond strictly in valid JSON matching this schema:
+- overallEvaluation: 1-line overall evaluation in Korean of the learner's spoken English performance + biggest priority area for improvement according to the lesson goal.
+- estimatedLevel: String, one of "IM2", "IH", "AL", "Native".
+- mistakes: Array of up to 8 objects containing:
+  - myPhrase: What the learner said (or an awkward phrase they used). If recognition had minor flaws, clean it up reasonably.
+  - naturalPhrase: How a native speaker / American coworker / OPIc AL candidate would naturally say it.
+  - reason: 1-2 sentence concise explanation in Korean why this is more natural (grammar, nuance, preposition, or collocation).
+- keyExpressions: Array of 5 useful expressions to memorize from this lesson:
+  - expression: The English phrase/idiom.
+  - situation: When to use this in Korean.
+  - exampleSentence: Natural example sentence.
+- keepSyncText: Clean text block formatted for Google Keep:
+  "[${trackId || 'Room'}] my phrase -> natural phrase" for each mistake, followed by:
+  "PROGRESS: Lesson ${lessonNum || 1} done - ${new Date().toISOString().slice(0, 10)} - [estimatedLevel]"
+- progressTag: "PROGRESS: Lesson ${lessonNum || 1} done"`;
+
+    const response = await ai.models.generateContent({
+      model: FALLBACK_CHAT_MODEL,
+      contents: [{
+        role: 'user',
+        parts: [{ text: `Here is the conversation transcript between the Learner and AI Coach:\n\n${formattedTranscript}\n\nPlease generate the structured review report now.` }],
+      }],
+      config: {
+        systemInstruction,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            overallEvaluation: { type: Type.STRING },
+            estimatedLevel: { type: Type.STRING },
+            mistakes: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  myPhrase: { type: Type.STRING },
+                  naturalPhrase: { type: Type.STRING },
+                  reason: { type: Type.STRING },
+                },
+                required: ['myPhrase', 'naturalPhrase', 'reason'],
+              },
+            },
+            keyExpressions: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  expression: { type: Type.STRING },
+                  situation: { type: Type.STRING },
+                  exampleSentence: { type: Type.STRING },
+                },
+                required: ['expression', 'situation', 'exampleSentence'],
+              },
+            },
+            keepSyncText: { type: Type.STRING },
+            progressTag: { type: Type.STRING },
+          },
+          required: ['overallEvaluation', 'estimatedLevel', 'mistakes', 'keyExpressions', 'keepSyncText', 'progressTag'],
+        },
+      },
+    });
+
+    const parsed = JSON.parse(response.text?.trim() || '{}');
+    const elapsed = Math.round(performance.now() - start);
+
+    res.json({
+      ok: true,
+      review: {
+        ...parsed,
+        trackId: trackId || 'opic',
+        lessonNum: lessonNum || 1,
+        lessonTitle: lessonTitle || '',
+      },
+      elapsedMs: elapsed,
+    });
+  } catch (err: any) {
+    console.error('Review generation error:', err);
+    res.status(500).json({ ok: false, error: '복기 리포트 생성에 실패했습니다.' });
+  }
+});
+
+// 7. Morning Review Podcast Generator (Script + Gemini TTS Audio)
+app.post('/api/podcast', async (req: Request, res: Response) => {
+  const start = performance.now();
+  const { mistakes, customApiKey } = req.body || {};
+
+  const ai = createGenAI(customApiKey);
+  if (!ai) {
+    res.status(500).json({ ok: false, error: 'Gemini API 연동이 준비되지 않았습니다.' });
+    return;
+  }
+
+  try {
+    const mistakeList = Array.isArray(mistakes) && mistakes.length > 0
+      ? mistakes.map((m: any, i: number) => `${i + 1}. [${m.trackId || 'General'}] "${m.myPhrase}" -> "${m.naturalPhrase}" (${m.reason})`).join('\n')
+      : '1. "I went to there" -> "I went there" (No preposition needed with there)\n2. "Next year I dispatch" -> "Next year I will be posted as an expat"';
+
+    const systemInstruction = `You are a warm, witty, encouraging morning English radio podcast host (in the style of an energetic 1:1 tutor).
+Every morning at 7 AM, you create a 2 to 3-minute personalized audio briefing for a Korean engineer who is preparing for OPIc AL, Hanwha Philly Shipyard posting, and family travel.
+
+Review these mistakes that occurred during recent practice sessions:
+${mistakeList}
+
+Write a natural, conversational script in Korean with clear native English repetitions:
+- Warm opening greeting ("Good morning! 오늘도 힘차게 출근길 영어 복습 팟캐스트 시작합니다.")
+- Pick the 2-3 most important mistake patterns from the list.
+- Explain why native speakers say it that way, and repeat the correct sentence 2 times clearly in English with natural rhythm.
+- Brief culture/confidence tip.
+- Energetic sign-off.
+Keep the text under 350 words so it speaks smoothly within 2-3 minutes.`;
+
+    const scriptResponse = await ai.models.generateContent({
+      model: FALLBACK_CHAT_MODEL,
+      contents: [{
+        role: 'user',
+        parts: [{ text: 'Please generate today\'s morning review podcast script.' }],
+      }],
+      config: {
+        systemInstruction,
+        maxOutputTokens: 600,
+      },
+    });
+
+    const scriptText = scriptResponse.text?.trim() || '';
+
+    // Synthesize audio using Gemini 3.8 Flash Lite TTS
+    let audioBase64: string | undefined;
+    let audioMimeType = 'audio/wav';
+
+    try {
+      const ttsResponse = await ai.models.generateContent({
+        model: FALLBACK_TTS_MODEL,
+        contents: [{
+          role: 'user',
+          parts: [{ text: scriptText }],
+        }],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: 'Puck' },
+            },
+          },
+        },
+      });
+
+      const candidate = ttsResponse.candidates?.[0];
+      const audioPart = candidate?.content?.parts?.find((p: any) => p.inlineData?.mimeType?.startsWith('audio/'));
+      if (audioPart?.inlineData?.data) {
+        audioBase64 = audioPart.inlineData.data;
+        audioMimeType = audioPart.inlineData.mimeType || 'audio/wav';
+      }
+    } catch (ttsErr) {
+      console.warn('Podcast TTS synthesis error, returning script only:', ttsErr);
+    }
+
+    const elapsed = Math.round(performance.now() - start);
+
+    res.json({
+      ok: true,
+      title: `오늘의 모닝 복습 오디오 (${new Date().toISOString().slice(5, 10)})`,
+      script: scriptText,
+      audioBase64,
+      audioMimeType,
+      elapsedMs: elapsed,
+    });
+  } catch (err: any) {
+    console.error('Podcast generation error:', err);
+    res.status(500).json({ ok: false, error: '모닝 팟캐스트 생성에 실패했습니다.' });
+  }
+});
+
+// 8. Telegram Bot Webhook / Notification Forwarder
+app.post('/api/telegram/send', async (req: Request, res: Response) => {
+  const { botToken, chatId, text, audioBase64, filename = 'morning_review.wav' } = req.body || {};
+
+  if (!botToken || !chatId) {
+    res.status(400).json({ ok: false, error: '텔레그램 봇 토큰과 채팅 ID가 필요합니다.' });
+    return;
+  }
+
+  try {
+    if (audioBase64) {
+      const binary = Buffer.from(audioBase64, 'base64');
+      const formData = new FormData();
+      formData.append('chat_id', chatId);
+      formData.append('caption', text ? text.slice(0, 1000) : '🎧 오늘의 모닝 영어 복습 오디오 강의입니다.');
+      formData.append('audio', new Blob([binary], { type: 'audio/wav' }), filename);
+
+      const tgRes = await fetch(`https://api.telegram.org/bot${botToken}/sendAudio`, {
+        method: 'POST',
+        body: formData,
+      });
+      const tgData: any = await tgRes.json();
+      if (!tgRes.ok) {
+        throw new Error(tgData.description || '텔레그램 오디오 전송 실패');
+      }
+      res.json({ ok: true, message: '텔레그램으로 오디오 강의가 전송되었습니다.' });
+    } else {
+      const tgRes = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: text || '오늘의 영어 복습 알림입니다.',
+          parse_mode: 'Markdown',
+        }),
+      });
+      const tgData: any = await tgRes.json();
+      if (!tgRes.ok) {
+        throw new Error(tgData.description || '텔레그램 메시지 전송 실패');
+      }
+      res.json({ ok: true, message: '텔레그램 메시지가 전송되었습니다.' });
+    }
+  } catch (err: any) {
+    console.error('Telegram send error:', err);
+    res.status(500).json({ ok: false, error: err?.message || '텔레그램 전송 중 오류가 발생했습니다.' });
+  }
+});
+
 // Health check endpoints for Cloud Run container probes
 app.get(['/healthz', '/api/health', '/health'], (_req: Request, res: Response) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -495,42 +752,41 @@ async function startServer() {
             },
           });
 
-          // Progressive Language Lock:
-          // Level 1: Full Korean lock (speechConfig.languageCode = 'ko-KR', input/output languageCodes = ['ko-KR'])
-          // Level 2: Korean speechConfig.languageCode = 'ko-KR' with empty transcription options {}
-          // Level 3: Voice-only without languageCode
+          // Target Language configuration: English dialog with bilingual Korean support
+          const targetLang = typeof msg.languageCode === 'string' && msg.languageCode ? msg.languageCode : 'en-US';
+
           const configsToTry: Array<{
             desc: string;
             config: any;
-            lock: 'ko-KR' | 'voice-only';
+            lock: string;
           }> = [
             {
-              desc: 'Full ko-KR lock (speechConfig + transcription languageCodes)',
+              desc: `Bilingual lock (${targetLang} + ko-KR)`,
               config: {
                 responseModalities: [Modality.AUDIO],
-                inputAudioTranscription: { languageCodes: ['ko-KR'] },
-                outputAudioTranscription: { languageCodes: ['ko-KR'] },
+                inputAudioTranscription: { languageCodes: [targetLang, 'ko-KR'] },
+                outputAudioTranscription: { languageCodes: [targetLang] },
                 speechConfig: {
                   voiceConfig: { prebuiltVoiceConfig: { voiceName } },
-                  languageCode: 'ko-KR',
+                  languageCode: targetLang,
                 },
                 systemInstruction,
               },
-              lock: 'ko-KR',
+              lock: targetLang,
             },
             {
-              desc: 'ko-KR speechConfig with empty transcription options',
+              desc: `${targetLang} speechConfig with auto transcription`,
               config: {
                 responseModalities: [Modality.AUDIO],
                 inputAudioTranscription: {},
                 outputAudioTranscription: {},
                 speechConfig: {
                   voiceConfig: { prebuiltVoiceConfig: { voiceName } },
-                  languageCode: 'ko-KR',
+                  languageCode: targetLang,
                 },
                 systemInstruction,
               },
-              lock: 'ko-KR',
+              lock: targetLang,
             },
             {
               desc: 'voice-only fallback without languageCode',
@@ -547,7 +803,7 @@ async function startServer() {
             },
           ];
 
-          let activeLock: 'ko-KR' | 'voice-only' = 'ko-KR';
+          let activeLock: string = targetLang;
           let activeModel = NATIVE_AUDIO_MODEL;
           let connectError: any = null;
 

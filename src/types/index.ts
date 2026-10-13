@@ -31,6 +31,7 @@ export interface TtsVoice {
 export interface ChatTurn {
   role: 'user' | 'model' | 'system';
   text: string;
+  timestamp?: number;
 }
 
 export type ReplySource = 'Ai' | 'Local' | 'Fallback';
@@ -58,4 +59,99 @@ export function getReplyOriginLabel(origin: ReplyOrigin): string {
     case 'AiFailed':
       return `AI 실패: ${origin.reason}`;
   }
+}
+
+// ----------------------------------------------------
+// AI Phone English (전화영어) Specialized Domain Models
+// ----------------------------------------------------
+
+export type TrackId = 'opic' | 'philly' | 'travel' | 'bluey';
+
+export interface LessonItem {
+  id: string;
+  lessonNum: number;
+  title: string;
+  subtitle: string;
+  targetMinutes: number;
+  starterPrompt: string;
+  sceneDescription?: string;
+  keyGoals?: string[];
+}
+
+export interface TrackConfig {
+  id: TrackId;
+  name: string;
+  shortName: string;
+  emoji: string;
+  accentColor: string;
+  tagline: string;
+  personaTitle: string;
+  accentVoice: 'Kore' | 'Puck' | 'Charon' | 'Fenrir' | 'Zephyr';
+  systemPrompt: string;
+  lessons: LessonItem[];
+}
+
+export interface ScheduleItem {
+  date: string; // YYYY-MM-DD
+  dayOfWeek: '월' | '화' | '수' | '목' | '금' | '토' | '일';
+  trackId: TrackId;
+  lessonNum: number;
+  title: string;
+  durationMinutes: number;
+  note?: string;
+}
+
+export interface MistakeItem {
+  id: string;
+  createdAt: string;
+  trackId: TrackId;
+  lessonTitle: string;
+  myPhrase: string;
+  naturalPhrase: string;
+  reason: string;
+  reviewed: boolean;
+}
+
+export interface KeyExpression {
+  expression: string;
+  situation: string;
+  exampleSentence: string;
+}
+
+export interface PostCallReview {
+  id: string;
+  date: string;
+  trackId: TrackId;
+  lessonNum: number;
+  lessonTitle: string;
+  durationSeconds: number;
+  overallEvaluation: string;
+  estimatedLevel: 'IM2' | 'IH' | 'AL' | 'Native';
+  mistakes: Array<{
+    myPhrase: string;
+    naturalPhrase: string;
+    reason: string;
+  }>;
+  keyExpressions: KeyExpression[];
+  keepSyncText: string;
+  progressTag: string;
+}
+
+export interface MorningPodcast {
+  id: string;
+  date: string;
+  title: string;
+  script: string;
+  audioBase64?: string;
+  audioMimeType?: string;
+  sourceMistakeCount: number;
+  durationEstimate: string;
+}
+
+export interface UserProfileSettings {
+  jobRole: string;
+  postingTarget: string;
+  surveyTopics: string;
+  telegramBotToken?: string;
+  telegramChatId?: string;
 }

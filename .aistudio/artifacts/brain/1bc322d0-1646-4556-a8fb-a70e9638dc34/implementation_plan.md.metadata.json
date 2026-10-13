@@ -1,0 +1,6 @@
+{
+  "summary": "전화영어 학습자를 위한 맞춤형 올인원 AI 전화영어 앱 구현 계획서. 4개 특화 트랙(OPIc AL, 한화 필리 조선소 비즈니스, 미국·호주 여행, Bluey 호주 리스닝)의 일자별 커리큘럼 엔진, Gemini Live/TTS 기반 음성 통화, 통화 종료 후 자동 Mistake Log 추출, 아침 복습 오디오 팟캐스트 및 텔레그램 연동 파이프라인 설계를 포함합니다.",
+  "updatedAt": "2026-10-13T01:18:38.530062563Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

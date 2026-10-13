@@ -1,6 +1,6 @@
 {
   "name": "오늘도 한 통 (One Call Today)",
-  "description": "어두운 따뜻한 HER 톤의 빛나는 오브와 실시간 한국어 AI 음성 통화 루프",
+  "description": "OPIc AL, 한화 필리 조선소 비즈니스, 미국·호주 여행, Bluey 리스닝 4대 특화 AI 1:1 전화영어 및 자동 복기 랩",
   "permissions": [],
   "capabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

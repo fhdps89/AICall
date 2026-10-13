@@ -1,0 +1,73 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile with system settings and customizable prompt slots",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "job": { "type": "string" },
+        "surveyTopics": { "type": "string" },
+        "phillyRole": { "type": "string" },
+        "sttEngine": { "type": "string" },
+        "ttsEngine": { "type": "string" },
+        "lectureTime": { "type": "string" },
+        "feedSecret": { "type": "string" },
+        "initialProgressConfigured": { "type": "boolean" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["email", "initialProgressConfigured"]
+    },
+    "Goal": {
+      "title": "Goal",
+      "description": "Learning goal track with full verbatim tutor prompt and lesson progress",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "type": { "type": "string" },
+        "why": { "type": "string" },
+        "priority": { "type": "number" },
+        "tutorPrompt": { "type": "string" },
+        "nextLessonIndex": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "paused", "done"] },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["title", "type", "tutorPrompt", "nextLessonIndex", "status"]
+    },
+    "Mistake": {
+      "title": "Mistake",
+      "description": "Mistake vault item for spaced repetition review",
+      "type": "object",
+      "properties": {
+        "createdAt": { "type": "string" },
+        "source": { "type": "string", "enum": ["call", "keep_import"] },
+        "sessionId": { "type": "string" },
+        "goalId": { "type": "string" },
+        "lessonTitle": { "type": "string" },
+        "myPhrase": { "type": "string" },
+        "naturalPhrase": { "type": "string" },
+        "reason": { "type": "string" },
+        "sourceStt": { "type": "string" },
+        "stage": { "type": "number", "enum": [1, 3, 7, 14] },
+        "nextReviewDate": { "type": "string" },
+        "status": { "type": "string", "enum": ["reviewing", "on_hold", "graduated"] },
+        "reopenCount": { "type": "number" }
+      },
+      "required": ["createdAt", "source", "myPhrase", "naturalPhrase", "reason", "stage", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Root document for user settings and preferences"
+    },
+    "/users/{userId}/goals/{goalId}": {
+      "schema": "Goal",
+      "description": "Individual goal tracks and lesson progress"
+    },
+    "/users/{userId}/mistakes/{mistakeId}": {
+      "schema": "Mistake",
+      "description": "User mistake vault for spaced repetition"
+    }
+  }
+}
