@@ -368,38 +368,16 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
 
       {/* Main Conversation Stream */}
       <main className="flex-1 max-w-2xl w-full mx-auto p-4 sm:p-6 overflow-y-auto space-y-4">
-        {/* Screen Keep-On & 10s Chunk Recording Notice (B-3 Requirement 1, 5, 6) */}
-        <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-start gap-2.5 text-xs text-amber-200 shadow-sm">
-          <Smartphone className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center justify-between gap-2">
-              <span className="font-bold text-amber-300">통화 중에는 화면을 켜 두세요</span>
-              <div className="flex items-center gap-1 font-mono text-[10px] text-emerald-400 bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 rounded-full shrink-0">
-                <Disc3 className={`w-3 h-3 ${chunkCount > 0 ? "animate-spin" : ""}`} />
-                <span>
-                  {chunkCount > 0
-                    ? `10초 녹음 ${chunkCount}조각 (${Math.round((chunkCount * 10) / 60)}분)`
-                    : "10초 분할 녹음 대기"}
-                </span>
-              </div>
-            </div>
-            <p className="text-[11px] text-slate-400 mt-0.5 leading-snug">
-              화면이 꺼지면 브라우저 정책상 마이크 녹음이 멈출 수 있습니다. 모든 대화는 10초 조각으로 IndexedDB 및 Cloud Storage에 실시간 보존됩니다.
-              {wakeLockActive ? " (화면 꺼짐 방지 활성)" : ""}
-            </p>
-            {lastPartialSnippet && (
-              <div className="mt-1.5 pt-1.5 border-t border-amber-500/20 text-[10px] text-amber-300/80 truncate">
-                <span className="font-bold text-amber-400 mr-1">[1분 전사]:</span>
-                {lastPartialSnippet}
-              </div>
-            )}
-          </div>
+        {/* Screen Keep-On notice (one line, no jargon) */}
+        <div className="px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center gap-2 text-xs text-amber-200">
+          <Smartphone className="w-4 h-4 text-amber-400 shrink-0" />
+          <span className="truncate">화면을 켜 두세요. 대화는 10초마다 자동 저장돼요.</span>
         </div>
 
         {/* Reconnect notice banner */}
         {status === "reconnecting" && (
           <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs text-center font-medium animate-pulse">
-            네트워크 또는 GoAway 신호를 수신하여 <strong>연결 유지 중</strong>입니다. 대화 맥락이 그대로 보존됩니다.
+            연결이 잠깐 끊겨 다시 잇는 중이에요. 대화는 그대로 이어져요.
           </div>
         )}
 
