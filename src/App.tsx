@@ -33,6 +33,7 @@ import {
 import { LoginScreen } from "./ui/auth/LoginScreen";
 import { HomeScreen } from "./ui/home/HomeScreen";
 import { NewCallScreen } from "./ui/call/NewCallScreen";
+import { PreCallScreen } from "./ui/call/PreCallScreen";
 import { UnfinishedSessionModal } from "./ui/call/UnfinishedSessionModal";
 import { InitialProgressModal } from "./ui/onboarding/InitialProgressModal";
 import { SettingsModal } from "./ui/settings/SettingsModal";
@@ -86,6 +87,8 @@ export const App: React.FC = () => {
   // Active Call State (B-2 requirement)
   const [activeCallGoal, setActiveCallGoal] = useState<GoalData | null>(null);
   const [activeCallLesson, setActiveCallLesson] = useState<number>(1);
+  // Pre-call prep screen (lesson, expressions, mic check) shown before connecting
+  const [prepCall, setPrepCall] = useState<{ goal: GoalData; lessonIndex: number } | null>(null);
 
   // 1. Connection check & Auth listener
   useEffect(() => {
@@ -230,8 +233,14 @@ export const App: React.FC = () => {
 
   // Handle Call Start & End (B-2, B-3, B-4)
   const handleStartCall = (goal: GoalData, lessonIndex: number) => {
-    setActiveCallGoal(goal);
-    setActiveCallLesson(lessonIndex);
+    setPrepCall({ goal, lessonIndex });
+  };
+
+  const handlePrepConfirmed = () => {
+    if (!prepCall) return;
+    setActiveCallGoal(prepCall.goal);
+    setActiveCallLesson(prepCall.lessonIndex);
+    setPrepCall(null);
   };
 
   const handleEndCall = async (
@@ -396,6 +405,19 @@ export const App: React.FC = () => {
         enablePartialTranscribe={(userProfile as any)?.enablePartialTranscribe !== false}
         onEndCall={handleEndCall}
         onExit={() => setActiveCallGoal(null)}
+      />
+    );
+  }
+
+  // 4-0. Pre-call prep
+  if (prepCall && user) {
+    return (
+      <PreCallScreen
+        userId={user.uid}
+        goal={prepCall.goal}
+        lessonIndex={prepCall.lessonIndex}
+        onStart={handlePrepConfirmed}
+        onBack={() => setPrepCall(null)}
       />
     );
   }
