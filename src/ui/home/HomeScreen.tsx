@@ -120,6 +120,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
 
   // Find goal for today
   // Track cards can switch today's lesson to another track (single call button on top).
+  const [showMore, setShowMore] = useState<boolean>(false);
   const [overrideGoalId, setOverrideGoalId] = useState<string | null>(null);
   const todayGoal = goals.find((g) => g.id === (overrideGoalId || todayRoutine.goalId));
   const currentLesson = todayGoal?.lessons.find(
@@ -176,53 +177,116 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
 
       {/* Main Content */}
       <main className="max-w-5xl mx-auto px-4 py-6 w-full flex-1 space-y-6">
-        {/* Weekly Routine Bar (B-9) */}
-        <section className="bg-[#161D2A] border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-lg">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
-              <Calendar className="w-4 h-4 text-amber-400" />
-              <span>요일별 집중 루틴</span>
+        {/* 오늘 할 것: ① 오늘 수업 통화 → ② 복습 퀴즈 */}
+        <h2 className="text-sm font-bold text-white">오늘 할 것</h2>
+        {/* Today's Class Card (오늘 수업 카드) */}
+        <section className="bg-gradient-to-br from-[#161D2A] via-[#151C28] to-[#121824] border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-xl relative overflow-hidden">
+          <div className="absolute top-0 right-0 w-64 h-64 bg-amber-500/5 rounded-full blur-3xl pointer-events-none" />
+
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-4 relative z-10">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs font-bold">
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>오늘의 추천 수업 카드</span>
             </div>
-            <span className="text-[11px] text-slate-400">
-              오늘: <strong className="text-amber-400">{todayRoutine.dayName}</strong> ({todayRoutine.title})
-            </span>
+            <div className="text-xs text-slate-400 font-mono">
+              {todayRoutine.dayName} 루틴
+            </div>
           </div>
 
-          <div className="grid grid-cols-7 gap-1.5 sm:gap-2">
-            {Object.entries(WEEKLY_ROUTINE).map(([dayKey, item]) => {
-              const dayNum = Number(dayKey);
-              const isToday = dayNum === currentDayIndex;
-
-              return (
-                <div
-                  key={dayKey}
-                  className={`p-2 sm:p-2.5 rounded-xl border text-center transition-all ${
-                    isToday
-                      ? "bg-amber-500/15 border-amber-500/40 text-white ring-1 ring-amber-500/30"
-                      : "bg-slate-900/40 border-slate-800/70 text-slate-400"
-                  }`}
-                >
-                  <div className={`text-[10px] font-bold uppercase mb-1 ${isToday ? "text-amber-400" : "text-slate-500"}`}>
-                    {item.dayShort}
-                  </div>
-                  <div className="text-[11px] font-semibold truncate leading-tight">
-                    {item.isReviewDay ? "주간 복기" : item.title.split(" ")[0]}
-                  </div>
+          {todayRoutine.isReviewDay && !overrideGoalId ? (
+            <div className="relative z-10 py-6 text-center space-y-3">
+              <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center mx-auto">
+                <Calendar className="w-6 h-6" />
+              </div>
+              <h2 className="text-xl font-bold text-white">일요일: 한 주 복기 및 실수 점검일</h2>
+              <p className="text-xs text-slate-400 max-w-md mx-auto">
+                새로운 진도 대신 이번 주에 기록된 실수와 주요 핵심 표현 5선을 복습하고 다음 주 계획을 준비합니다.
+              </p>
+            </div>
+          ) : todayGoal && currentLesson ? (
+            <div className="relative z-10 space-y-5">
+              <div>
+                <div className="flex items-center gap-2 text-slate-400 text-xs font-medium mb-1">
+                  <span>트랙:</span>
+                  <span className="text-amber-300 font-semibold">{todayGoal.title}</span>
+                  <span className="text-slate-600">·</span>
+                  <span>총 {todayGoal.lessons.length}개 과 중 {currentLesson.index}번째</span>
+                  {overrideGoalId && (
+                    <button
+                      onClick={() => setOverrideGoalId(null)}
+                      className="ml-1 text-[11px] text-slate-400 underline hover:text-white cursor-pointer"
+                    >
+                      오늘 루틴으로 되돌리기
+                    </button>
+                  )}
                 </div>
-              );
-            })}
-          </div>
-        </section>
+                <h2 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+                  {currentLesson.index}과. {currentLesson.title}
+                </h2>
+                <p className="text-xs text-slate-400 mt-2 leading-relaxed">
+                  {todayGoal.why}
+                </p>
+              </div>
 
-        {/* B-7 Morning Lecture Card (오늘 아침 강의) */}
-        <MorningLectureCard
-          user={user}
-          onOpenQuiz={async () => {
-            await loadMistakes();
-            setShowQuizModal(true);
-          }}
-          onLectureCompleted={() => loadMistakes()}
-        />
+              {/* Lesson picker & prompt preview */}
+              <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="space-y-1">
+                  <span className="text-[11px] text-slate-400 font-medium block">진도 변경:</span>
+                  <select
+                    value={currentLesson.index}
+                    onChange={(e) => handleLessonChange(todayGoal.id, Number(e.target.value))}
+                    className="bg-[#121824] border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-400"
+                  >
+                    {todayGoal.lessons.map((l) => (
+                      <option key={l.index} value={l.index}>
+                        {l.index}과: {l.title}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {devMode && (
+                <button
+                  onClick={() => {
+                    setSelectedPromptGoal(todayGoal);
+                    setShowPromptModal(true);
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer border border-slate-700/50"
+                >
+                  <FileText className="w-3.5 h-3.5 text-amber-400" />
+                  <span>원문 튜터 프롬프트 확인</span>
+                </button>
+                )}
+              </div>
+
+              {/* Start Call CTA (B-2 requirement) */}
+              <button
+                onClick={() => onStartCall(todayGoal, currentLesson.index)}
+                className="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-slate-950 font-black text-sm tracking-tight flex items-center justify-center gap-2.5 shadow-xl shadow-amber-500/20 transition-all cursor-pointer active:scale-98"
+              >
+                <PhoneCall className="w-5 h-5" />
+                <span>오늘 수업 통화 시작하기 ({currentLesson.index}과: {currentLesson.title})</span>
+              </button>
+
+              {/* Status info (developer only) */}
+              {devMode && (
+              <div className="pt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs border-t border-slate-800/70 text-slate-400">
+                <div className="flex items-center gap-2">
+                  <CheckCircle className="w-4 h-4 text-emerald-400" />
+                  <span>B-2 통화 엔진: gemini-3.8-live · 세션 재개 & 컨텍스트 압축 준비 완료</span>
+                </div>
+                <div className="text-[11px] text-slate-500 font-mono">
+                  GoAway 자동 재연결 지원
+                </div>
+              </div>
+              )}
+            </div>
+          ) : (
+            <div className="text-center py-6 text-slate-400 text-sm">
+              목표 데이터를 불러오는 중입니다...
+            </div>
+          )}
+        </section>
 
         {/* B-5 Spaced Repetition & Due Mistakes Card (간격 반복 & 오늘 복습) */}
         <section className="bg-[#161D2A] border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-lg space-y-3">
@@ -401,113 +465,64 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           )}
         </section>
 
-        {/* Today's Class Card (오늘 수업 카드) */}
-        <section className="bg-gradient-to-br from-[#161D2A] via-[#151C28] to-[#121824] border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-xl relative overflow-hidden">
-          <div className="absolute top-0 right-0 w-64 h-64 bg-amber-500/5 rounded-full blur-3xl pointer-events-none" />
 
-          <div className="flex flex-wrap items-center justify-between gap-2 mb-4 relative z-10">
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs font-bold">
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>오늘의 추천 수업 카드</span>
+        {/* 나머지는 접어 둠 */}
+        <section className="border border-slate-800 rounded-2xl">
+          <button
+            onClick={() => setShowMore((v) => !v)}
+            className="w-full px-4 py-3 flex items-center justify-between text-xs font-semibold text-slate-300 hover:text-white cursor-pointer"
+          >
+            <span>더 보기 · 아침 강의 · 주간 루틴 · 트랙 바꾸기</span>
+            <ChevronRight className={`w-4 h-4 transition-transform ${showMore ? "rotate-90" : ""}`} />
+          </button>
+          {/* Kept mounted (only hidden) so the lecture card keeps syncing as before */}
+          <div className={showMore ? "p-4 pt-0 space-y-6" : "hidden"}>
+        {/* B-7 Morning Lecture Card (오늘 아침 강의) */}
+        <MorningLectureCard
+          user={user}
+          onOpenQuiz={async () => {
+            await loadMistakes();
+            setShowQuizModal(true);
+          }}
+          onLectureCompleted={() => loadMistakes()}
+        />
+
+        {/* Weekly Routine Bar (B-9) */}
+        <section className="bg-[#161D2A] border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-lg">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
+              <Calendar className="w-4 h-4 text-amber-400" />
+              <span>요일별 집중 루틴</span>
             </div>
-            <div className="text-xs text-slate-400 font-mono">
-              {todayRoutine.dayName} 루틴
-            </div>
+            <span className="text-[11px] text-slate-400">
+              오늘: <strong className="text-amber-400">{todayRoutine.dayName}</strong> ({todayRoutine.title})
+            </span>
           </div>
 
-          {todayRoutine.isReviewDay && !overrideGoalId ? (
-            <div className="relative z-10 py-6 text-center space-y-3">
-              <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center mx-auto">
-                <Calendar className="w-6 h-6" />
-              </div>
-              <h2 className="text-xl font-bold text-white">일요일: 한 주 복기 및 실수 점검일</h2>
-              <p className="text-xs text-slate-400 max-w-md mx-auto">
-                새로운 진도 대신 이번 주에 기록된 실수와 주요 핵심 표현 5선을 복습하고 다음 주 계획을 준비합니다.
-              </p>
-            </div>
-          ) : todayGoal && currentLesson ? (
-            <div className="relative z-10 space-y-5">
-              <div>
-                <div className="flex items-center gap-2 text-slate-400 text-xs font-medium mb-1">
-                  <span>트랙:</span>
-                  <span className="text-amber-300 font-semibold">{todayGoal.title}</span>
-                  <span className="text-slate-600">·</span>
-                  <span>총 {todayGoal.lessons.length}개 과 중 {currentLesson.index}번째</span>
-                  {overrideGoalId && (
-                    <button
-                      onClick={() => setOverrideGoalId(null)}
-                      className="ml-1 text-[11px] text-slate-400 underline hover:text-white cursor-pointer"
-                    >
-                      오늘 루틴으로 되돌리기
-                    </button>
-                  )}
-                </div>
-                <h2 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
-                  {currentLesson.index}과. {currentLesson.title}
-                </h2>
-                <p className="text-xs text-slate-400 mt-2 leading-relaxed">
-                  {todayGoal.why}
-                </p>
-              </div>
+          <div className="grid grid-cols-7 gap-1.5 sm:gap-2">
+            {Object.entries(WEEKLY_ROUTINE).map(([dayKey, item]) => {
+              const dayNum = Number(dayKey);
+              const isToday = dayNum === currentDayIndex;
 
-              {/* Lesson picker & prompt preview */}
-              <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="space-y-1">
-                  <span className="text-[11px] text-slate-400 font-medium block">진도 변경:</span>
-                  <select
-                    value={currentLesson.index}
-                    onChange={(e) => handleLessonChange(todayGoal.id, Number(e.target.value))}
-                    className="bg-[#121824] border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-400"
-                  >
-                    {todayGoal.lessons.map((l) => (
-                      <option key={l.index} value={l.index}>
-                        {l.index}과: {l.title}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {devMode && (
-                <button
-                  onClick={() => {
-                    setSelectedPromptGoal(todayGoal);
-                    setShowPromptModal(true);
-                  }}
-                  className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer border border-slate-700/50"
+              return (
+                <div
+                  key={dayKey}
+                  className={`p-2 sm:p-2.5 rounded-xl border text-center transition-all ${
+                    isToday
+                      ? "bg-amber-500/15 border-amber-500/40 text-white ring-1 ring-amber-500/30"
+                      : "bg-slate-900/40 border-slate-800/70 text-slate-400"
+                  }`}
                 >
-                  <FileText className="w-3.5 h-3.5 text-amber-400" />
-                  <span>원문 튜터 프롬프트 확인</span>
-                </button>
-                )}
-              </div>
-
-              {/* Start Call CTA (B-2 requirement) */}
-              <button
-                onClick={() => onStartCall(todayGoal, currentLesson.index)}
-                className="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-slate-950 font-black text-sm tracking-tight flex items-center justify-center gap-2.5 shadow-xl shadow-amber-500/20 transition-all cursor-pointer active:scale-98"
-              >
-                <PhoneCall className="w-5 h-5" />
-                <span>오늘 수업 통화 시작하기 ({currentLesson.index}과: {currentLesson.title})</span>
-              </button>
-
-              {/* Status info (developer only) */}
-              {devMode && (
-              <div className="pt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs border-t border-slate-800/70 text-slate-400">
-                <div className="flex items-center gap-2">
-                  <CheckCircle className="w-4 h-4 text-emerald-400" />
-                  <span>B-2 통화 엔진: gemini-3.8-live · 세션 재개 & 컨텍스트 압축 준비 완료</span>
+                  <div className={`text-[10px] font-bold uppercase mb-1 ${isToday ? "text-amber-400" : "text-slate-500"}`}>
+                    {item.dayShort}
+                  </div>
+                  <div className="text-[11px] font-semibold truncate leading-tight">
+                    {item.isReviewDay ? "주간 복기" : item.title.split(" ")[0]}
+                  </div>
                 </div>
-                <div className="text-[11px] text-slate-500 font-mono">
-                  GoAway 자동 재연결 지원
-                </div>
-              </div>
-              )}
-            </div>
-          ) : (
-            <div className="text-center py-6 text-slate-400 text-sm">
-              목표 데이터를 불러오는 중입니다...
-            </div>
-          )}
+              );
+            })}
+          </div>
         </section>
 
         {/* 4 Goals Overview (전체 4대 목표 현황) */}
@@ -594,6 +609,8 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                 </div>
               );
             })}
+          </div>
+        </section>
           </div>
         </section>
       </main>
