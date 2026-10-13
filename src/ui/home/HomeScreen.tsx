@@ -33,6 +33,7 @@ import {
 } from "lucide-react";
 import { QuizModal } from "../quiz/QuizModal";
 import { MorningLectureCard } from "../lecture/MorningLectureCard";
+import { syncFeed } from "../../services/feed/feedService";
 
 interface HomeScreenProps {
   user: User;
@@ -75,6 +76,8 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       ]);
       setDueMistakes(due);
       setAllMistakes(all);
+      // B-8: keep the Grok Bot feed's candidate list fresh (no scheduler server)
+      syncFeed(user.uid).catch((e) => console.warn("[HomeScreen] feed sync failed:", e));
     } catch (err) {
       console.warn("[HomeScreen] Failed to load mistakes:", err);
     } finally {

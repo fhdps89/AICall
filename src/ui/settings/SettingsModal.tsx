@@ -19,6 +19,7 @@ import { db } from "../../services/firebase/config";
 import { SessionData } from "../../services/firebase/db";
 import { getAllPendingChunks, LocalRecordingChunk } from "../../services/recording/chunkIndexedDb";
 import { ALLOWED_USER_EMAIL } from "../../services/firebase/auth";
+import { FeedSettingsPanel } from "./FeedSettingsPanel";
 
 interface SettingsModalProps {
   userId?: string;
@@ -39,7 +40,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 }) => {
   const [formData, setFormData] = useState<PromptPlaceholders>(placeholders);
   const [saving, setSaving] = useState(false);
-  const [activeTab, setActiveTab] = useState<"prompts" | "models" | "recordings">("prompts");
+  const [activeTab, setActiveTab] = useState<"prompts" | "models" | "recordings" | "feed">("prompts");
   const [enablePartialStt, setEnablePartialStt] = useState<boolean>(() => {
     return localStorage.getItem("onecall_enable_partial_transcribe") !== "false";
   });
@@ -146,11 +147,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           >
             녹음 보관함 (Storage Chunks)
           </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("feed")}
+            className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
+              activeTab === "feed"
+                ? "border-amber-400 text-amber-300"
+                : "border-transparent text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            그록봇 피드 (B-8)
+          </button>
         </div>
 
         {/* Body */}
         <div className="p-6 overflow-y-auto flex-1">
-          {activeTab === "prompts" ? (
+          {activeTab === "feed" ? (
+            <FeedSettingsPanel userId={userId} />
+          ) : activeTab === "prompts" ? (
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="p-3 rounded-lg bg-amber-500/5 border border-amber-500/20 text-xs text-amber-300">
                 원문 튜터 프롬프트는 그대로 보존되며, 아래 입력한 내용이 통화 시 프롬프트 내 대괄호 <code>[직무]</code>, <code>[Survey topics]</code> 등에 자동으로 주입됩니다.

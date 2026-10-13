@@ -9,6 +9,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { GoogleGenAI, Modality, Type } from '@google/genai';
 import { requireAuth } from './server/auth.ts';
 import { startLectureJob, readLectureState, lectureAudioPath, kstToday } from './server/lecture.ts';
+import { isValidFeedSecret, writeFeedSync, feedForSecret, buildFeedToday, feedAudioFile, renderFeedHtml } from './server/feed.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1115,6 +1116,63 @@ app.get('/api/lecture/audio', requireAuth, (req: Request, res: Response) => {
   } catch (err: any) {
     res.status(400).json({ ok: false, error: err?.message });
   }
+});
+
+// B-8 Grok Bot feed: app syncs secret + candidates (auth), feed URLs need only the secret
+app.post('/api/feed/sync', requireAuth, (req: Request, res: Response) => {
+  const uid = res.locals.user.uid as string;
+  const { secret, quizCount, newMistakes, reviewMistakes } = req.body || {};
+  if (!isValidFeedSecret(secret)) {
+    res.status(400).json({ ok: false, error: 'feed secret 형식 오류' });
+    return;
+  }
+  const pick = (list: any, max: number) =>
+    (Array.isArray(list) ? list : []).slice(0, max).map((m: any) => ({
+      id: String(m?.id || ''),
+      myPhrase: String(m?.myPhrase || '').slice(0, 400),
+      naturalPhrase: String(m?.naturalPhrase || '').slice(0, 400),
+      reason: String(m?.reason || '').slice(0, 600),
+    })).filter((m: any) => m.id && m.myPhrase && m.naturalPhrase);
+  writeFeedSync({
+    uid,
+    secret,
+    quizCount: Math.max(0, Math.min(100, Number(quizCount) || 0)),
+    newMistakes: pick(newMistakes, 6),
+    reviewMistakes: pick(reviewMistakes, 3),
+    syncedAt: new Date().toISOString(),
+  });
+  res.json({ ok: true });
+});
+
+function feedBaseUrl(req: Request): string {
+  const proto = String(req.headers['x-forwarded-proto'] || req.protocol).split(',')[0].trim();
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '');
+  return `${proto}://${host}`;
+}
+
+app.get(['/feed/:secret/today', '/feed/:secret/today.json'], (req: Request, res: Response) => {
+  res.set('Cache-Control', 'no-store');
+  res.set('X-Robots-Tag', 'noindex');
+  const st = feedForSecret(String(req.params.secret));
+  if (!st) {
+    res.status(404).send('Not found');
+    return;
+  }
+  const today = buildFeedToday(createGenAI(), st, feedBaseUrl(req));
+  if (req.path.endsWith('.json')) res.json(today);
+  else res.type('html').send(renderFeedHtml(today));
+});
+
+app.get('/feed/:secret/audio/:file', (req: Request, res: Response) => {
+  const st = feedForSecret(String(req.params.secret));
+  const m = /^(\d{4}-\d{2}-\d{2})\.wav$/.exec(String(req.params.file));
+  const file = st && m ? feedAudioFile(st, m[1]) : null;
+  if (!file) {
+    res.status(404).send('Not found');
+    return;
+  }
+  res.set('X-Robots-Tag', 'noindex');
+  res.type('audio/wav').sendFile(file);
 });
 
 app.get(['/healthz', '/api/health', '/health'], (_req: Request, res: Response) => {
