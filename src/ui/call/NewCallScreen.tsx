@@ -34,7 +34,8 @@ interface NewCallScreenProps {
   onEndCall: (
     transcript: LiveTranscriptItem[],
     stats?: { connectionPath: "direct" | "proxy"; directFailCount: number },
-    sessionId?: string
+    sessionId?: string,
+    audioBlobs?: Blob[]
   ) => void;
 }
 
@@ -217,6 +218,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
   // Handle End Call
   const handleHangUp = async () => {
     const chunkRecorder = getChunkRecorder();
+    const recordedBlobs = chunkRecorder.getSessionRecordedBlobs();
     await chunkRecorder.stop();
 
     const finalTranscripts = providerRef.current.getLiveTranscript();
@@ -231,7 +233,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
     }
 
     await providerRef.current.disconnect();
-    onEndCall(finalTranscripts, stats, sessionIdRef.current);
+    onEndCall(finalTranscripts, stats, sessionIdRef.current, recordedBlobs);
   };
 
   const formatTime = (seconds: number) => {

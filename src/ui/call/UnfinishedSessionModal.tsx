@@ -9,6 +9,7 @@ import {
   Sparkles,
   ArrowRight,
   Database,
+  Loader2,
 } from "lucide-react";
 
 interface UnfinishedSessionModalProps {
@@ -16,6 +17,7 @@ interface UnfinishedSessionModalProps {
   unfinishedSessions: SessionData[];
   onClose: () => void;
   onResolved: () => void;
+  onStartReview: (session: SessionData) => void;
 }
 
 export const UnfinishedSessionModal: React.FC<UnfinishedSessionModalProps> = ({
@@ -23,11 +25,11 @@ export const UnfinishedSessionModal: React.FC<UnfinishedSessionModalProps> = ({
   unfinishedSessions,
   onClose,
   onResolved,
+  onStartReview,
 }) => {
   const [selectedSession, setSelectedSession] = useState<SessionData | null>(
     unfinishedSessions[0] || null
   );
-  const [showReviewDetail, setShowReviewDetail] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
 
   if (!selectedSession) return null;
@@ -50,6 +52,11 @@ export const UnfinishedSessionModal: React.FC<UnfinishedSessionModalProps> = ({
     } finally {
       setIsProcessing(false);
     }
+  };
+
+  const handleStartReviewClick = () => {
+    onClose();
+    onStartReview(selectedSession);
   };
 
   const formatDateTime = (isoString?: string) => {
@@ -127,46 +134,33 @@ export const UnfinishedSessionModal: React.FC<UnfinishedSessionModalProps> = ({
           </div>
         </div>
 
-        {/* Detailed Review Preview or Actions */}
-        {showReviewDetail ? (
-          <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-200 space-y-2 mb-5">
-            <div className="font-bold flex items-center gap-1.5 text-amber-300">
-              <Sparkles className="w-4 h-4 text-amber-400" />
-              <span>B-4 복기 튜터 연동 대기 중 (준비 완료)</span>
-            </div>
-            <p className="text-[11px] text-slate-300 leading-relaxed">
-              중단된 통화의 음성 청크 {chunkCount}개와 대화 전사록이 모두 온전히 보존되어 있습니다. 
-              차후 B-4(복기 파이프라인)가 연결되면 오답 분석, AL 모범 표현 추출, Keep 동기화가 이 데이터를 바탕으로 자동 실행됩니다.
-            </p>
-          </div>
-        ) : null}
-
         {/* Modal Buttons */}
         <div className="flex items-center gap-2">
-          {!showReviewDetail ? (
-            <button
-              onClick={() => setShowReviewDetail(true)}
-              className="flex-1 py-3 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-lg shadow-amber-500/20 active:scale-95"
-            >
-              <span>복기 시작 (B-4 대기)</span>
-              <ArrowRight className="w-3.5 h-3.5" />
-            </button>
-          ) : (
-            <button
-              onClick={handleMarkResolved}
-              disabled={isProcessing}
-              className="flex-1 py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-lg shadow-emerald-600/20 active:scale-95"
-            >
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              <span>통화 완료 처리 및 보관</span>
-            </button>
-          )}
+          <button
+            onClick={handleStartReviewClick}
+            disabled={isProcessing}
+            className="flex-1 py-3 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-lg shadow-amber-500/20 active:scale-95"
+          >
+            <Sparkles className="w-4 h-4 text-slate-950" />
+            <span>복기 시작 (B-4 리포트 생성)</span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </button>
+
+          <button
+            onClick={handleMarkResolved}
+            disabled={isProcessing}
+            className="py-3 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium text-xs flex items-center gap-1 transition-colors cursor-pointer"
+            title="복기 없이 완료 처리하고 보관합니다"
+          >
+            {isProcessing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}
+            <span>보관만 하기</span>
+          </button>
 
           <button
             onClick={onClose}
-            className="py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium text-xs transition-colors cursor-pointer"
+            className="py-3 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 font-medium text-xs transition-colors cursor-pointer"
           >
-            나중에 하기
+            닫기
           </button>
         </div>
       </div>

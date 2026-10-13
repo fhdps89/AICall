@@ -597,10 +597,73 @@ app.get('/api/recordings/file', (req: Request, res: Response) => {
   }
 });
 
-// 6. Post-Call Review & Mistake Log Generation (Gemini 3.8 Flash structured JSON)
+// B-4 Final Full-Audio Transcription endpoint via gemini-3.5-transcribe (VERBATIM)
+app.post('/api/gemini/transcribe-final', async (req: Request, res: Response) => {
+  const start = performance.now();
+  const { audioBase64, mimeType = 'audio/webm', customApiKey } = req.body || {};
+
+  if (!audioBase64 || typeof audioBase64 !== 'string') {
+    res.status(400).json({ ok: false, error: '변환할 오디오 데이터가 없습니다.' });
+    return;
+  }
+
+  const ai = createGenAI(customApiKey);
+  if (!ai) {
+    res.status(500).json({ ok: false, error: 'Gemini 서버 연동이 준비되지 않았습니다.' });
+    return;
+  }
+
+  try {
+    const response = await ai.models.generateContent({
+      model: TRANSCRIBE_MODEL, // gemini-3.5-transcribe
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              data: audioBase64,
+              mimeType,
+            },
+          },
+          {
+            text: '언어: 영어 및 한국어 대화. 모드: VERBATIM(있는 그대로 음성 전사). 생략, 요약, 문법 교정 없이 화자가 실제로 말한 단어, 문법적 실수, 감탄사, 망설임을 있는 그대로 토씨 하나 틀리지 않고 텍스트로 옮겨 적으시오. 부가 설명이나 인사말 없이 전사 텍스트만 단독 출력하시오.',
+          },
+        ],
+      },
+    });
+
+    const elapsed = Math.round(performance.now() - start);
+    const transcript = response.text?.trim() || '';
+
+    res.json({
+      ok: true,
+      transcript,
+      elapsedMs: elapsed,
+    });
+  } catch (err: any) {
+    console.warn('[TranscribeFinal] gemini-3.5-transcribe error:', err?.message || err);
+    res.status(500).json({
+      ok: false,
+      error: err?.message || '최종 음성 전사 실패',
+    });
+  }
+});
+
+// 6. Post-Call Review & Mistake Log Generation (Gemini 3.8 Flash structured JSON) - B-4 Specification
 app.post('/api/review', async (req: Request, res: Response) => {
   const start = performance.now();
-  const { trackId, lessonNum, lessonTitle, turns, customApiKey } = req.body || {};
+  const {
+    trackId,
+    goalId,
+    lessonNum,
+    lessonTitle,
+    sttFinal, // Verbatim recording transcript (기록용 받아쓰기)
+    sourceStt = 'sttFinal',
+    liveTranscript = [],
+    todayLessonPrompt = '',
+    reviewingMistakes = [], // Existing reviewing mistakes for detecting usedCorrectly
+    graduatedMistakes = [], // Existing graduated mistakes for detecting repeatedMistakes
+    customApiKey,
+  } = req.body || {};
 
   const ai = createGenAI(customApiKey);
   if (!ai) {
@@ -609,35 +672,61 @@ app.post('/api/review', async (req: Request, res: Response) => {
   }
 
   try {
-    const formattedTranscript = Array.isArray(turns) && turns.length > 0
-      ? turns.map((t: any) => `${t.role === 'model' ? 'AI Coach' : 'Learner'}: ${t.text}`).join('\n')
-      : '(No conversation recorded)';
+    const formattedLiveTranscript = Array.isArray(liveTranscript) && liveTranscript.length > 0
+      ? liveTranscript.map((t: any) => `${t.role === 'model' ? 'AI Tutor' : 'Learner'}: ${t.text}`).join('\n')
+      : '(No live turns recorded)';
 
-    const systemInstruction = `You are an expert English speaking coach.
-The voice session is over for Room: ${trackId || 'General'}, Lesson: ${lessonNum || 1} (${lessonTitle || 'Lesson'}).
-Review everything the learner said in this conversation transcript.
+    const formattedReviewingMistakes = Array.isArray(reviewingMistakes) && reviewingMistakes.length > 0
+      ? reviewingMistakes.map((m: any) => `ID: ${m.id} | Awkward: "${m.myPhrase}" -> Natural: "${m.naturalPhrase}" (${m.reason})`).join('\n')
+      : '(None)';
 
-Respond strictly in valid JSON matching this schema:
-- overallEvaluation: 1-line overall evaluation in Korean of the learner's spoken English performance + biggest priority area for improvement according to the lesson goal.
-- estimatedLevel: String, one of "IM2", "IH", "AL", "Native".
-- mistakes: Array of up to 8 objects containing:
-  - myPhrase: What the learner said (or an awkward phrase they used). If recognition had minor flaws, clean it up reasonably.
-  - naturalPhrase: How a native speaker / American coworker / OPIc AL candidate would naturally say it.
-  - reason: 1-2 sentence concise explanation in Korean why this is more natural (grammar, nuance, preposition, or collocation).
-- keyExpressions: Array of 5 useful expressions to memorize from this lesson:
-  - expression: The English phrase/idiom.
-  - situation: When to use this in Korean.
-  - exampleSentence: Natural example sentence.
-- keepSyncText: Clean text block formatted for Google Keep:
-  "[${trackId || 'Room'}] my phrase -> natural phrase" for each mistake, followed by:
-  "PROGRESS: Lesson ${lessonNum || 1} done - ${new Date().toISOString().slice(0, 10)} - [estimatedLevel]"
-- progressTag: "PROGRESS: Lesson ${lessonNum || 1} done"`;
+    const formattedGraduatedMistakes = Array.isArray(graduatedMistakes) && graduatedMistakes.length > 0
+      ? graduatedMistakes.map((m: any) => `ID: ${m.id} | Awkward: "${m.myPhrase}" -> Natural: "${m.naturalPhrase}"`).join('\n')
+      : '(None)';
+
+    const systemInstruction = `You are an expert 1:1 English speaking coach and post-call review analyst.
+Analyze this completed call session to produce a structured review report.
+
+Input Materials:
+1. [기록용 받아쓰기 (VERBATIM sttFinal)]:
+${sttFinal || '(No audio transcription available)'}
+
+2. [Live 대화 로그 (Live transcript)]:
+${formattedLiveTranscript}
+
+3. [오늘 수업 지시서 (Lesson Prompt Directive)]:
+${todayLessonPrompt || `Goal: ${trackId || goalId}, Lesson: ${lessonNum} (${lessonTitle})`}
+
+4. [현재 복습 중인 실수 목록 (Reviewing Mistakes)]:
+${formattedReviewingMistakes}
+
+5. [이미 졸업한 실수 목록 (Graduated Mistakes)]:
+${formattedGraduatedMistakes}
+
+STRICT ANALYSIS RULES (Part B-4):
+1. mistakes[]: Identify grammatical errors, awkward collocations, word choice blunders, or unnatural patterns made by the learner.
+   CRITICAL REQUIREMENT FOR "myPhrase":
+   - "myPhrase" MUST be copied WORD-FOR-WORD, EXACTLY VERBATIM from the learner's sentences in [기록용 받아쓰기 (VERBATIM sttFinal)].
+   - NEVER edit, correct, sanitize, or rephrase "myPhrase". Keep all grammar mistakes, missing prepositions, or broken phrasing exactly as the learner spoke.
+   - "naturalPhrase": How an American native speaker / OPIc AL speaker would naturally express this thought.
+   - "reason": 1-2 concise Korean sentences explaining why naturalPhrase is better (grammar, preposition, nuance, collocation).
+   - "sourceStt": Set to "${sourceStt}".
+2. keyExpressions[]: EXACTLY 5 high-impact English expressions to memorize from this lesson:
+   - "expression": English phrase/idiom.
+   - "situation": When to use this in Korean.
+   - "exampleSentence": Natural example sentence.
+3. estimatedLevel: One of "IM2", "IH", "AL", "Native" (Note: AI estimate only, not official).
+4. usedCorrectly[]: Array of string IDs from [현재 복습 중인 실수 목록] that the learner used correctly and naturally during this call.
+5. repeatedMistakes[]: Array of string IDs from [이미 졸업한 실수 목록] that the learner made a mistake on again during this call.
+6. overallEvaluation: 1-2 sentence overall evaluation in Korean of the learner's spoken English performance + priority improvement area.
+7. keepSyncText: Text block formatted for Google Keep:
+   For each mistake, one per line: "[myPhrase] -> [naturalPhrase]".`;
 
     const response = await ai.models.generateContent({
-      model: FALLBACK_CHAT_MODEL,
+      model: FALLBACK_CHAT_MODEL, // gemini-3.8-flash
       contents: [{
         role: 'user',
-        parts: [{ text: `Here is the conversation transcript between the Learner and AI Coach:\n\n${formattedTranscript}\n\nPlease generate the structured review report now.` }],
+        parts: [{ text: `Generate the B-4 post-call review report now.` }],
       }],
       config: {
         systemInstruction,
@@ -655,8 +744,9 @@ Respond strictly in valid JSON matching this schema:
                   myPhrase: { type: Type.STRING },
                   naturalPhrase: { type: Type.STRING },
                   reason: { type: Type.STRING },
+                  sourceStt: { type: Type.STRING },
                 },
-                required: ['myPhrase', 'naturalPhrase', 'reason'],
+                required: ['myPhrase', 'naturalPhrase', 'reason', 'sourceStt'],
               },
             },
             keyExpressions: {
@@ -671,10 +761,25 @@ Respond strictly in valid JSON matching this schema:
                 required: ['expression', 'situation', 'exampleSentence'],
               },
             },
+            usedCorrectly: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+            repeatedMistakes: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
             keepSyncText: { type: Type.STRING },
-            progressTag: { type: Type.STRING },
           },
-          required: ['overallEvaluation', 'estimatedLevel', 'mistakes', 'keyExpressions', 'keepSyncText', 'progressTag'],
+          required: [
+            'overallEvaluation',
+            'estimatedLevel',
+            'mistakes',
+            'keyExpressions',
+            'usedCorrectly',
+            'repeatedMistakes',
+            'keepSyncText',
+          ],
         },
       },
     });
@@ -686,15 +791,16 @@ Respond strictly in valid JSON matching this schema:
       ok: true,
       review: {
         ...parsed,
-        trackId: trackId || 'opic',
+        trackId: trackId || goalId || 'opic',
         lessonNum: lessonNum || 1,
         lessonTitle: lessonTitle || '',
+        generatedAt: new Date().toISOString(),
       },
       elapsedMs: elapsed,
     });
   } catch (err: any) {
     console.error('Review generation error:', err);
-    res.status(500).json({ ok: false, error: '복기 리포트 생성에 실패했습니다.' });
+    res.status(500).json({ ok: false, error: err?.message || '복기 리포트 생성에 실패했습니다.' });
   }
 });
 

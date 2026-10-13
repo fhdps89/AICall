@@ -120,3 +120,72 @@ export async function getAllPendingChunks(): Promise<LocalRecordingChunk[]> {
     return [];
   }
 }
+
+/**
+ * B-4 Requirement 0: Automatically retry uploading pending/failed chunks on app launch.
+ * On success, marks uploaded: true in Firestore sessions.recordingChunks and deletes from IndexedDB.
+ */
+export async function retryPendingUploads(userId: string): Promise<number> {
+  const pending = await getAllPendingChunks();
+  if (pending.length === 0) return 0;
+
+  console.log(`[IndexedDB] Found ${pending.length} pending unuploaded chunks. Retrying upload...`);
+  let successCount = 0;
+
+  // Lazy import storage and firestore to avoid cyclic imports
+  const { uploadAudioFile } = await import("../firebase/storage");
+  const { doc, getDoc, updateDoc } = await import("firebase/firestore");
+  const { db } = await import("../firebase/config");
+
+  for (const chunk of pending) {
+    try {
+      const storagePath = `recordings/${chunk.sessionId}/chunk_${String(chunk.index).padStart(4, "0")}_${chunk.timestamp}.webm`;
+      const storageUrl = await uploadAudioFile(userId, storagePath, chunk.blob);
+
+      // Successfully uploaded -> update Firestore session recordingChunks
+      try {
+        const sessionRef = doc(db, "users", userId, "sessions", chunk.sessionId);
+        const sessionSnap = await getDoc(sessionRef);
+        if (sessionSnap.exists()) {
+          const sessionData = sessionSnap.data();
+          const existingChunks: any[] = sessionData.recordingChunks || [];
+          const updatedChunks = existingChunks.map((c) => {
+            if (c.index === chunk.index) {
+              return { ...c, uploaded: true, storageUrl };
+            }
+            return c;
+          });
+          // If chunk not present in recordingChunks array, append it
+          const found = updatedChunks.some((c) => c.index === chunk.index);
+          if (!found) {
+            updatedChunks.push({
+              index: chunk.index,
+              path: storagePath,
+              storageUrl,
+              timestamp: new Date(chunk.timestamp).toISOString(),
+              uploaded: true,
+              durationSeconds: chunk.durationSeconds || 10,
+              sizeBytes: chunk.blob.size,
+            });
+          }
+          await updateDoc(sessionRef, {
+            recordingChunks: updatedChunks,
+            updatedAt: new Date().toISOString(),
+          });
+        }
+      } catch (dbErr) {
+        console.warn(`[IndexedDB] Could not sync re-uploaded chunk #${chunk.index} to Firestore:`, dbErr);
+      }
+
+      // Delete from IndexedDB upon success
+      await deleteChunkLocally(chunk.id);
+      successCount++;
+      console.log(`[IndexedDB] Re-uploaded and removed chunk #${chunk.index} (${chunk.sessionId})`);
+    } catch (uploadErr) {
+      console.warn(`[IndexedDB] Retry upload failed for chunk #${chunk.index}:`, uploadErr);
+    }
+  }
+
+  return successCount;
+}
+

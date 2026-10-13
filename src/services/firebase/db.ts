@@ -190,6 +190,38 @@ export interface SttPartialItem {
   sourceChunkIndices: number[];
 }
 
+export interface SttFinalData {
+  transcript: string;
+  sourceStt: "sttFinal" | "sttPartial_fallback";
+  createdAt: string;
+  engine: string;
+  mode: string;
+}
+
+export interface ReviewMistakeItem {
+  id?: string;
+  myPhrase: string; // copied verbatim from recording transcript, never corrected
+  naturalPhrase: string;
+  reason: string;
+  sourceStt: string;
+  hidden?: boolean;
+}
+
+export interface SessionReviewData {
+  overallEvaluation: string;
+  estimatedLevel: "IM2" | "IH" | "AL" | "Native";
+  mistakes: ReviewMistakeItem[];
+  keyExpressions: Array<{
+    expression: string;
+    situation: string;
+    exampleSentence: string;
+  }>;
+  usedCorrectly: string[];
+  repeatedMistakes: string[];
+  keepSyncText: string;
+  generatedAt: string;
+}
+
 export interface SessionData {
   id: string;
   goalId: string;
@@ -201,10 +233,39 @@ export interface SessionData {
   liveTranscript: Array<{ role: "user" | "model"; text: string; timestamp?: number }>;
   recordingChunks: RecordingChunkMeta[];
   sttPartial: SttPartialItem[];
+  sttFinal?: SttFinalData;
+  review?: SessionReviewData;
   connectionPath?: "direct" | "proxy";
   directFailCount?: number;
   createdAt: string;
   updatedAt?: string;
+}
+
+export interface MistakeData {
+  id?: string;
+  createdAt: string;
+  source: "call" | "keep_import";
+  sessionId?: string;
+  goalId?: string;
+  lessonIndex?: number;
+  lessonTitle?: string;
+  myPhrase: string;
+  naturalPhrase: string;
+  reason: string;
+  sourceStt: string;
+  stage: 1 | 3 | 7 | 14;
+  status: "reviewing" | "on_hold" | "graduated";
+  reopenCount?: number;
+  nextReviewDate?: string;
+}
+
+export interface QualityReportData {
+  id?: string;
+  sessionId: string;
+  myPhrase: string;
+  sourceStt: string;
+  reportedAt: string;
+  reason?: string;
 }
 
 /**
@@ -372,4 +433,145 @@ export async function markSessionPendingReview(userId: string, sessionId: string
     handleFirestoreError(error, OperationType.UPDATE, `users/${userId}/sessions/${sessionId}`);
   }
 }
+
+/**
+ * B-4 Requirement 0: Firestore-based interrupted session watchdog.
+ * If status is in-progress and lastChunkAt is > 2 minutes ago, automatically transitions status to pending_review.
+ */
+export async function checkAndMarkInterruptedSessions(userId: string): Promise<SessionData[]> {
+  const sessionsCol = collection(db, "users", userId, "sessions");
+  const TWO_MINUTES_MS = 2 * 60 * 1000;
+  const now = Date.now();
+
+  try {
+    const snap = await getDocs(sessionsCol);
+    const sessions = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<SessionData, "id">) }));
+    const result: SessionData[] = [];
+
+    for (const s of sessions) {
+      if (s.status === "in-progress") {
+        const lastActivity = s.lastChunkAt || s.startedAt;
+        const diff = now - new Date(lastActivity).getTime();
+        if (diff > TWO_MINUTES_MS) {
+          console.log(`[Watchdog] Session ${s.id} in-progress but lastChunkAt > 2m (${Math.round(diff / 1000)}s ago). Marking as pending_review.`);
+          await markSessionPendingReview(userId, s.id);
+          s.status = "pending_review";
+          result.push(s);
+        }
+      } else if (s.status === "pending_review") {
+        result.push(s);
+      }
+    }
+
+    return result.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+  } catch (err) {
+    console.warn("[Watchdog] Failed to check interrupted sessions in Firestore:", err);
+    return [];
+  }
+}
+
+/**
+ * Get a specific session document by ID
+ */
+export async function getSessionById(userId: string, sessionId: string): Promise<SessionData | null> {
+  const sessionRef = doc(db, "users", userId, "sessions", sessionId);
+  try {
+    const snap = await getDoc(sessionRef);
+    if (!snap.exists()) return null;
+    return { id: snap.id, ...(snap.data() as Omit<SessionData, "id">) };
+  } catch (err) {
+    handleFirestoreError(err, OperationType.GET, `users/${userId}/sessions/${sessionId}`);
+  }
+}
+
+/**
+ * Save review result & final STT transcript into the session document and mark status done
+ */
+export async function saveSessionReview(
+  userId: string,
+  sessionId: string,
+  review: SessionReviewData,
+  sttFinal?: SttFinalData
+): Promise<void> {
+  const sessionRef = doc(db, "users", userId, "sessions", sessionId);
+  const now = new Date().toISOString();
+  try {
+    const updatePayload: Record<string, any> = {
+      review,
+      status: "done",
+      endedAt: now,
+      updatedAt: now,
+    };
+    if (sttFinal) {
+      updatePayload.sttFinal = sttFinal;
+    }
+    await updateDoc(sessionRef, updatePayload);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `users/${userId}/sessions/${sessionId}`);
+  }
+}
+
+/**
+ * Save newly extracted mistakes to the mistakes collection (stage 1, status reviewing, source call)
+ */
+export async function saveCallMistakes(
+  userId: string,
+  mistakes: MistakeData[]
+): Promise<string[]> {
+  const mistakesCol = collection(db, "users", userId, "mistakes");
+  const createdIds: string[] = [];
+
+  try {
+    for (const m of mistakes) {
+      const newDoc = doc(mistakesCol);
+      await setDoc(newDoc, {
+        ...m,
+        id: newDoc.id,
+        stage: 1,
+        status: "reviewing",
+        source: "call",
+        createdAt: m.createdAt || new Date().toISOString(),
+      });
+      createdIds.push(newDoc.id);
+    }
+    return createdIds;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `users/${userId}/mistakes`);
+  }
+}
+
+/**
+ * Get all existing mistakes for a user (for identifying usedCorrectly / repeatedMistakes)
+ */
+export async function getUserMistakes(userId: string): Promise<MistakeData[]> {
+  const mistakesCol = collection(db, "users", userId, "mistakes");
+  try {
+    const snap = await getDocs(mistakesCol);
+    return snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<MistakeData, "id">) }));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, `users/${userId}/mistakes`);
+  }
+}
+
+/**
+ * Save quality report when user clicks "이건 내가 한 말이 아니에요"
+ */
+export async function createQualityReport(
+  userId: string,
+  report: QualityReportData
+): Promise<string> {
+  const col = collection(db, "users", userId, "qualityReports");
+  const newDoc = doc(col);
+  try {
+    await setDoc(newDoc, {
+      ...report,
+      id: newDoc.id,
+      reportedAt: report.reportedAt || new Date().toISOString(),
+    });
+    return newDoc.id;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `users/${userId}/qualityReports`);
+  }
+}
+
 

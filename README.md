@@ -1,8 +1,30 @@
 # 오늘도 한 통 (One Call English) — AI 1:1 전화영어 올인원 랩
 
-> **버전**: `v2.3.0` | **빌드**: `20261013-multilingual-1529` | **최종 갱신**: 2026-10-13 (KST)
+> **버전**: `v2.4.0` | **빌드**: `20261013-multilingual-1557` | **최종 갱신**: 2026-10-13 (KST)
 
 여러 도구(Claude, Gemini Live, Google Keep, Grok, ElevenLabs, Telegram)로 분산되어 있던 실전 영어회화 학습 파이프라인을 **단 하나의 통합 웹/모바일 앱에서 원클릭으로 완벽하게 자동화**한 AI 1:1 전화영어 플랫폼입니다.
+
+### 📌 [Phase 1: B-4 통화 후 복기 (기록용) 완성]
+- **최종 받아쓰기 (기록용 sttFinal)**:
+  - 통화 종료(정상 종료 또는 끊긴 통화 판정) 시 세션의 10초 녹음 조각들을 순서대로 합쳐 `gemini-3.5-transcribe` **VERBATIM** 모드로 전사 후 `sessions.sttFinal`에 영구 보존 (화자가 발화한 말 토씨 하나 틀리지 않고 그대로 전사).
+  - 최종 받아쓰기 실패 시 통화 중 임시본(`sttPartial`)을 이어 붙여 자동 대체(`sourceStt: 'sttPartial_fallback'`).
+- **구조화된 복기 생성 (`gemini-3.8-flash`)**:
+  - [기록용 받아쓰기(sttFinal) + Live 대화 로그 + 오늘 수업 지시서 + 기존 오답 목록]을 주입하여 엄격한 JSON 스키마로 복기 생성.
+  - **myPhrase 절대 불변 규칙**: "인식이 어색하면 적당히 다듬어라" 지시를 완전히 삭제하고, 기록용 받아쓰기 문장을 글자 그대로 복사하여 학습자의 실제 문법 오류와 어색한 어휘를 가감 없이 보존.
+  - **오답 교정 (mistakes[])**: `myPhrase`(글자 그대로 복사), `naturalPhrase`(원어민 자연스러운 표현), `reason`(한국어 1~2문장 교정 이유), `sourceStt`.
+  - **외울 표현 5개 (keyExpressions[])**: 오늘 꼭 외워야 할 핵심 표현 정확히 5개 추출 (상황 및 예문 포함).
+  - **AI 예상 레벨 (estimatedLevel)**: IM2 / IH / AL / Native 산출.
+  - **복습 연동 데이터 (usedCorrectly / repeatedMistakes)**: 복습 중인 실수를 맞게 쓴 것 및 이미 졸업한 실수를 재반복한 것의 ID를 감지 및 저장.
+- **복기 결과 화면 (Review Screen)**:
+  - 표: 내가 한 말 (verbatim) -> 원어민 자연스러운 표현 (발음 듣기) -> 교정 이유.
+  - AI 예상 레벨 옆에 **"AI 예상치, 공식 등급 아님"** 안내 명시.
+  - 각 실수 항목별 **"이건 내가 한 말이 아니에요"** 버튼: 클릭 시 해당 항목을 화면과 Keep 복사 블록에서 숨기고 `qualityReports` 컬렉션에 `(sessionId, myPhrase, sourceStt, 시각)` 즉시 기록.
+  - **"Keep에 붙여넣기용 복사"** 버튼: 줄마다 `[내가 한 말] -> [원어민 표현]` 형태로 일괄 클립보드 복사.
+  - "끝나지 않은 통화가 있어요" 복구 모달에서 **"복기 시작"** 클릭 시 본 복기 파이프라인으로 자연스럽게 연결.
+- **지시서 3 보완 (Requirement 0)**:
+  - 조각 업로드 시마다 Firestore `sessions.lastChunkAt` 자동 갱신.
+  - 끊긴 통화 기준을 **Firestore 기준**으로 일원화: `in-progress` 상태에서 `lastChunkAt`이 2분 초과 시 `pending_review`로 전환하고 복기 가능하도록 처리 (서버 잠듦 대비 앱 시작 시 자동 판정).
+  - 앱 실행 시 IndexedDB에 남아 있는 업로드 실패 조각 자동 재업로드 및 `recordingChunks.uploaded: true` 갱신 후 IndexedDB 삭제.
 
 ### 📌 [Phase 1: B-3 통화 중 녹음 (끊김 대비) 완성]
 - **마이크 청크 녹음 (10초 단위 Local-First)**:

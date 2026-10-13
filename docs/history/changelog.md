@@ -4,6 +4,45 @@
 
 ---
 
+### [2026-10-13 KST] v2.4.0 — [작업 지시서 4] 1-D 통화 후 복기 (기록용) — 가이드 B-4 완료
+- **문제 원인 및 기획 의도 (Context & Motivation)**:
+  - 통화가 끝난 후 사용자의 실제 발화 실수를 왜곡 없이 정확하게 짚어내기 위해, "임의로 다듬지 않는" 원문 그대로의 기록용 받아쓰기(VERBATIM sttFinal) 기반 정밀 복기 파이프라인 구현.
+  - 음성 인식 오인식으로 인한 잘못된 오답 지적을 사용자가 직접 신고 및 제외할 수 있는 피드백 메커니즘 제공 및 Google Keep 단일 블록 복사 지원.
+  - 지시서 3에서 남은 미완료 통화 판정 및 실패 청크 자동 재업로드 보완.
+- **적용된 수정 내역 (Applied Changes)**:
+  0. **지시서 3 보완 (Requirement 0)**:
+     - 10초 조각 업로드 시마다 Firestore `sessions.lastChunkAt` 갱신 (`db.ts`, `appendSessionChunk`).
+     - "끊긴 통화" 판단을 Firestore 기준으로 일원화: `in-progress` 상태에서 `lastChunkAt`이 2분을 초과하면 `pending_review`로 전환 (`checkAndMarkInterruptedSessions`). 앱 시작 시에도 동일 검사 실행.
+     - 앱 시작 시 IndexedDB에 남은 미업로드 조각 자동 재업로드 및 Firestore `recordingChunks.uploaded: true` 갱신 후 IndexedDB 삭제 (`retryPendingUploads`).
+  1. **최종 받아쓰기 (기록용 sttFinal - `reviewPipeline.ts`, `server.ts`)**:
+     - 통화 종료(정상 종료 및 끊긴 통화) 시 저장된 10초 조각들을 순서대로 결합하여 `/api/gemini/transcribe-final` (`gemini-3.5-transcribe` VERBATIM)으로 전사.
+     - 전사 결과를 Firestore `sessions.sttFinal`에 영구 보존.
+     - 최종 받아쓰기 실패 시 통화 중 임시본(`sttPartial`)을 이어붙여 폴백 처리하며 `sourceStt: 'sttPartial_fallback'` 명시.
+  2. **복기 생성 파이프라인 (`/api/review`, `gemini-3.8-flash`)**:
+     - [기록용 받아쓰기(sttFinal) + Live 대화 로그 + 오늘 수업 지시서 + 기존 실수 목록]을 입력으로 주입.
+     - "인식이 어색하면 적당히 다듬어라" 지시를 완전히 삭제하고, `myPhrase`는 기록용 받아쓰기 문장을 글자 그대로 복사(절대 수정 금지).
+     - `mistakes[]`: `myPhrase`(글자 그대로 복사), `naturalPhrase`, `reason`(한국어 1~2문장), `sourceStt`.
+     - `keyExpressions[]`: 정확히 5개 필수 암기 표현.
+     - `estimatedLevel`: IM2, IH, AL, Native 등급.
+     - `usedCorrectly`: 현재 복습 중인 실수 중 이번 통화에서 맞게 쓴 ID 목록 저장.
+     - `repeatedMistakes`: 이미 졸업한 실수를 이번 통화에서 다시 틀린 ID 목록 저장.
+  3. **결과 화면 (Review Screen - `ReviewModal.tsx`)**:
+     - 표: 내가 한 말 (verbatim) -> 자연스러운 표현 (발음 듣기 지원) -> 교정 이유.
+     - 외울 표현 5선 목록 및 TTS 발음 재생.
+     - AI 예상 레벨 옆에 **"AI 예상치, 공식 등급 아님"** 문구 명시.
+     - 각 실수 항목 옆 **"이건 내가 한 말이 아니에요"** 버튼: 클릭 시 해당 실수를 숨기고 `qualityReports` 컬렉션에 `(sessionId, myPhrase, sourceStt, 시각)` 즉시 보존.
+     - **"Keep에 붙여넣기용 복사"** 버튼: 화면에 표시된 실수 목록을 줄마다 `[내가 한 말] -> [자연스러운 표현]` 단일 텍스트 블록으로 일괄 복사.
+     - "끝나지 않은 통화가 있어요" 복구 모달에서 **"복기 시작"** 클릭 시 본 복기 화면으로 자연스럽게 이어지도록 연동.
+  4. **영구 저장**:
+     - 실수는 `mistakes` 컬렉션에 `stage: 1`, `status: "reviewing"`, `source: "call"`, `sessionId`와 함께 자동 저장.
+     - 세션 문서에 review 결과와 `status: "done"` 저장.
+- **방어 조치 및 호환성 (Safety & Guardrails)**:
+  - 기존 Live 직접연결·중계·세션 재개·청크 녹음 경로 무변경 보존.
+  - `src/config/models.ts` 모델명 절대 불변 준수(`gemini-3.8-live`, `gemini-3.5-transcribe`, `gemini-3.8-flash`).
+  - 단일 허용 계정(`episode.kim@gmail.com`) ABAC 보안 규칙 및 firestore.rules 호환 검증.
+
+---
+
 ### [2026-10-13 KST] v2.3.0 — [작업 지시서 3] 1-C 통화 중 녹음 (끊김 대비) — 가이드 B-3 완료
 - **문제 원인 및 기획 의도 (Context & Motivation)**:
   - 모바일 웹앱 환경에서 화면 꺼짐, 네트워크 순단, 브라우저 탭 닫힘 등으로 인해 Live 연결이 끊기더라도 학생의 음성과 대화 맥락이 유실되지 않도록 이중 안전망 구축 필요.

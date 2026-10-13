@@ -41,6 +41,7 @@ export class ChunkRecorder {
   private accumulatedChunkIndices: number[] = [];
   private minuteBatchIndex: number = 0;
   private mimeType: string = "audio/webm";
+  private sessionRecordedBlobs: Blob[] = [];
 
   constructor() {
     // Detect preferred audio mimeType
@@ -69,6 +70,7 @@ export class ChunkRecorder {
     this.minuteBatchIndex = 0;
     this.accumulatedBlobsForMinute = [];
     this.accumulatedChunkIndices = [];
+    this.sessionRecordedBlobs = [];
 
     // Clone audio tracks so that Live reconnects/cleanups don't stop our background recording
     const audioTracks = stream.getAudioTracks().map((track) => track.clone());
@@ -112,6 +114,14 @@ export class ChunkRecorder {
 
   public getChunkCount(): number {
     return this.chunkIndex;
+  }
+
+  public getSessionRecordedBlobs(): Blob[] {
+    return [...this.sessionRecordedBlobs];
+  }
+
+  public getMimeType(): string {
+    return this.mimeType;
   }
 
   private recordNextSegment(): void {
@@ -177,6 +187,7 @@ export class ChunkRecorder {
   private async processChunk(index: number, blob: Blob): Promise<void> {
     if (!this.options) return;
     const { userId, sessionId } = this.options;
+    this.sessionRecordedBlobs.push(blob);
     const timestamp = Date.now();
     const chunkId = `${sessionId}_chunk_${index}`;
     const storagePath = `recordings/${sessionId}/chunk_${String(index).padStart(4, "0")}_${timestamp}.webm`;

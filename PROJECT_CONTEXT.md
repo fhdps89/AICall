@@ -1,7 +1,7 @@
 # 📖 프로젝트 컨텍스트 및 히스토리 (Project Context)
 
 > **프로젝트**: 「오늘도 한 통」 (One Call English) — AI 1:1 전화영어 올인원 랩  
-> **현재 버전**: `v2.3.0` | **공식 빌드 버전**: `20261013-multilingual-1529` | **최종 갱신**: 2026-10-13 (KST)  
+> **현재 버전**: `v2.4.0` | **공식 빌드 버전**: `20261013-multilingual-1557` | **최종 갱신**: 2026-10-13 (KST)  
 > **관리 규칙**: `README.md` 변경 시 본 문서의 아키텍처 및 히스토리를 함께 최신화하며, 모든 일시는 한국 표준시(KST)를 기준으로 합니다.
 
 ---
@@ -12,17 +12,25 @@
 
 ---
 
-## 2. 모델 인프라 구성 (Part B-1 & B-2 & B-3 확정 사양)
+## 2. 모델 인프라 구성 (Part B-1 & B-2 & B-3 & B-4 확정 사양)
 - **실시간 통화 (Live)**: `LIVE_MODEL = "gemini-3.8-live"`
 - **통화 복기 & 퀴즈·코치 (Text)**: `TEXT_MODEL = "gemini-3.8-flash"`
 - **기록용 받아쓰기 & 1분 임시 전사 (STT)**: `STT_ENGINE = "gemini"` (`gemini-3.5-transcribe`, 모드 `VERBATIM`) / 비실시간 대안 `universal-3-5-pro` (AssemblyAI)
-- **오디오 합성 (TTS)**: `TTS_ENGINE = "gemini"` (`gemini-3.8-flash-tts`) / 2인 대화 대안 ElevenLabs
+- **오디오 합성 (TTS)**: `TTS_ENGINE = "gemini"` (`gemini-3.8-flash-tts` / `gemini-3.8-flash-lite-tts`) / 2인 대화 대안 ElevenLabs
 - **공급자 추상화 레이어 (`src/services/providers/`)**: `LiveProvider`, `SttProvider`, `LlmProvider`, `TtsProvider` 인터페이스 분리.
 
 ---
 
-## 3. 핵심 자동화 아키텍처 (Part B-12 뼈대 & B-2 통화 & B-3 통화 중 녹음)
-1. **B-3 통화 중 녹음 & 끊김 대비 이중 안전망 (`chunkIndexedDb.ts`, `chunkRecorder.ts`, `NewCallScreen.tsx`)**:
+## 3. 핵심 자동화 아키텍처 (Part B-12 뼈대 & B-2 통화 & B-3 녹음 & B-4 복기)
+1. **B-4 통화 후 복기 파이프라인 (`reviewPipeline.ts`, `ReviewModal.tsx`, `/api/review`, `/api/gemini/transcribe-final`)**:
+   - **기록용 최종 받아쓰기 (sttFinal)**: 세션 종료 시 10초 조각들을 합쳐 `gemini-3.5-transcribe` VERBATIM 전사. 실패 시 `sttPartial` 합본으로 폴백하여 `sessions.sttFinal`에 저장.
+   - **myPhrase 원문 보존 복기 생성**: `gemini-3.8-flash` 기반 오답 분석 시 "적당히 다듬어라"를 배제하고 sttFinal의 학습자 발화를 글자 그대로 복사하여 `mistakes[]`에 수록.
+   - **5대 핵심 표현 & AI 등급**: 오늘 외울 표현 5개 추출, `estimatedLevel` 산출 및 "AI 예상치, 공식 등급 아님" 안내.
+   - **오인식 신고 ("이건 내가 한 말이 아니에요")**: 해당 실수 숨김 처리 및 Firestore `qualityReports` 컬렉션에 자동 저장.
+   - **Keep 양식 복사**: `[내가 한 말] -> [자연스러운 표현]` 줄 단위 일괄 복사.
+   - **미완료 통화 복기 연결**: 지시서 3의 "끝나지 않은 통화" 모달에서 "복기 시작" 클릭 시 즉시 복기 파이프라인 가동.
+   - **mistakes 컬렉션 자동 저장**: stage 1, status reviewing, source call 메타데이터 저장.
+2. **B-3 통화 중 녹음 & 끊김 대비 이중 안전망 (`chunkIndexedDb.ts`, `chunkRecorder.ts`, `NewCallScreen.tsx`)**:
    - **10초 마이크 청크 녹음**: `MediaRecorder`로 10초 조각 생성 -> IndexedDB(`OneCallRecordingsDB`)에 선저장 -> Cloud Storage 즉시 업로드 -> 성공 시 IndexedDB 삭제.
    - **연결 독립성 보장**: Live 연결이 끊기거나(GoAway, 소켓 재연결, 프록시 전환) 불안정해도 마이크 녹음은 중단 없이 독립 백그라운드 구동.
    - **1분 단위 임시 받아쓰기**: 약 1분(6조각)마다 비동기로 `gemini-3.5-transcribe` VERBATIM 전사 -> `sessions.sttPartial` 누적. 환경설정에서 토글 가능.
