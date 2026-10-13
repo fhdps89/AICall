@@ -804,6 +804,135 @@ STRICT ANALYSIS RULES (Part B-4):
   }
 });
 
+// B-6 Requirement 3: Quiz Grading endpoint (TEXT_MODEL = gemini-3.8-flash)
+app.post('/api/quiz/grade', async (req: Request, res: Response) => {
+  const { mistakeId, myPhrase, naturalPhrase, reason, answer, customApiKey } = req.body || {};
+
+  if (!naturalPhrase || answer === undefined) {
+    res.status(400).json({ ok: false, error: 'naturalPhrase and answer are required' });
+    return;
+  }
+
+  const ai = createGenAI(customApiKey);
+  if (!ai) {
+    res.status(500).json({ ok: false, error: 'Gemini API 연동이 준비되지 않았습니다.' });
+    return;
+  }
+
+  try {
+    const prompt = `당신은 공정하고 격려하는 영어 학습 튜터입니다.
+사용자가 영어 표현 퀴즈에 응답했습니다.
+
+[목표 자연스러운 표현 (naturalPhrase)]:
+"${naturalPhrase}"
+
+[핵심 교정 포인트 및 이유 (reason)]:
+"${reason || ''}"
+
+[사용자가 과거에 했던 오답 (myPhrase)]:
+"${myPhrase || ''}"
+
+[사용자가 이번 퀴즈에 제출한 답변 (answer)]:
+"${answer}"
+
+[채점 규칙 - 엄격 준수]:
+1. "핵심 교정 포인트(reason이 고친 부분)가 맞으면 통과(passed: true)" 처리합니다.
+2. 사소한 철자(minor typo), 관사(a/an/the 누락 또는 교체), 구두점, 대소문자 차이는 통과(passed: true)로 너그럽게 허용합니다.
+3. 반면 핵심 교정 포인트를 여전히 틀렸거나 과거 오답("${myPhrase || ''}") 패턴을 반복한 경우, 또는 문장의 핵심 의미가 통하지 않는 경우에는 불통과(passed: false)로 처리합니다.
+4. feedback: 사용자가 잘한 부분이나 고칠 핵심을 다정하게 격려하는 한국어 1~2문장으로 작성하십시오.
+5. correctAnswer: "${naturalPhrase}"를 정확히 전달하십시오.`;
+
+    const response = await ai.models.generateContent({
+      model: FALLBACK_CHAT_MODEL, // gemini-3.8-flash
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            passed: { type: Type.BOOLEAN },
+            feedback: { type: Type.STRING },
+            correctAnswer: { type: Type.STRING },
+          },
+          required: ['passed', 'feedback', 'correctAnswer'],
+        },
+      },
+    });
+
+    const parsed = JSON.parse(response.text?.trim() || '{}');
+    res.json({
+      ok: true,
+      mistakeId,
+      passed: Boolean(parsed.passed),
+      feedback: parsed.feedback || '',
+      correctAnswer: parsed.correctAnswer || naturalPhrase,
+    });
+  } catch (err: any) {
+    console.error('Quiz grading error:', err);
+    res.status(500).json({ ok: false, error: err?.message || '퀴즈 채점에 실패했습니다.' });
+  }
+});
+
+// B-6 Requirement 2: Quiz Flashcard Korean Meaning generator (gemini-3.8-flash)
+app.post('/api/quiz/meaning-ko', async (req: Request, res: Response) => {
+  const { items, customApiKey } = req.body || {};
+
+  if (!Array.isArray(items) || items.length === 0) {
+    res.status(400).json({ ok: false, error: 'items array is required' });
+    return;
+  }
+
+  const ai = createGenAI(customApiKey);
+  if (!ai) {
+    res.status(500).json({ ok: false, error: 'Gemini API 연동이 준비되지 않았습니다.' });
+    return;
+  }
+
+  try {
+    const listStr = items.map((it: any, idx: number) => `${idx + 1}. [ID: ${it.id}] "${it.naturalPhrase}" (참고 이유: ${it.reason || ''})`).join('\n');
+    const prompt = `각 영어 표현을 학습용 플래시카드 앞면에 들어갈 자연스럽고 간결한 한국어 뜻(1문장 또는 짧은 구)으로 번역해 주세요.
+
+목록:
+${listStr}
+
+각 항목의 id와 간결한 한국어 뜻(meaningKo)을 반환하세요.`;
+
+    const response = await ai.models.generateContent({
+      model: FALLBACK_CHAT_MODEL, // gemini-3.8-flash
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            meanings: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  id: { type: Type.STRING },
+                  meaningKo: { type: Type.STRING },
+                },
+                required: ['id', 'meaningKo'],
+              },
+            },
+          },
+          required: ['meanings'],
+        },
+      },
+    });
+
+    const parsed = JSON.parse(response.text?.trim() || '{"meanings":[]}');
+    res.json({
+      ok: true,
+      meanings: parsed.meanings || [],
+    });
+  } catch (err: any) {
+    console.error('Quiz meaning generation error:', err);
+    res.status(500).json({ ok: false, error: err?.message || '한국어 뜻 생성에 실패했습니다.' });
+  }
+});
+
 // 7. Morning Review Podcast Generator (Script + Gemini TTS Audio)
 app.post('/api/podcast', async (req: Request, res: Response) => {
   const start = performance.now();

@@ -256,6 +256,7 @@ export interface MistakeData {
   naturalPhrase: string;
   reason: string;
   sourceStt: string;
+  meaningKo?: string; // Korean translation for B-6 Quiz flashcard
   stage: MistakeStage;
   status: MistakeStatus;
   nextReviewAt?: string; // YYYY-MM-DD
@@ -813,4 +814,52 @@ export async function createQualityReport(
   }
 }
 
+/**
+ * B-6 Quiz Attempt record model
+ */
+export interface QuizAttemptData {
+  id?: string;
+  mistakeId: string;
+  mode: "speak" | "type";
+  answer: string;
+  passed: boolean;
+  feedback: string;
+  createdAt: string;
+}
 
+/**
+ * Save or update mistake's meaningKo field for reuse across quiz sessions
+ */
+export async function updateMistakeMeaningKo(
+  userId: string,
+  mistakeId: string,
+  meaningKo: string
+): Promise<void> {
+  const mRef = doc(db, "users", userId, "mistakes", mistakeId);
+  try {
+    await updateDoc(mRef, { meaningKo, updatedAt: new Date().toISOString() });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `users/${userId}/mistakes/${mistakeId}`);
+  }
+}
+
+/**
+ * Save quiz attempt record to users/{uid}/quizAttempts
+ */
+export async function saveQuizAttempt(
+  userId: string,
+  attempt: QuizAttemptData
+): Promise<string> {
+  const col = collection(db, "users", userId, "quizAttempts");
+  const newDoc = doc(col);
+  try {
+    await setDoc(newDoc, {
+      ...attempt,
+      id: newDoc.id,
+      createdAt: attempt.createdAt || new Date().toISOString(),
+    });
+    return newDoc.id;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `users/${userId}/quizAttempts`);
+  }
+}

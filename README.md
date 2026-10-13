@@ -1,8 +1,30 @@
 # 오늘도 한 통 (One Call English) — AI 1:1 전화영어 올인원 랩
 
-> **버전**: `v2.5.0` | **빌드**: `20261013-multilingual-1632` | **최종 갱신**: 2026-10-13 (KST)
+> **버전**: `v2.6.0` | **빌드**: `20261013-multilingual-1652` | **최종 갱신**: 2026-10-13 (KST)
 
 여러 도구(Claude, Gemini Live, Google Keep, Grok, ElevenLabs, Telegram)로 분산되어 있던 실전 영어회화 학습 파이프라인을 **단 하나의 통합 웹/모바일 앱에서 원클릭으로 완벽하게 자동화**한 AI 1:1 전화영어 플랫폼입니다.
+
+### 📌 [Phase 2: B-6 퀴즈 (2-B) 완성]
+- **퀴즈 대상 산출 (최대 10개)**:
+  - `getDueMistakes(today)` 결과를 그대로 사용하여 보류(`deferred`) 실수가 목록 최우선 맨 앞에 정렬.
+  - 홈 화면의 "오늘 복습 N개" 옆에 **"오늘 퀴즈 N개"** 카운터(`N = min(대상 수, 10)`) 및 **"퀴즈 풀기"** 버튼 배치.
+- **카드형 플래시카드 & 즉시 피드백 (`QuizModal`)**:
+  - **카드 앞면**: 원어민 표현의 한국어 뜻(`meaningKo`) + 교정 이유(`reason`) 한 줄 힌트 노출.
+  - **한국어 뜻 자동 생성 & 영구 보존**: 실수 문서에 `meaningKo`가 없으면 퀴즈 시작 시 `gemini-3.8-flash`(`/api/quiz/meaning-ko`)로 한 번 번역하여 Firestore `mistakes.meaningKo`에 저장 후 영구 재사용.
+  - **오답 은닉 원칙**: 내가 과거 통화에서 했던 오답(`myPhrase`)은 **정답 확인 뒤에만 노출**하여 힌트 노출 및 기억 왜곡 원천 차단.
+- **2가지 응답 방식 (말하기 vs 타이핑)**:
+  - **말하기**: 마이크 녹음 ➔ `gemini-3.5-transcribe` **VERBATIM** 모드로 전사(`/api/gemini/transcribe-final`) ➔ 인식된 문장을 화면에 그대로 보여준 뒤 채점.
+  - **타이핑**: 텍스트 입력창에 작성한 문장 그대로 채점.
+- **엄격한 채점 엔진 (`gemini-3.8-flash`, `/api/quiz/grade`)**:
+  - 채점 규칙: **"핵심 교정 포인트(reason이 고친 부분)가 맞으면 통과."** 사소한 철자(typo), 관사(a/an/the), 구두점, 대소문자 차이는 허용.
+  - 응답 JSON Schema 강제: `{ passed: boolean, feedback: string(한국어 1~2문장), correctAnswer: string }`.
+- **결과 반영 & 1회 재도전 큐**:
+  - **통과 시**: `graduateMistakeAfterQuiz(mistakeId)` 자동 호출 (`status = graduated`, "졸업!" 축하 배지 표시).
+  - **실패 시**: 정답(`correctAnswer`), 이유(`reason`), 과거 오답(`myPhrase`)을 즉시 표시하고, 해당 문항을 오늘 퀴즈 **맨 뒤에 1회 재도전 문항으로 다시 추가**. 재시도도 틀리면 상태를 유지하고 통과.
+  - **퀴즈 기록 저장**: `users/{uid}/quizAttempts` 서브컬렉션에 `{ mistakeId, mode, answer, passed, feedback, createdAt }` 영구 저장.
+- **B-5 연동 보완 (Requirement 5)**:
+  - 복기 파이프라인(`reviewPipeline.ts`)이 복기 AI에 전달하는 복습 대상 목록을 `status == 'reviewing'` 뿐만 아니라 **`reviewing` + `deferred`**로 확장하여, 보류 상태의 실수도 통화 중 자연스럽게 사용하면 빠른 졸업(`usedCorrectly`)되도록 연동.
+- **규정 준수**: 수동 졸업 버튼 배제, 아침 강의(B-7) 미연결 시 홈 진입만 제공, 말해보카 등 상표 및 문제 복제 금지.
 
 ### 📌 [Phase 2: B-5 간격 반복과 졸업 (2-A) 완성]
 - **실수 간격 반복 모델 (mistakes 컬렉션)**:

@@ -4,6 +4,41 @@
 
 ---
 
+### [2026-10-13 KST] v2.6.0 — [작업 지시서 6] 2-B 퀴즈 — 가이드 B-6 완료
+- **문제 원인 및 기획 의도 (Context & Motivation)**:
+  - B-5 간격 반복(1→3→7→14일) 단계에서 누적된 복습 대상 실수를 플래시카드 퀴즈로 능동 인출(Active Recall)하고 졸업(Graduation)시킬 수 있는 카드형 퀴즈 엔진 구현.
+  - 학습자의 발화 편의성을 위해 음성(말하기, `gemini-3.5-transcribe` VERBATIM) 및 텍스트(타이핑) 두 가지 모드를 지원하고, `gemini-3.8-flash` 기반의 엄격하면서도 합리적인 의미 기반 채점 로직 구축.
+  - 오답 기억 왜곡을 방지하기 위해 정답 확인 전에는 과거 오답(`myPhrase`)을 은닉하고, 실패 시 1회 재도전 큐를 제공하여 학습 효과 극대화.
+- **적용된 수정 내역 (Applied Changes)**:
+  1. **퀴즈 대상 산출 및 홈 화면 연동 (`HomeScreen.tsx`, `getDueMistakes`)**:
+     - `getDueMistakes(today)` 결과를 그대로 사용하여 보류(`deferred`) 실수가 최우선 맨 앞에 정렬.
+     - 하루 최대 10개 제한(`Math.min(dueMistakes.length, 10)`).
+     - 홈 화면 간격 반복 카드 내 "오늘 복습 N개" 옆에 "오늘 퀴즈 N개" 카운터 및 "퀴즈 풀기" 버튼 배치.
+  2. **카드형 플래시카드 & 즉시 피드백 인터페이스 (`src/ui/quiz/QuizModal.tsx`)**:
+     - **카드 앞면**: 원어민 표현의 한국어 뜻(`meaningKo`) + 한 줄 이유(`reason`) 힌트 노출.
+     - **한국어 뜻 자동 생성 및 Firestore 영구 저장**: 실수 문서에 `meaningKo` 필드가 없으면 퀴즈 시작 시 `gemini-3.8-flash`(`/api/quiz/meaning-ko`)로 한 번 번역 생성 후 Firestore `mistakes/{id}.meaningKo`에 저장하여 재사용 (`updateMistakeMeaningKo`).
+     - **과거 오답 은닉**: 학습자가 과거 통화에서 했던 오답(`myPhrase`)은 채점 및 정답 확인 뒤에만 노출.
+  3. **말하기 vs 타이핑 2가지 입력 모드**:
+     - **말하기 모드**: Web Audio 녹음 ➔ `POST /api/gemini/transcribe-final` (`gemini-3.5-transcribe`, VERBATIM) 전사 ➔ 받아쓴 문장을 화면에 "인식된 발화 (VERBATIM): ..."로 그대로 노출 ➔ 즉시 채점.
+     - **타이핑 모드**: 텍스트 입력창 ➔ 제출 시 입력한 문장 그대로 채점.
+  4. **채점 서버 API (`/api/quiz/grade`, `gemini-3.8-flash`)**:
+     - 프롬프트 지침: "핵심 교정 포인트(reason이 고친 부분)가 맞으면 통과(passed: true). 사소한 철자(typo), 관사(a/an/the), 구두점, 대소문자 차이는 허용."
+     - 응답 스키마(JSON Schema): `{ passed: boolean, feedback: string(한국어 1~2문장), correctAnswer: string }`.
+  5. **결과 반영 & 1회 재도전 로직**:
+     - **통과**: `graduateMistakeAfterQuiz(userId, mistakeId)` 호출 (`status = 'graduated'`), 카드에 "졸업!" 축하 배지 및 통계 갱신.
+     - **실패**: 정답, 이유, 과거 오답을 즉시 노출하고, 해당 문항을 오늘 퀴즈 **맨 뒤에 1회 재도전 문항(`isRetry: true`)으로 다시 추가**. 재도전도 틀리면 상태는 그대로 유지하고 다음으로 진행.
+     - **퀴즈 시도 기록 영구 보존**: Firestore `users/{uid}/quizAttempts` 서브컬렉션에 `{ mistakeId, mode, answer, passed, feedback, createdAt }` 기록 (`saveQuizAttempt`).
+  6. **B-5 잔여 연동 확장 (`reviewPipeline.ts`, Requirement 5)**:
+     - 복기 파이프라인에서 복기 AI에 전달하는 복습 대상 실수 필터를 `status == 'reviewing'`뿐만 아니라 **`reviewing` + `deferred`**로 확장하여, 보류 상태의 실수도 통화 중 자연스럽게 맞게 쓰면 빠른 졸업(`usedCorrectly`)되도록 연동.
+  7. **엄격한 규칙 준수**:
+     - 수동 졸업 버튼 배제, 아침 강의(B-7) 미연결 시 홈 진입만 제공, 말해보카 등 상표 및 문제 복제 금지.
+- **방어 조치 및 호환성 (Safety & Guardrails)**:
+  - 기존 Live 직접연결·중계·세션 재개·10초 청크 녹음·B-4 복기 경로 100% 무변경 유지.
+  - `src/config/models.ts` 모델명 및 Firebase 단일 계정 화이트리스트(`episode.kim@gmail.com`) 불변 유지.
+  - 빌드 버전 `20261013-multilingual-1652` 동기화.
+
+---
+
 ### [2026-10-13 KST] v2.5.0 — [작업 지시서 5] 2-A 간격 반복과 졸업 — 가이드 B-5 완료
 - **문제 원인 및 기획 의도 (Context & Motivation)**:
   - 오답 분석을 통해 수집된 실수를 망각 곡선에 따라 체계적으로 장기 기억화하기 위해, 1일 ➔ 3일 ➔ 7일 ➔ 14일 간격 반복(Spaced Repetition) 단계 시스템과 졸업/보류/재학습 라이프사이클 구현.

@@ -29,7 +29,9 @@ import {
   CheckCircle2,
   AlertCircle,
   Loader2,
+  Play,
 } from "lucide-react";
+import { QuizModal } from "../quiz/QuizModal";
 
 interface HomeScreenProps {
   user: User;
@@ -61,6 +63,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const [showDebugSection, setShowDebugSection] = useState<boolean>(false);
   const [advancingId, setAdvancingId] = useState<string | null>(null);
   const [debugToast, setDebugToast] = useState<string | null>(null);
+  const [showQuizModal, setShowQuizModal] = useState<boolean>(false);
 
   const loadMistakes = async () => {
     try {
@@ -206,27 +209,43 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               </div>
               <div>
                 <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold text-amber-400">간격 반복 복습 (B-5)</span>
+                  <span className="text-xs font-bold text-amber-400">간격 반복 & 퀴즈 (B-5·B-6)</span>
                   <span className="text-[11px] text-slate-400">
                     보류 {dueMistakes.filter((m) => m.status === "deferred").length}개 · 오늘 복습 대상 {dueMistakes.filter((m) => m.status === "reviewing").length}개
                   </span>
                 </div>
-                <div className="text-xl sm:text-2xl font-black text-white mt-0.5 flex items-center gap-2">
-                  <span>오늘 복습</span>
-                  <span className="text-amber-400 font-mono underline decoration-amber-400/30">
-                    {dueMistakes.length}개
-                  </span>
+                <div className="flex flex-wrap items-center gap-3 sm:gap-4 mt-1">
+                  <div className="text-xl sm:text-2xl font-black text-white flex items-center gap-1.5">
+                    <span>오늘 복습</span>
+                    <span className="text-amber-400 font-mono underline decoration-amber-400/30">
+                      {dueMistakes.length}개
+                    </span>
+                  </div>
+                  <div className="text-xl sm:text-2xl font-black text-white flex items-center gap-1.5 border-l border-slate-700/80 pl-3 sm:pl-4">
+                    <span>오늘 퀴즈</span>
+                    <span className="text-emerald-400 font-mono">
+                      {Math.min(dueMistakes.length, 10)}개
+                    </span>
+                  </div>
                 </div>
               </div>
             </div>
 
-            <div className="flex items-center gap-2 self-start sm:self-auto">
+            <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+              <button
+                onClick={() => setShowQuizModal(true)}
+                disabled={dueMistakes.length === 0}
+                className="px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 text-xs font-black flex items-center gap-1.5 shadow-md shadow-amber-500/20 transition-all cursor-pointer active:scale-95"
+              >
+                <Play className="w-3.5 h-3.5 fill-current" />
+                <span>퀴즈 풀기 ({Math.min(dueMistakes.length, 10)}개)</span>
+              </button>
               <button
                 onClick={() => setShowDebugSection(!showDebugSection)}
-                className="px-3 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer border border-slate-700/60"
+                className="px-3 py-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer border border-slate-700/60"
               >
                 <Wrench className="w-3.5 h-3.5 text-amber-400" />
-                <span>{showDebugSection ? "디버그 닫기" : "임시 디버그: 단계 진행"}</span>
+                <span>{showDebugSection ? "디버그 닫기" : "임시 디버그"}</span>
               </button>
             </div>
           </div>
@@ -572,6 +591,19 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {/* B-6 Spaced Repetition Quiz Modal */}
+      {showQuizModal && (
+        <QuizModal
+          user={user}
+          dueMistakes={dueMistakes}
+          isOpen={showQuizModal}
+          onClose={() => setShowQuizModal(false)}
+          onFinished={() => {
+            loadMistakes();
+          }}
+        />
       )}
     </div>
   );

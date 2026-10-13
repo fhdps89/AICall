@@ -1,7 +1,7 @@
 # 📖 프로젝트 컨텍스트 및 히스토리 (Project Context)
 
 > **프로젝트**: 「오늘도 한 통」 (One Call English) — AI 1:1 전화영어 올인원 랩  
-> **현재 버전**: `v2.5.0` | **공식 빌드 버전**: `20261013-multilingual-1632` | **최종 갱신**: 2026-10-13 (KST)  
+> **현재 버전**: `v2.6.0` | **공식 빌드 버전**: `20261013-multilingual-1652` | **최종 갱신**: 2026-10-13 (KST)  
 > **관리 규칙**: `README.md` 변경 시 본 문서의 아키텍처 및 히스토리를 함께 최신화하며, 모든 일시는 한국 표준시(KST)를 기준으로 합니다.
 
 ---
@@ -12,17 +12,26 @@
 
 ---
 
-## 2. 모델 인프라 구성 (Part B-1 ~ B-5 확정 사양)
+## 2. 모델 인프라 구성 (Part B-1 ~ B-6 확정 사양)
 - **실시간 통화 (Live)**: `LIVE_MODEL = "gemini-3.8-live"`
-- **통화 복기 & 퀴즈·코치 (Text)**: `TEXT_MODEL = "gemini-3.8-flash"`
-- **기록용 받아쓰기 & 1분 임시 전사 (STT)**: `STT_ENGINE = "gemini"` (`gemini-3.5-transcribe`, 모드 `VERBATIM`) / 비실시간 대안 `universal-3-5-pro` (AssemblyAI)
+- **통화 복기 & 퀴즈 채점·코치 (Text)**: `TEXT_MODEL = "gemini-3.8-flash"`
+- **기록용 받아쓰기 & 퀴즈 음성 전사 (STT)**: `STT_ENGINE = "gemini"` (`gemini-3.5-transcribe`, 모드 `VERBATIM`) / 비실시간 대안 `universal-3-5-pro` (AssemblyAI)
 - **오디오 합성 (TTS)**: `TTS_ENGINE = "gemini"` (`gemini-3.8-flash-tts` / `gemini-3.8-flash-lite-tts`) / 2인 대화 대안 ElevenLabs
 - **공급자 추상화 레이어 (`src/services/providers/`)**: `LiveProvider`, `SttProvider`, `LlmProvider`, `TtsProvider` 인터페이스 분리.
 
 ---
 
-## 3. 핵심 자동화 아키텍처 (Part B-12 뼈대 & B-2 통화 & B-3 녹음 & B-4 복기 & B-5 간격반복)
-1. **B-5 간격 반복과 졸업 파이프라인 (`db.ts`, `reviewPipeline.ts`, `HomeScreen.tsx`)**:
+## 3. 핵심 자동화 아키텍처 (Part B-12 뼈대 & B-2 통화 & B-3 녹음 & B-4 복기 & B-5 간격반복 & B-6 퀴즈)
+1. **B-6 퀴즈 파이프라인 (`QuizModal.tsx`, `/api/quiz/grade`, `/api/quiz/meaning-ko`, `db.ts`)**:
+   - **퀴즈 대상 풀**: `getDueMistakes(today)` 기준 보류(`deferred`) 항목을 목록 맨 앞 배치, 1일 최대 10개 큐 구성.
+   - **플래시카드 카드 앞면**: 한국어 뜻(`meaningKo`) + 이유(`reason`) 한 줄 힌트. 실수 문서에 뜻이 없으면 `gemini-3.8-flash`로 한 번 생성하여 `mistakes.meaningKo`에 저장 후 재사용.
+   - **과거 오답 은닉**: 내가 과거에 했던 틀린 말(`myPhrase`)은 정답 확인 뒤에만 노출.
+   - **응답 방식**: [말하기](`MediaRecorder` ➔ `gemini-3.5-transcribe` VERBATIM 전사 ➔ 인식 텍스트 그대로 표시 ➔ 채점) 또는 [타이핑].
+   - **채점 기준**: "핵심 교정 포인트(reason이 고친 부분)가 맞으면 통과." 사소한 철자/관사/구두점 차이 허용.
+   - **상태 전이**: 통과 시 `graduateMistakeAfterQuiz`로 즉시 졸업, 실패 시 정답 및 과거 오답을 보여주고 오늘 퀴즈 맨 뒤에 1회 재도전 큐 추가.
+   - **퀴즈 기록 영구 보존**: `users/{uid}/quizAttempts`에 저장.
+   - **복기 AI 연동 확장**: `reviewPipeline.ts`에서 검토 대상 실수를 `reviewing` + `deferred`로 확장하여 보류 실수도 통화 중 맞게 발화 시 빠른 졸업(`usedCorrectly`)되도록 보장.
+2. **B-5 간격 반복과 졸업 파이프라인 (`db.ts`, `reviewPipeline.ts`, `HomeScreen.tsx`)**:
    - **실수 간격 반복 모델**: `stage`(1일→3일→7일→14일), `status`(reviewing | graduated | deferred), `nextReviewAt`(KST YYYY-MM-DD). 신규 실수는 1일차 reviewing, nextReviewAt=내일로 시작.
    - **아침 강의 수강 기반 승급 (`advanceMistakeAfterLesson`)**: reviewing 상태에서 1→3→7→14일로 단계 승급 및 nextReviewAt 계산. 14일차 수강 후 퀴즈 미통과 시 `status = deferred`(보류) 전환.
    - **빠른 졸업 & 재복습 연동 (`applyCallMistakeUpdates`)**: 복기 생성 시 `usedCorrectly`에 매칭된 실수는 퀴즈 없이 즉시 `status = graduated`. `repeatedMistakes`에 매칭된 졸업 실수는 `status = reviewing`, 1일차, 내일로 강등 재학습.

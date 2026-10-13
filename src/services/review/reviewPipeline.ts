@@ -186,7 +186,8 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
 
   try {
     const existing = await getUserMistakes(userId);
-    reviewingMistakes = existing.filter((m) => m.status === "reviewing");
+    // B-6 requirement 5: Include both reviewing and deferred so deferred mistakes can also graduate quickly
+    reviewingMistakes = existing.filter((m) => m.status === "reviewing" || m.status === "deferred");
     graduatedMistakes = existing.filter((m) => m.status === "graduated");
   } catch (err) {
     console.warn("[ReviewPipeline] Could not load user mistakes:", err);
