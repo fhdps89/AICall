@@ -37,7 +37,7 @@ export function getBuildVersion(): string {
     const m = String(mtime.getUTCMinutes()).padStart(2, '0');
     return `${Y}${M}${D}-multilingual-${h}${m}`;
   } catch {
-    return '20261013-multilingual-1502';
+    return '20261013-multilingual-1529';
   }
 }
 
@@ -435,6 +435,165 @@ app.post('/api/gemini/transcribe', async (req: Request, res: Response) => {
       ok: false,
       error: error?.message || '음성 전사 실패',
     });
+  }
+});
+
+// Directory for server-stored chunk fallback
+const RECORDINGS_DIR = path.resolve(__dirname, 'public', 'recordings');
+if (!fs.existsSync(RECORDINGS_DIR)) {
+  fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
+}
+
+// B-3 Requirement 2: 1-minute asynchronous partial transcription via gemini-3.5-transcribe VERBATIM
+app.post('/api/gemini/transcribe-partial', async (req: Request, res: Response) => {
+  const start = performance.now();
+  const { sessionId, userId, minuteIndex, timeRange, audioBase64, mimeType = 'audio/webm', customApiKey } = req.body || {};
+
+  if (!audioBase64 || typeof audioBase64 !== 'string') {
+    res.status(400).json({ ok: false, error: '변환할 오디오 데이터가 없습니다.' });
+    return;
+  }
+
+  const ai = createGenAI(customApiKey);
+  if (!ai) {
+    res.status(500).json({ ok: false, error: 'Gemini 서버 연동이 준비되지 않았습니다.' });
+    return;
+  }
+
+  try {
+    const response = await ai.models.generateContent({
+      model: TRANSCRIBE_MODEL, // gemini-3.5-transcribe
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              data: audioBase64,
+              mimeType,
+            },
+          },
+          {
+            text: '언어: 영어 및 한국어 혼합 대화. 모드: VERBATIM(있는 그대로 음성 전사). 생략, 요약, 문법 교정 없이 화자가 실제로 말한 단어, 감탄사, 망설임, 추임새를 있는 그대로 빠짐없이 정확하게 텍스트로 옮겨 적으시오. 부가 설명이나 서두/결말 문구 없이 전사 결과만 출력하시오.',
+          },
+        ],
+      },
+    });
+
+    const elapsed = Math.round(performance.now() - start);
+    const transcript = response.text?.trim() || '';
+
+    console.log(`[TranscribePartial] 1-min partial transcribe complete for ${timeRange} (${elapsed}ms): "${transcript.slice(0, 50)}..."`);
+    res.json({
+      ok: true,
+      sessionId,
+      minuteIndex,
+      timeRange,
+      transcript,
+      elapsedMs: elapsed,
+    });
+  } catch (error: any) {
+    console.warn('[TranscribePartial] gemini-3.5-transcribe error:', error?.message || error);
+    res.status(500).json({
+      ok: false,
+      error: error?.message || '부분 전사 실패',
+    });
+  }
+});
+
+// In-memory active session tracker for detecting interrupted calls (last chunk > 2 min)
+interface ActiveSessionTracker {
+  sessionId: string;
+  userId: string;
+  lastChunkAt: number;
+  status: 'in-progress' | 'pending_review' | 'done';
+}
+const activeSessionsMap = new Map<string, ActiveSessionTracker>();
+
+// Heartbeat / Chunk registration to track active call sessions
+app.post('/api/sessions/heartbeat', (req: Request, res: Response) => {
+  const { sessionId, userId, status = 'in-progress' } = req.body || {};
+  if (sessionId && userId) {
+    activeSessionsMap.set(sessionId, {
+      sessionId,
+      userId,
+      lastChunkAt: Date.now(),
+      status,
+    });
+  }
+  res.json({ ok: true });
+});
+
+// Periodic watchdog (every 30s): marks active sessions without new chunks for > 2 min as pending_review
+setInterval(() => {
+  const now = Date.now();
+  const TWO_MINUTES_MS = 2 * 60 * 1000;
+
+  for (const [sId, sess] of activeSessionsMap.entries()) {
+    if (sess.status === 'in-progress' && now - sess.lastChunkAt > TWO_MINUTES_MS) {
+      console.warn(`[Watchdog] Session ${sId} timed out (>2min since last chunk). Marking as pending_review.`);
+      sess.status = 'pending_review';
+    }
+  }
+}, 30000);
+
+// Check interrupted sessions status
+app.get('/api/sessions/interrupted-check', (req: Request, res: Response) => {
+  const { userId } = req.query;
+  const interrupted: string[] = [];
+  const now = Date.now();
+  const TWO_MINUTES_MS = 2 * 60 * 1000;
+
+  for (const [sId, sess] of activeSessionsMap.entries()) {
+    if ((!userId || sess.userId === userId) && sess.status === 'in-progress' && now - sess.lastChunkAt > TWO_MINUTES_MS) {
+      sess.status = 'pending_review';
+      interrupted.push(sId);
+    } else if ((!userId || sess.userId === userId) && sess.status === 'pending_review') {
+      interrupted.push(sId);
+    }
+  }
+
+  res.json({ ok: true, interruptedSessionIds: interrupted });
+});
+
+// Resilient chunk upload endpoint (fallback when client Firebase Storage direct upload is restricted)
+app.post('/api/recordings/upload-chunk', express.raw({ type: ['audio/*', 'application/octet-stream'], limit: '20mb' }), (req: Request, res: Response) => {
+  try {
+    const rawBuffer = Buffer.isBuffer(req.body) ? req.body : null;
+    const relPath = String(req.query.path || req.headers['x-chunk-path'] || `chunk_${Date.now()}.webm`);
+    const safePath = path.resolve(RECORDINGS_DIR, relPath.replace(/[^a-zA-Z0-9_\-\.\/]/g, '_'));
+    const safeDir = path.dirname(safePath);
+
+    if (!fs.existsSync(safeDir)) {
+      fs.mkdirSync(safeDir, { recursive: true });
+    }
+
+    if (rawBuffer && rawBuffer.length > 0) {
+      fs.writeFileSync(safePath, rawBuffer);
+    }
+
+    const fileUrl = `/api/recordings/file?path=${encodeURIComponent(relPath)}`;
+    res.json({
+      ok: true,
+      url: fileUrl,
+      path: relPath,
+      sizeBytes: rawBuffer?.length || 0,
+    });
+  } catch (err: any) {
+    console.error('[UploadChunk] Server chunk upload error:', err);
+    res.status(500).json({ ok: false, error: err?.message || 'Upload failed' });
+  }
+});
+
+app.get('/api/recordings/file', (req: Request, res: Response) => {
+  const relPath = String(req.query.path || '');
+  if (!relPath) {
+    res.status(400).send('Path parameter is required');
+    return;
+  }
+  const safePath = path.resolve(RECORDINGS_DIR, relPath.replace(/[^a-zA-Z0-9_\-\.\/]/g, '_'));
+  if (fs.existsSync(safePath)) {
+    res.sendFile(safePath);
+  } else {
+    res.status(404).send('Audio file not found');
   }
 });
 

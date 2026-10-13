@@ -4,6 +4,38 @@
 
 ---
 
+### [2026-10-13 KST] v2.3.0 — [작업 지시서 3] 1-C 통화 중 녹음 (끊김 대비) — 가이드 B-3 완료
+- **문제 원인 및 기획 의도 (Context & Motivation)**:
+  - 모바일 웹앱 환경에서 화면 꺼짐, 네트워크 순단, 브라우저 탭 닫힘 등으로 인해 Live 연결이 끊기더라도 학생의 음성과 대화 맥락이 유실되지 않도록 이중 안전망 구축 필요.
+  - 10초 단위 로컬 우선(Local-First IndexedDB) 저장 후 클라우드 스토리지 전송, 세션 재개 실패 시 대화 요약 자동 주입, 미완료 통화 자동 복기 감지 파이프라인 구현.
+- **적용된 수정 내역 (Applied Changes)**:
+  1. **마이크 청크 녹음 파이프라인 (`chunkIndexedDb.ts`, `chunkRecorder.ts`)**:
+     - `MediaRecorder`를 활용하여 마이크 음성을 독립적으로 **10초** 조각으로 분할 녹음.
+     - 각 조각을 IndexedDB(`OneCallRecordingsDB`의 `pending_chunks`)에 먼저 즉시 영구 저장 후 Cloud Storage(`uploadAudioFile`)로 업로드.
+     - 업로드 성공 시 IndexedDB에서 해당 조각 삭제(순단 시 보존 및 백그라운드 재시도).
+     - Live 소켓 재연결/GoAway/프록시 전환과 완전 분리되어 녹음이 끊김 없이 연속 진행.
+  2. **통화 중 1분 단위 임시 받아쓰기 (`server.ts`, `/api/gemini/transcribe-partial`)**:
+     - 녹음이 6조각(~60초) 쌓일 때마다 서버가 비동기로 `gemini-3.5-transcribe` **VERBATIM** 모드로 전사하여 Firestore `sessions.sttPartial`에 누적 기록.
+     - 실시간 Live 대화와 별도 비동기로 동작하며 환경 설정(SettingsModal)에서 On/Off 토글 지원.
+  3. **Live 대화 로그 지속 저장 & 세션 재개 실패 대비 (`geminiLiveProvider.ts`, `db.ts`)**:
+     - Live 대화 턴이 발생할 때마다 실시간으로 Firestore `sessions.liveTranscript`에 동기화.
+     - 세션 재개 handle이 거부/실패할 경우, 그때까지의 대화 히스토리 요약을 새 세션 시스템 프롬프트에 자동 주입하여 튜터가 맥락을 잃지 않고 대화를 연속하도록 안전망 구축.
+  4. **끊긴 통화 자동 처리 및 복구 모달 (`server.ts`, `UnfinishedSessionModal.tsx`, `App.tsx`)**:
+     - 마지막 조각 이후 **2분** 동안 새 조각이 인입되지 않으면 서버 워치독 및 클라이언트가 끊긴 통화로 판정하여 `pending_review`("복기 대기")로 상태 자동 전환.
+     - 사용자가 앱을 닫았다가 다시 열면 **"끝나지 않은 통화가 있어요. 복기할까요?"** 복구 모달 표시.
+  5. **화면 안내 및 Screen Wake Lock (`NewCallScreen.tsx`)**:
+     - 통화 화면 상단에 **"통화 중에는 화면을 켜 두세요"** 안내 배너 및 10초 녹음 조각 카운터/보존 상태 표시.
+     - Screen Wake Lock API(`navigator.wakeLock.request('screen')`) 자동 요청.
+  6. **세션 메타데이터 & 스토리지 보관함 인스펙터 (`db.ts`, `firebase-blueprint.json`, `SettingsModal.tsx`)**:
+     - `sessions.recordingChunks`에 각 조각의 index, path, storageUrl, timestamp, uploaded, durationSeconds 저장.
+     - 설정 모달 내 "녹음 보관함 (Storage Chunks)" 탭을 신설하여 실제 저장된 10초 파일 목록과 1분 부분 전사 기록을 바로 검증할 수 있도록 지원.
+- **방어 조치 및 호환성 (Safety & Guardrails)**:
+  - `src/config/models.ts` 모델명 절대 불변 준수(`gemini-3.8-live`, `gemini-3.5-transcribe` VERBATIM).
+  - 허용 계정(`episode.kim@gmail.com`) 인증 규칙 및 CORS, 스토리지 폴백 보존.
+  - 빌드 버전 `20261013-multilingual-1529` KST 동기화.
+
+---
+
 ### [2026-10-13 KST] v2.2.1 — [수정 지시서 2-1] 브라우저 직접 연결 고치기 (B-2 직접 연결 파이프라인 최적화)
 - **문제 원인 분석 (Root Cause)**:
   - 기존 직접 연결 엔드포인트 URL이 `BidiGenerateContent?key=토큰` 형태로 지정되어 임시 토큰 인증 규격과 불일치(403/거절 발생 시 중계로 넘어감).

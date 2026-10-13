@@ -45,12 +45,14 @@ export class GeminiLiveProvider implements LiveProvider {
 
   // Transcript memory
   private transcriptItems: LiveTranscriptItem[] = [];
+  private activeSystemPrompt: string = "";
 
   // Reconnect timer
   private reconnectTimer: NodeJS.Timeout | null = null;
 
   public async connect(options: LiveSessionOptions): Promise<void> {
     this.options = options;
+    this.activeSystemPrompt = options.systemPrompt;
     this.options.onStatusChange("connecting", "Gemini Live 연결 준비 중...");
 
     if (options.resumeToken) {
@@ -162,7 +164,7 @@ export class GeminiLiveProvider implements LiveProvider {
               },
             },
             systemInstruction: {
-              parts: [{ text: this.options?.systemPrompt || "" }],
+              parts: [{ text: this.activeSystemPrompt || this.options?.systemPrompt || "" }],
             },
             inputAudioTranscription: {},
             outputAudioTranscription: {},
@@ -222,7 +224,7 @@ export class GeminiLiveProvider implements LiveProvider {
         socket.send(
           JSON.stringify({
             type: "init",
-            systemInstruction: this.options?.systemPrompt,
+            systemInstruction: this.activeSystemPrompt || this.options?.systemPrompt,
             voiceName: this.options?.voiceName || "Kore",
             resumeHandle: this.resumeHandle,
             languageCode: "en-US",
@@ -413,25 +415,59 @@ export class GeminiLiveProvider implements LiveProvider {
         console.log("[Live] Reconnecting... resume handle:", this.resumeHandle);
         await this.establishConnection();
       } catch (err) {
-        console.error("[Live] Reconnection attempt failed, retrying in 3s:", err);
+        console.error("[Live] Reconnection attempt failed with handle:", this.resumeHandle, err);
+        // B-3 Requirement 3: If session resumption fails, summarize dialogue so far and inject into new session system prompt
+        if (this.resumeHandle) {
+          console.warn("[Live] Session resumption failed. Rebuilding session prompt with conversation summary...");
+          this.resumeHandle = null;
+          this.activeSystemPrompt = this.buildConversationSummaryPrompt();
+          try {
+            await this.establishConnection();
+            return;
+          } catch (retryErr) {
+            console.error("[Live] Fallback session creation also failed:", retryErr);
+          }
+        }
         this.isReconnecting = false;
         this.reconnectTimer = setTimeout(() => this.triggerReconnection(), 3000);
       }
     }, 1000);
   }
 
+  /**
+   * Build conversation history summary to inject into system prompt if resumption fails
+   */
+  private buildConversationSummaryPrompt(): string {
+    const basePrompt = this.options?.systemPrompt || "";
+    if (!this.transcriptItems || this.transcriptItems.length === 0) {
+      return basePrompt;
+    }
+    const recentTurns = this.transcriptItems.slice(-10);
+    const summary = recentTurns
+      .map((item) => `${item.role === "user" ? "Student" : "Tutor"}: ${item.text}`)
+      .join("\n");
+
+    return `${basePrompt}\n\n[이전 대화 맥락 복원: 이전 세션 연결이 끊겨 새 세션으로 자동 전환되었습니다. 아래 이전 대화 내용을 숙지하고 학생에게 끊김 없이 자연스럽게 대화를 이어가세요]:\n${summary}`;
+  }
+
   private appendTranscript(role: "user" | "model", text: string): void {
     if (!text || !text.trim()) return;
     const last = this.transcriptItems[this.transcriptItems.length - 1];
+    let updatedItem: LiveTranscriptItem;
     if (last && last.role === role) {
       last.text += " " + text.trim();
+      updatedItem = last;
     } else {
-      this.transcriptItems.push({
+      updatedItem = {
         role,
         text: text.trim(),
         timestamp: Date.now(),
-      });
+      };
+      this.transcriptItems.push(updatedItem);
     }
+
+    // Continuous transcript callback (B-3 requirement 3)
+    this.options?.onTranscriptLogged?.(updatedItem, [...this.transcriptItems]);
   }
 
   public getLiveTranscript(): LiveTranscriptItem[] {
@@ -440,6 +476,10 @@ export class GeminiLiveProvider implements LiveProvider {
 
   public getResumeToken(): string | null {
     return this.resumeHandle;
+  }
+
+  public getMediaStream(): MediaStream | null {
+    return this.mediaStream;
   }
 
   public getConnectionStats(): { connectionPath: "direct" | "proxy"; directFailCount: number } {
@@ -537,6 +577,8 @@ export class GeminiLiveProvider implements LiveProvider {
         autoGainControl: true,
       },
     });
+
+    this.options?.onMediaStreamReady?.(this.mediaStream);
 
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
     this.inputAudioCtx = new AudioContextClass({ sampleRate: 16000 });

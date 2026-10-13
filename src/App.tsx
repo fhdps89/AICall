@@ -14,8 +14,10 @@ import {
   getUserGoals,
   batchInitGoals,
   updateGoalProgress,
+  getUnfinishedSessions,
   GoalData,
   UserProfileData,
+  SessionData,
 } from "./services/firebase/db";
 import { DEFAULT_GOALS } from "./data/defaultGoals";
 import {
@@ -27,6 +29,7 @@ import { db } from "./services/firebase/config";
 import { LoginScreen } from "./ui/auth/LoginScreen";
 import { HomeScreen } from "./ui/home/HomeScreen";
 import { NewCallScreen } from "./ui/call/NewCallScreen";
+import { UnfinishedSessionModal } from "./ui/call/UnfinishedSessionModal";
 import { InitialProgressModal } from "./ui/onboarding/InitialProgressModal";
 import { SettingsModal } from "./ui/settings/SettingsModal";
 import { LiveTranscriptItem } from "./services/providers/types";
@@ -45,6 +48,10 @@ export const App: React.FC = () => {
   // Modals
   const [showInitialProgressModal, setShowInitialProgressModal] = useState<boolean>(false);
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
+
+  // Unfinished session state (B-3 requirement 4)
+  const [unfinishedSessions, setUnfinishedSessions] = useState<SessionData[]>([]);
+  const [showUnfinishedModal, setShowUnfinishedModal] = useState<boolean>(false);
 
   // Placeholders for prompts
   const [placeholders, setPlaceholders] = useState<PromptPlaceholders>(DEFAULT_PROMPT_PLACEHOLDERS);
@@ -124,6 +131,17 @@ export const App: React.FC = () => {
         // Check if first-run progress setup is needed
         if (!profile.initialProgressConfigured) {
           setShowInitialProgressModal(true);
+        }
+
+        // Check if there are interrupted / unfinished sessions (B-3 requirement 4)
+        try {
+          const unfinished = await getUnfinishedSessions(user.uid);
+          if (unfinished.length > 0) {
+            setUnfinishedSessions(unfinished);
+            setShowUnfinishedModal(true);
+          }
+        } catch (sessErr) {
+          console.warn("Could not check unfinished sessions:", sessErr);
         }
       } catch (err) {
         console.error("Failed to load user data from Firestore:", err);
@@ -237,13 +255,15 @@ export const App: React.FC = () => {
     );
   }
 
-  // 4. Live Call View (B-2)
-  if (activeCallGoal) {
+  // 4. Live Call View (B-2 & B-3)
+  if (activeCallGoal && user) {
     return (
       <NewCallScreen
+        userId={user.uid}
         goal={activeCallGoal}
         lessonIndex={activeCallLesson}
         placeholders={placeholders}
+        enablePartialTranscribe={(userProfile as any)?.enablePartialTranscribe !== false}
         onEndCall={handleEndCall}
       />
     );
@@ -262,6 +282,20 @@ export const App: React.FC = () => {
         onLogout={handleLogout}
       />
 
+      {/* Unfinished Session Modal (B-3 requirement 4) */}
+      {showUnfinishedModal && unfinishedSessions.length > 0 && user && (
+        <UnfinishedSessionModal
+          userId={user.uid}
+          unfinishedSessions={unfinishedSessions}
+          onClose={() => setShowUnfinishedModal(false)}
+          onResolved={async () => {
+            setShowUnfinishedModal(false);
+            const remaining = await getUnfinishedSessions(user.uid);
+            setUnfinishedSessions(remaining);
+          }}
+        />
+      )}
+
       {/* Initial Progress Modal on First Run */}
       {showInitialProgressModal && (
         <InitialProgressModal
@@ -272,6 +306,7 @@ export const App: React.FC = () => {
 
       {/* Settings Modal */}
       <SettingsModal
+        userId={user.uid}
         isOpen={showSettingsModal}
         onClose={() => setShowSettingsModal(false)}
         placeholders={placeholders}

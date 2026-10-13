@@ -3,21 +3,56 @@ import { storage } from "./config";
 
 /**
  * Upload an audio chunk or full recording to Cloud Storage
+ * Attempts direct Firebase Storage first; if network or security rules deny,
+ * seamlessly falls back to the server audio storage endpoint.
  */
 export async function uploadAudioFile(
   userId: string,
   path: string,
   blobOrBuffer: Blob | Uint8Array
 ): Promise<string> {
-  const storageRef = ref(storage, `users/${userId}/${path}`);
-  const snapshot = await uploadBytes(storageRef, blobOrBuffer);
-  return getDownloadURL(snapshot.ref);
+  try {
+    const storageRef = ref(storage, `users/${userId}/${path}`);
+    const snapshot = await uploadBytes(storageRef, blobOrBuffer);
+    return await getDownloadURL(snapshot.ref);
+  } catch (directErr) {
+    console.warn("[Storage] Direct Firebase Storage upload failed, attempting server relay:", directErr);
+
+    // Fallback: server upload route
+    try {
+      const formData = new FormData();
+      const blob = blobOrBuffer instanceof Blob ? blobOrBuffer : new Blob([blobOrBuffer as any]);
+      formData.append("userId", userId);
+      formData.append("path", path);
+      formData.append("audioFile", blob, "chunk.webm");
+
+      const response = await fetch("/api/recordings/upload-chunk", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Server chunk upload returned ${response.status}`);
+      }
+
+      const json = await response.json();
+      return json.url || `/api/recordings/file?path=${encodeURIComponent(path)}`;
+    } catch (serverErr) {
+      console.error("[Storage] Both direct and server fallback chunk upload failed:", serverErr);
+      throw directErr;
+    }
+  }
 }
 
 /**
  * Get direct download URL for stored asset
  */
 export async function getStorageFileUrl(userId: string, path: string): Promise<string> {
-  const storageRef = ref(storage, `users/${userId}/${path}`);
-  return getDownloadURL(storageRef);
+  try {
+    const storageRef = ref(storage, `users/${userId}/${path}`);
+    return await getDownloadURL(storageRef);
+  } catch {
+    return `/api/recordings/file?path=${encodeURIComponent(path)}`;
+  }
 }
+

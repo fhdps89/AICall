@@ -1,9 +1,15 @@
 import React, { useState, useEffect, useRef } from "react";
-import { GoalData } from "../../services/firebase/db";
+import {
+  GoalData,
+  createCallSession,
+  finalizeCallSession,
+  updateSessionLiveTranscript,
+} from "../../services/firebase/db";
 import { PromptPlaceholders } from "../../data/promptCustomizer";
 import { buildTodayLessonSystemPrompt } from "../../data/lessonPromptBuilder";
 import { getLiveProvider } from "../../services/providers";
 import { LiveCommand, LiveTranscriptItem } from "../../services/providers/types";
+import { getChunkRecorder } from "../../services/recording/chunkRecorder";
 import {
   PhoneOff,
   Mic,
@@ -14,31 +20,42 @@ import {
   Pause,
   Clock,
   Shield,
-  HelpCircle,
+  Smartphone,
+  Disc3,
+  FileAudio,
 } from "lucide-react";
 
 interface NewCallScreenProps {
+  userId?: string;
   goal: GoalData;
   lessonIndex: number;
   placeholders: PromptPlaceholders;
+  enablePartialTranscribe?: boolean;
   onEndCall: (
     transcript: LiveTranscriptItem[],
-    stats?: { connectionPath: "direct" | "proxy"; directFailCount: number }
+    stats?: { connectionPath: "direct" | "proxy"; directFailCount: number },
+    sessionId?: string
   ) => void;
 }
 
 export const NewCallScreen: React.FC<NewCallScreenProps> = ({
+  userId,
   goal,
   lessonIndex,
   placeholders,
+  enablePartialTranscribe = true,
   onEndCall,
 }) => {
+  const sessionIdRef = useRef<string>(`call-${Date.now()}`);
   const [status, setStatus] = useState<"connecting" | "connected" | "reconnecting" | "closed" | "error">("connecting");
   const [statusMessage, setStatusMessage] = useState<string>("튜터 연결 준비 중...");
   const [transcripts, setTranscripts] = useState<LiveTranscriptItem[]>([]);
   const [callDuration, setCallDuration] = useState<number>(0);
   const [isSpeakingModel, setIsSpeakingModel] = useState<boolean>(false);
   const [lastAction, setLastAction] = useState<string | null>(null);
+  const [chunkCount, setChunkCount] = useState<number>(0);
+  const [wakeLockActive, setWakeLockActive] = useState<boolean>(false);
+  const [lastPartialSnippet, setLastPartialSnippet] = useState<string | null>(null);
 
   const transcriptsEndRef = useRef<HTMLDivElement>(null);
   const providerRef = useRef(getLiveProvider());
@@ -50,10 +67,42 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
     title: `${lessonIndex}과`,
   };
 
-  // 1. Connect on Mount
+  // Screen Wake Lock (B-3 requirement 5)
+  useEffect(() => {
+    let sentinel: any = null;
+    const requestWakeLock = async () => {
+      if (typeof navigator !== "undefined" && "wakeLock" in navigator && (navigator as any).wakeLock?.request) {
+        try {
+          sentinel = await (navigator as any).wakeLock.request("screen");
+          setWakeLockActive(true);
+          console.log("[NewCallScreen] Screen Wake Lock acquired");
+        } catch (err) {
+          console.warn("[NewCallScreen] Screen Wake Lock not available:", err);
+        }
+      }
+    };
+    requestWakeLock();
+    return () => {
+      if (sentinel) {
+        sentinel.release().catch(() => {});
+      }
+    };
+  }, []);
+
+  // 1. Initialize session and connect on mount
   useEffect(() => {
     let isCancelled = false;
     const provider = providerRef.current;
+    const currentSessionId = sessionIdRef.current;
+
+    // Create session document in Firestore
+    if (userId) {
+      createCallSession(userId, currentSessionId, {
+        goalId: goal.id,
+        lessonIndex,
+        connectionPath: "direct",
+      }).catch((err) => console.warn("[NewCallScreen] createCallSession error:", err));
+    }
 
     const systemPrompt = buildTodayLessonSystemPrompt(
       goal,
@@ -64,8 +113,36 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
 
     provider
       .connect({
-        sessionId: `call-${Date.now()}`,
+        sessionId: currentSessionId,
         systemPrompt,
+        onMediaStreamReady: (stream) => {
+          if (isCancelled || !userId) return;
+          console.log("[NewCallScreen] MediaStream ready, starting 10s chunk recorder...");
+          const chunkRecorder = getChunkRecorder();
+          chunkRecorder.start(stream, {
+            userId,
+            sessionId: currentSessionId,
+            enablePartialTranscribe,
+            onChunkRecorded: () => {
+              if (isCancelled) return;
+              setChunkCount((prev) => prev + 1);
+              // Send heartbeat to server watchdog (B-3 requirement 4)
+              fetch("/api/sessions/heartbeat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  sessionId: currentSessionId,
+                  userId,
+                  status: "in-progress",
+                }),
+              }).catch(() => {});
+            },
+            onPartialStt: (stt) => {
+              if (isCancelled) return;
+              setLastPartialSnippet(stt.transcript);
+            },
+          });
+        },
         onAudioData: () => {
           if (isCancelled) return;
           setIsSpeakingModel(true);
@@ -87,6 +164,12 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
             }
             return [...prev, { role, text: text.trim(), timestamp: Date.now() }];
           });
+        },
+        onTranscriptLogged: (_item, allTranscripts) => {
+          // B-3 Requirement 3: Continuous live transcript saving to Firestore
+          if (userId && !isCancelled) {
+            updateSessionLiveTranscript(userId, currentSessionId, allTranscripts).catch(() => {});
+          }
         },
         onStatusChange: (newStatus, msg) => {
           if (isCancelled) return;
@@ -114,9 +197,10 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
       isCancelled = true;
       if (timerRef.current) clearInterval(timerRef.current);
       if (modelSpeakingTimeoutRef.current) clearTimeout(modelSpeakingTimeoutRef.current);
+      getChunkRecorder().stop().catch(() => {});
       provider.disconnect().catch(() => {});
     };
-  }, [goal, lessonIndex, placeholders]);
+  }, [userId, goal, lessonIndex, placeholders, enablePartialTranscribe]);
 
   // Auto-scroll transcripts
   useEffect(() => {
@@ -132,10 +216,22 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
 
   // Handle End Call
   const handleHangUp = async () => {
+    const chunkRecorder = getChunkRecorder();
+    await chunkRecorder.stop();
+
     const finalTranscripts = providerRef.current.getLiveTranscript();
     const stats = providerRef.current.getConnectionStats();
+
+    if (userId) {
+      await finalizeCallSession(userId, sessionIdRef.current, {
+        liveTranscript: finalTranscripts,
+        connectionPath: stats.connectionPath,
+        directFailCount: stats.directFailCount,
+      }).catch((err) => console.warn("[NewCallScreen] finalizeCallSession error:", err));
+    }
+
     await providerRef.current.disconnect();
-    onEndCall(finalTranscripts, stats);
+    onEndCall(finalTranscripts, stats, sessionIdRef.current);
   };
 
   const formatTime = (seconds: number) => {
@@ -190,6 +286,34 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
 
       {/* Main Conversation Stream */}
       <main className="flex-1 max-w-2xl w-full mx-auto p-4 sm:p-6 overflow-y-auto space-y-4">
+        {/* Screen Keep-On & 10s Chunk Recording Notice (B-3 Requirement 1, 5, 6) */}
+        <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-start gap-2.5 text-xs text-amber-200 shadow-sm">
+          <Smartphone className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-bold text-amber-300">통화 중에는 화면을 켜 두세요</span>
+              <div className="flex items-center gap-1 font-mono text-[10px] text-emerald-400 bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 rounded-full shrink-0">
+                <Disc3 className={`w-3 h-3 ${chunkCount > 0 ? "animate-spin" : ""}`} />
+                <span>
+                  {chunkCount > 0
+                    ? `10초 녹음 ${chunkCount}조각 (${Math.round((chunkCount * 10) / 60)}분)`
+                    : "10초 분할 녹음 대기"}
+                </span>
+              </div>
+            </div>
+            <p className="text-[11px] text-slate-400 mt-0.5 leading-snug">
+              화면이 꺼지면 브라우저 정책상 마이크 녹음이 멈출 수 있습니다. 모든 대화는 10초 조각으로 IndexedDB 및 Cloud Storage에 실시간 보존됩니다.
+              {wakeLockActive ? " (화면 꺼짐 방지 활성)" : ""}
+            </p>
+            {lastPartialSnippet && (
+              <div className="mt-1.5 pt-1.5 border-t border-amber-500/20 text-[10px] text-amber-300/80 truncate">
+                <span className="font-bold text-amber-400 mr-1">[1분 전사]:</span>
+                {lastPartialSnippet}
+              </div>
+            )}
+          </div>
+        </div>
+
         {/* Reconnect notice banner */}
         {status === "reconnecting" && (
           <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs text-center font-medium animate-pulse">

@@ -57,13 +57,15 @@
     },
     "Session": {
       "title": "Session",
-      "description": "Call session record with live transcript, connection telemetry, and review data",
+      "description": "Call session record with live transcript, audio recording chunks, partial STT, and connection telemetry",
       "type": "object",
       "properties": {
         "goalId": { "type": "string" },
         "lessonIndex": { "type": "number" },
         "startedAt": { "type": "string" },
-        "status": { "type": "string", "enum": ["done", "aborted", "in_progress"] },
+        "endedAt": { "type": "string" },
+        "lastChunkAt": { "type": "string" },
+        "status": { "type": "string", "enum": ["in-progress", "pending_review", "done", "aborted"] },
         "liveTranscript": {
           "type": "array",
           "items": {
@@ -73,7 +75,37 @@
               "text": { "type": "string" },
               "timestamp": { "type": "number" }
             },
-            "required": ["role", "text", "timestamp"]
+            "required": ["role", "text"]
+          }
+        },
+        "recordingChunks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "index": { "type": "number" },
+              "path": { "type": "string" },
+              "storageUrl": { "type": "string" },
+              "timestamp": { "type": "string" },
+              "uploaded": { "type": "boolean" },
+              "durationSeconds": { "type": "number" },
+              "sizeBytes": { "type": "number" }
+            },
+            "required": ["index", "path", "timestamp", "uploaded", "durationSeconds"]
+          }
+        },
+        "sttPartial": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "minuteIndex": { "type": "number" },
+              "timeRange": { "type": "string" },
+              "transcript": { "type": "string" },
+              "timestamp": { "type": "string" },
+              "sourceChunkIndices": { "type": "array", "items": { "type": "number" } }
+            },
+            "required": ["minuteIndex", "timeRange", "transcript", "timestamp"]
           }
         },
         "connectionPath": { "type": "string", "enum": ["direct", "proxy"] },

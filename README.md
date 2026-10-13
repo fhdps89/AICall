@@ -1,23 +1,32 @@
 # 오늘도 한 통 (One Call English) — AI 1:1 전화영어 올인원 랩
 
-> **버전**: `v2.2.1` | **빌드**: `20261013-multilingual-1502` | **최종 갱신**: 2026-10-13 (KST)
+> **버전**: `v2.3.0` | **빌드**: `20261013-multilingual-1529` | **최종 갱신**: 2026-10-13 (KST)
 
 여러 도구(Claude, Gemini Live, Google Keep, Grok, ElevenLabs, Telegram)로 분산되어 있던 실전 영어회화 학습 파이프라인을 **단 하나의 통합 웹/모바일 앱에서 원클릭으로 완벽하게 자동화**한 AI 1:1 전화영어 플랫폼입니다.
 
-### 📌 [Phase 1: B-2 실시간 통화 및 2-1 브라우저 직접 연결 최적화 완료]
-- **브라우저 직접 연결 최적화 (수정 지시서 2-1)**:
-  - `BidiGenerateContentConstrained?access_token=${token}` 정식 주소 규격 적용 및 `@google/genai` v1alpha 임시 토큰 발급 (`uses: 1`, `expireTime: +30m`, `newSessionExpireTime: +1m`).
-  - `setupComplete` 수신 시에만 연결됨 판정 (8초 타임아웃 및 에러 시 서버 프록시로 투명 폴백).
-  - GoAway 및 재연결 시 신규 토큰 발급 + `resumeHandle` 지속 유지.
-  - 연결 경로 콘솔 로깅(`[Live] path=direct` / `[Live] path=proxy`) 및 세션 종료 시 `connectionPath`, `directFailCount` Firestore 자동 저장.
-- **B-2 실시간 음성 통화 (`gemini-3.8-live`)**:
-  - **세션 재개(Session Resumption) & 컨텍스트 창 압축(Sliding Window Compression) 기본 적용**: 15분 이상 장시간 대화 지속 지원.
-  - **GoAway 자동 재연결**: 서버의 GoAway 신호 및 일시적 연결 해제 감지 시 대화 문맥을 유지한 채 자동 재연결하며, 화면에는 "연결 유지 중" 상태를 직관적으로 표시.
-  - **직접 연결 및 서버 중계 이중 파이프**: 브라우저 임시 토큰(`POST /api/gemini/token`)을 통한 직결 시도 및 실패 시 투명한 서버 프록시(`/api/gemini/live`) 자동 폴백.
-  - **오늘 수업 지시서 주입**: 목표, 진행 과, 복습 대상 실수 최대 3개가 주입된 전문 프롬프트 빌더 탑재 (`src/data/lessonPromptBuilder.ts`).
-  - **5대 핵심 제어 버튼**: `Done` (답변 종료 및 핵심 피드백), `Feedback` (즉시 피드백), `Model answer` (60초 AL 모범 답안), `Pause` (일시 정지), `Slow` (천천히 말하기).
-  - **Live 자체 받아쓰기 보조 기록**: 실시간 발화 내역을 화면에 롤링 표시하고 통화 종료 시 `sessions.liveTranscript`에 보조 데이터로 저장.
-  - **순수 공급자 인터페이스 격리**: 화면 UI(`NewCallScreen.tsx`)는 `LiveProvider` 인터페이스만을 호출하여 특정 벤더에 종속되지 않음.
+### 📌 [Phase 1: B-3 통화 중 녹음 (끊김 대비) 완성]
+- **마이크 청크 녹음 (10초 단위 Local-First)**:
+  - `MediaRecorder`로 10초마다 완전한 WebM 오디오 조각 생성.
+  - IndexedDB(`OneCallRecordingsDB`)에 즉시 1차 저장 후 Cloud Storage로 업로드, 업로드 완료 시 IndexedDB에서 자동 삭제.
+  - Live 연결 끊김이나 GoAway, 서버 재연결 중에도 녹음은 백그라운드에서 중단 없이 지속.
+- **1분 단위 임시 받아쓰기 (비동기 STT)**:
+  - 약 1분(6조각) 누적 시 서버가 `gemini-3.5-transcribe` **VERBATIM** 모드로 음성을 전사하여 `sessions.sttPartial`에 자동 저장.
+  - 실시간 Live 대화에 영향 주지 않는 비동기 처리, 환경설정(SettingsModal)에서 자유롭게 On/Off 가능.
+- **Live 대화 로그 지속 저장 & 세션 재개 실패 대비**:
+  - 통화 중 실시간으로 Firestore `sessions.liveTranscript`에 대화 로그 누적.
+  - 세션 재개 handle이 거절/실패할 경우, 직전 대화 요약을 신규 세션 시스템 프롬프트에 자동 주입하여 튜터가 맥락을 유지한 채 대화 지속.
+- **끊긴 통화 자동 감지 & 복구 모달**:
+  - 마지막 조각 이후 2분 이상 새 조각이 없으면 끊긴 통화로 보고 `pending_review`("복기 대기")로 자동 전환.
+  - 브라우저를 닫았다가 다시 열면 **"끝나지 않은 통화가 있어요. 복기할까요?"** 복구 모달 자동 노출.
+- **화면 안내 및 Screen Wake Lock**:
+  - 통화 화면 상단에 **"통화 중에는 화면을 켜 두세요"** 배너 및 10초 녹음 조각 카운터/보존 현황 표시.
+  - Screen Wake Lock API를 호출하여 화면 꺼짐 방지.
+- **녹음 보관함 (Storage Chunks) 인스펙터**:
+  - 환경설정 모달 내 "녹음 보관함" 탭에서 실제 저장된 10초 오디오 파일 목록과 1분 전사본을 직접 확인 및 검증 가능.
+
+### 📌 [기존 탑재 기능: B-2 실시간 통화 & 직접 연결 최적화]
+- **브라우저 직접 연결 최적화 (2-1)**: `BidiGenerateContentConstrained?access_token=${token}` 정식 규격, v1alpha 임시 토큰, `setupComplete` 기반 엄격한 연결 판정, 서버 프록시 자동 폴백, `connectionPath` / `directFailCount` 텔레메트리.
+- **B-2 실시간 음성 통화 (`gemini-3.8-live`)**: 세션 재개 & 컨텍스트 압축 기본 적용, GoAway 자동 재연결, 5대 핵심 제어 버튼(Done / Feedback / Model / Pause / Slow).
 - **Firebase 단일 계정 접근 제어 (B-1)**: `episode.kim@gmail.com` 1인 전용 Google 로그인, 비인가 계정 즉시 차단 및 자동 로그아웃, Firestore 및 Cloud Storage 연결.
 - **4대 목표 데이터 & 요일 루틴 (B-9)**: OPIc AL (14과), 필리조선소 주재원 (15과), 미국·호주 여행 (13과), Bluey 듣기 (12과), 부록 원문 프롬프트 100% 무삭제 보존 및 변수 커스텀.
 

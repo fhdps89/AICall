@@ -24,6 +24,8 @@ export interface LiveSessionOptions {
   onTurnComplete?: () => void;
   resumeToken?: string;
   voiceName?: string;
+  onMediaStreamReady?: (stream: MediaStream) => void;
+  onTranscriptLogged?: (item: LiveTranscriptItem, allTranscripts: LiveTranscriptItem[]) => void;
 }
 
 export interface LiveProvider {
@@ -34,6 +36,7 @@ export interface LiveProvider {
   sendControlCommand(command: LiveCommand): void;
   getLiveTranscript(): LiveTranscriptItem[];
   getResumeToken(): string | null;
+  getMediaStream(): MediaStream | null;
   getConnectionStats(): { connectionPath: "direct" | "proxy"; directFailCount: number };
   disconnect(): Promise<void>;
 }
