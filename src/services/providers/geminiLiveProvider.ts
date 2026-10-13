@@ -65,7 +65,9 @@ export class GeminiLiveProvider implements LiveProvider {
       await this.establishConnection();
     } catch (err: any) {
       console.error("[GeminiLiveProvider] Connect failed:", err);
-      this.options.onStatusChange("error", err?.message || "마이크 또는 네트워크 연결에 실패했습니다.");
+      // Release anything half-opened so a retry starts clean.
+      await this.disconnect().catch(() => {});
+      this.options.onStatusChange("error", err?.code === "MIC_UNAVAILABLE" ? err.message : "연결하지 못했어요. 인터넷을 확인하고 다시 시도해 주세요.");
       throw err;
     }
   }
@@ -568,15 +570,32 @@ export class GeminiLiveProvider implements LiveProvider {
   private async initAudioCapture(): Promise<void> {
     if (this.mediaStream) return;
 
-    this.mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        sampleRate: 16000,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-    });
+    if (!navigator.mediaDevices?.getUserMedia) {
+      const e: any = new Error("이 브라우저에서는 마이크를 쓸 수 없어요.");
+      e.code = "MIC_UNAVAILABLE";
+      throw e;
+    }
+    try {
+      this.mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          sampleRate: 16000,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+    } catch (err: any) {
+      const name = err?.name || "";
+      const e: any = new Error(
+        name === "NotAllowedError" || name === "SecurityError"
+          ? "마이크 권한이 꺼져 있어요. 브라우저 주소창의 마이크 권한을 허용해 주세요."
+          : "마이크를 찾지 못했어요. 이어폰·브라우저 권한을 확인해 주세요."
+      );
+      e.code = "MIC_UNAVAILABLE";
+      e.cause = err;
+      throw e;
+    }
 
     this.options?.onMediaStreamReady?.(this.mediaStream);
 

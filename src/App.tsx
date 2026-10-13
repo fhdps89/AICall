@@ -395,6 +395,7 @@ export const App: React.FC = () => {
         placeholders={placeholders}
         enablePartialTranscribe={(userProfile as any)?.enablePartialTranscribe !== false}
         onEndCall={handleEndCall}
+        onExit={() => setActiveCallGoal(null)}
       />
     );
   }

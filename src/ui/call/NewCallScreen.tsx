@@ -14,6 +14,7 @@ import { getChunkRecorder } from "../../services/recording/chunkRecorder";
 import {
   PhoneOff,
   Mic,
+  MicOff,
   Volume2,
   CheckCircle2,
   MessageSquare,
@@ -38,6 +39,8 @@ interface NewCallScreenProps {
     sessionId?: string,
     audioBlobs?: Blob[]
   ) => void;
+  /** Leave without a call (e.g. mic failure). No review is generated. */
+  onExit?: () => void;
 }
 
 export const NewCallScreen: React.FC<NewCallScreenProps> = ({
@@ -47,6 +50,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
   placeholders,
   enablePartialTranscribe = true,
   onEndCall,
+  onExit,
 }) => {
   const sessionIdRef = useRef<string>(`call-${Date.now()}`);
   const [status, setStatus] = useState<"connecting" | "connected" | "reconnecting" | "closed" | "error">("connecting");
@@ -58,6 +62,10 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
   const [chunkCount, setChunkCount] = useState<number>(0);
   const [wakeLockActive, setWakeLockActive] = useState<boolean>(false);
   const [lastPartialSnippet, setLastPartialSnippet] = useState<string | null>(null);
+  // Mic/connection failure: Korean guidance + [다시 시도]/[나가기]
+  const [connectError, setConnectError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState<number>(0);
+  const sessionCreatedRef = useRef<boolean>(false);
 
   const transcriptsEndRef = useRef<HTMLDivElement>(null);
   const providerRef = useRef(getLiveProvider());
@@ -97,14 +105,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
     const provider = providerRef.current;
     const currentSessionId = sessionIdRef.current;
 
-    // Create session document in Firestore
-    if (userId) {
-      createCallSession(userId, currentSessionId, {
-        goalId: goal.id,
-        lessonIndex,
-        connectionPath: "direct",
-      }).catch((err) => console.warn("[NewCallScreen] createCallSession error:", err));
-    }
+    setConnectError(null);
 
     const systemPrompt = buildTodayLessonSystemPrompt(
       goal,
@@ -119,6 +120,16 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
         systemPrompt,
         onMediaStreamReady: (stream) => {
           if (isCancelled || !userId) return;
+          // Create the Firestore session only once the mic works, so a failed
+          // mic attempt leaves no empty session behind.
+          if (!sessionCreatedRef.current) {
+            sessionCreatedRef.current = true;
+            createCallSession(userId, currentSessionId, {
+              goalId: goal.id,
+              lessonIndex,
+              connectionPath: "direct",
+            }).catch((err) => console.warn("[NewCallScreen] createCallSession error:", err));
+          }
           console.log("[NewCallScreen] MediaStream ready, starting 10s chunk recorder...");
           const chunkRecorder = getChunkRecorder();
           chunkRecorder.start(stream, {
@@ -177,6 +188,14 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
           if (isCancelled) return;
           setStatus(newStatus);
           if (msg) setStatusMessage(msg);
+          if (newStatus === "error") {
+            setConnectError(msg || "연결하지 못했어요. 다시 시도해 주세요.");
+            if (timerRef.current) {
+              clearInterval(timerRef.current);
+              timerRef.current = null;
+            }
+            getChunkRecorder().stop().catch(() => {});
+          }
 
           if (newStatus === "connected" && !timerRef.current) {
             timerRef.current = setInterval(() => {
@@ -191,18 +210,23 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
       .catch((err) => {
         if (!isCancelled) {
           setStatus("error");
-          setStatusMessage(err?.message || "연결에 실패했습니다.");
+          const m = err?.code === "MIC_UNAVAILABLE" ? err.message : "연결하지 못했어요. 인터넷을 확인하고 다시 시도해 주세요.";
+          setStatusMessage(m);
+          setConnectError(m);
         }
       });
 
     return () => {
       isCancelled = true;
-      if (timerRef.current) clearInterval(timerRef.current);
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
       if (modelSpeakingTimeoutRef.current) clearTimeout(modelSpeakingTimeoutRef.current);
       getChunkRecorder().stop().catch(() => {});
       provider.disconnect().catch(() => {});
     };
-  }, [userId, goal, lessonIndex, placeholders, enablePartialTranscribe]);
+  }, [userId, goal, lessonIndex, placeholders, enablePartialTranscribe, attempt]);
 
   // Auto-scroll transcripts
   useEffect(() => {
@@ -216,8 +240,27 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
     setTimeout(() => setLastAction(null), 2500);
   };
 
+  const handleRetryConnect = () => {
+    setConnectError(null);
+    setStatus("connecting");
+    setStatusMessage("다시 연결하는 중...");
+    setAttempt((a) => a + 1);
+  };
+
+  const handleExitAfterError = async () => {
+    await getChunkRecorder().stop().catch(() => {});
+    await providerRef.current.disconnect().catch(() => {});
+    if (onExit) onExit();
+    else onEndCall([], undefined, undefined, []);
+  };
+
   // Handle End Call
   const handleHangUp = async () => {
+    // Nothing was recorded (mic never started): just leave, no review.
+    if (!sessionCreatedRef.current) {
+      await handleExitAfterError();
+      return;
+    }
     const chunkRecorder = getChunkRecorder();
     const recordedBlobs = chunkRecorder.getSessionRecordedBlobs();
     await chunkRecorder.stop();
@@ -247,6 +290,32 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
 
   return (
     <div className="min-h-screen bg-[#0F141C] text-slate-100 flex flex-col justify-between select-none">
+      {/* Mic / connection failure: stop the call UI and offer retry or exit */}
+      {connectError && (
+        <div className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-6">
+          <div className="w-full max-w-sm rounded-2xl bg-[#161D2A] border border-rose-500/30 p-5 shadow-2xl">
+            <div className="flex items-center gap-2 mb-2">
+              <MicOff className="w-5 h-5 text-rose-400" />
+              <h3 className="text-sm font-bold text-white">통화를 시작하지 못했어요</h3>
+            </div>
+            <p className="text-xs text-slate-300 leading-relaxed mb-4">{connectError}</p>
+            <div className="flex gap-2">
+              <button
+                onClick={handleRetryConnect}
+                className="flex-1 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs cursor-pointer"
+              >
+                다시 시도
+              </button>
+              <button
+                onClick={handleExitAfterError}
+                className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs cursor-pointer"
+              >
+                나가기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* Top Header */}
       <header className="p-4 sm:p-5 border-b border-slate-800 bg-[#161D2A]/90 backdrop-blur-md flex items-center justify-between">
         <div>
