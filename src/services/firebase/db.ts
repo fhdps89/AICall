@@ -241,6 +241,9 @@ export interface SessionData {
   updatedAt?: string;
 }
 
+export type MistakeStage = 1 | 3 | 7 | 14;
+export type MistakeStatus = "reviewing" | "graduated" | "deferred" | "on_hold";
+
 export interface MistakeData {
   id?: string;
   createdAt: string;
@@ -253,10 +256,16 @@ export interface MistakeData {
   naturalPhrase: string;
   reason: string;
   sourceStt: string;
-  stage: 1 | 3 | 7 | 14;
-  status: "reviewing" | "on_hold" | "graduated";
+  stage: MistakeStage;
+  status: MistakeStatus;
+  nextReviewAt?: string; // YYYY-MM-DD
+  nextReviewDate?: string; // backwards compatibility
   reopenCount?: number;
-  nextReviewDate?: string;
+  graduatedAt?: string;
+  graduatedReason?: string;
+  reopenedAt?: string;
+  lastLessonAdvanceAt?: string;
+  updatedAt?: string;
 }
 
 export interface QualityReportData {
@@ -512,7 +521,44 @@ export async function saveSessionReview(
 }
 
 /**
- * Save newly extracted mistakes to the mistakes collection (stage 1, status reviewing, source call)
+ * Return today's date formatted as YYYY-MM-DD in KST (UTC+9)
+ */
+export function getKSTToday(): string {
+  const nowKST = new Date(Date.now() + 9 * 3600000);
+  const Y = nowKST.getUTCFullYear();
+  const M = String(nowKST.getUTCMonth() + 1).padStart(2, "0");
+  const D = String(nowKST.getUTCDate()).padStart(2, "0");
+  return `${Y}-${M}-${D}`;
+}
+
+/**
+ * Return tomorrow's date formatted as YYYY-MM-DD in KST (UTC+9)
+ */
+export function getKSTTomorrow(): string {
+  return addKSTDays(1);
+}
+
+/**
+ * Add N days to today (or baseDate YYYY-MM-DD) in KST
+ */
+export function addKSTDays(days: number, baseDateStr?: string): string {
+  let base: Date;
+  if (baseDateStr && /^\d{4}-\d{2}-\d{2}$/.test(baseDateStr)) {
+    const [y, m, d] = baseDateStr.split("-").map(Number);
+    base = new Date(Date.UTC(y, m - 1, d));
+  } else {
+    base = new Date(Date.now() + 9 * 3600000);
+  }
+  base.setUTCDate(base.getUTCDate() + days);
+  const Y = base.getUTCFullYear();
+  const M = String(base.getUTCMonth() + 1).padStart(2, "0");
+  const D = String(base.getUTCDate()).padStart(2, "0");
+  return `${Y}-${M}-${D}`;
+}
+
+/**
+ * Save newly extracted mistakes to the mistakes collection
+ * B-5: stage 1일, status reviewing, nextReviewAt=내일(YYYY-MM-DD)로 시작
  */
 export async function saveCallMistakes(
   userId: string,
@@ -520,16 +566,20 @@ export async function saveCallMistakes(
 ): Promise<string[]> {
   const mistakesCol = collection(db, "users", userId, "mistakes");
   const createdIds: string[] = [];
+  const tomorrow = getKSTTomorrow();
 
   try {
     for (const m of mistakes) {
       const newDoc = doc(mistakesCol);
+      const nextReviewAt = m.nextReviewAt || m.nextReviewDate || tomorrow;
       await setDoc(newDoc, {
         ...m,
         id: newDoc.id,
-        stage: 1,
-        status: "reviewing",
-        source: "call",
+        stage: m.stage || 1,
+        status: m.status || "reviewing",
+        nextReviewAt,
+        nextReviewDate: nextReviewAt,
+        source: m.source || "call",
         createdAt: m.createdAt || new Date().toISOString(),
       });
       createdIds.push(newDoc.id);
@@ -541,7 +591,7 @@ export async function saveCallMistakes(
 }
 
 /**
- * Get all existing mistakes for a user (for identifying usedCorrectly / repeatedMistakes)
+ * Get all existing mistakes for a user
  */
 export async function getUserMistakes(userId: string): Promise<MistakeData[]> {
   const mistakesCol = collection(db, "users", userId, "mistakes");
@@ -550,6 +600,195 @@ export async function getUserMistakes(userId: string): Promise<MistakeData[]> {
     return snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<MistakeData, "id">) }));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, `users/${userId}/mistakes`);
+  }
+}
+
+/**
+ * B-5 Requirement 2: 아침 강의를 "들었다"는 신호로 단계 진행
+ * reviewing이면 다음 stage로 올리고 nextReviewAt을 그에 맞게 갱신 (1→3→7→14일).
+ * 14일에서 강의를 들었는데 퀴즈를 안 하면 status=deferred(보류).
+ */
+export async function advanceMistakeAfterLesson(
+  userId: string,
+  mistakeId: string
+): Promise<{ prevStage: number; nextStage: number; nextStatus: MistakeStatus; nextReviewAt: string }> {
+  const mistakeRef = doc(db, "users", userId, "mistakes", mistakeId);
+  const snap = await getDoc(mistakeRef);
+  if (!snap.exists()) {
+    throw new Error(`Mistake ${mistakeId} not found`);
+  }
+  const data = snap.data() as MistakeData;
+  const currentStage = (data.stage || 1) as MistakeStage;
+  const currentStatus = data.status || "reviewing";
+
+  // If already graduated, leave as is
+  if (currentStatus === "graduated") {
+    return {
+      prevStage: currentStage,
+      nextStage: currentStage,
+      nextStatus: "graduated",
+      nextReviewAt: data.nextReviewAt || data.nextReviewDate || "",
+    };
+  }
+
+  let nextStage: MistakeStage = currentStage;
+  let nextStatus: MistakeStatus = currentStatus;
+  let nextReviewAt: string;
+
+  if (currentStage === 1) {
+    nextStage = 3;
+    nextReviewAt = addKSTDays(3);
+    nextStatus = "reviewing";
+  } else if (currentStage === 3) {
+    nextStage = 7;
+    nextReviewAt = addKSTDays(7);
+    nextStatus = "reviewing";
+  } else if (currentStage === 7) {
+    nextStage = 14;
+    nextReviewAt = addKSTDays(14);
+    nextStatus = "reviewing";
+  } else {
+    // currentStage === 14: 14일에서 강의를 들었는데 퀴즈를 안 하면 status=deferred
+    nextStage = 14;
+    nextStatus = "deferred";
+    nextReviewAt = getKSTToday();
+  }
+
+  const now = new Date().toISOString();
+  await updateDoc(mistakeRef, {
+    stage: nextStage,
+    status: nextStatus,
+    nextReviewAt,
+    nextReviewDate: nextReviewAt,
+    lastLessonAdvanceAt: now,
+    updatedAt: now,
+  });
+
+  return {
+    prevStage: currentStage,
+    nextStage,
+    nextStatus,
+    nextReviewAt,
+  };
+}
+
+/**
+ * B-5 Requirement 4: 퀴즈 통과 훅 (B-6용)
+ * 호출 시 status=graduated
+ */
+export async function graduateMistakeAfterQuiz(
+  userId: string,
+  mistakeId: string
+): Promise<void> {
+  const mistakeRef = doc(db, "users", userId, "mistakes", mistakeId);
+  const now = new Date().toISOString();
+  try {
+    await updateDoc(mistakeRef, {
+      status: "graduated",
+      graduatedAt: now,
+      graduatedReason: "quiz_passed",
+      updatedAt: now,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `users/${userId}/mistakes/${mistakeId}`);
+  }
+}
+
+/**
+ * B-5 Requirement 3: 빠른 졸업 & 다시 복습 (복기 결과 반영)
+ * - usedCorrectly[] 에 있는 id: status=graduated (퀴즈 없이 졸업)
+ * - repeatedMistakes[] 에 있는 id: status=reviewing, stage=1일, nextReviewAt=내일 (다시 복습)
+ */
+export async function applyCallMistakeUpdates(
+  userId: string,
+  usedCorrectlyIds: string[] = [],
+  repeatedMistakesIds: string[] = []
+): Promise<{ graduatedCount: number; reopenedCount: number }> {
+  let graduatedCount = 0;
+  let reopenedCount = 0;
+  const now = new Date().toISOString();
+  const tomorrow = getKSTTomorrow();
+
+  // 1. usedCorrectly -> status=graduated
+  for (const id of usedCorrectlyIds) {
+    if (!id || typeof id !== "string") continue;
+    try {
+      const mRef = doc(db, "users", userId, "mistakes", id);
+      await updateDoc(mRef, {
+        status: "graduated",
+        graduatedAt: now,
+        graduatedReason: "call_used_correctly",
+        updatedAt: now,
+      });
+      graduatedCount++;
+    } catch (err) {
+      console.warn(`[db] Could not graduate mistake ${id}:`, err);
+    }
+  }
+
+  // 2. repeatedMistakes -> status=reviewing, stage=1, nextReviewAt=내일
+  for (const id of repeatedMistakesIds) {
+    if (!id || typeof id !== "string") continue;
+    try {
+      const mRef = doc(db, "users", userId, "mistakes", id);
+      const snap = await getDoc(mRef);
+      const prevReopen = snap.exists() ? ((snap.data().reopenCount as number) || 0) : 0;
+      await updateDoc(mRef, {
+        status: "reviewing",
+        stage: 1,
+        nextReviewAt: tomorrow,
+        nextReviewDate: tomorrow,
+        reopenCount: prevReopen + 1,
+        reopenedAt: now,
+        updatedAt: now,
+      });
+      reopenedCount++;
+    } catch (err) {
+      console.warn(`[db] Could not reopen repeated mistake ${id}:`, err);
+    }
+  }
+
+  return { graduatedCount, reopenedCount };
+}
+
+/**
+ * B-5 Requirement 5: 오늘 복습 대상 조회
+ * - status=reviewing 이고 nextReviewAt ≤ today 인 것 + status=deferred 인 것
+ * - deferred는 목록 맨 앞
+ */
+export async function getDueMistakes(
+  userId: string,
+  todayStr: string = getKSTToday()
+): Promise<MistakeData[]> {
+  try {
+    const all = await getUserMistakes(userId);
+    const deferredList: MistakeData[] = [];
+    const reviewingDueList: MistakeData[] = [];
+
+    for (const m of all) {
+      if (m.status === "deferred") {
+        deferredList.push(m);
+      } else if (m.status === "reviewing") {
+        const targetDate = m.nextReviewAt || m.nextReviewDate || m.createdAt.slice(0, 10);
+        if (targetDate <= todayStr) {
+          reviewingDueList.push(m);
+        }
+      }
+    }
+
+    // deferred must be at the very front
+    // sort reviewingDueList by nextReviewAt asc, then stage desc
+    reviewingDueList.sort((a, b) => {
+      const da = a.nextReviewAt || a.nextReviewDate || "";
+      const db = b.nextReviewAt || b.nextReviewDate || "";
+      if (da !== db) return da.localeCompare(db);
+      return (b.stage || 1) - (a.stage || 1);
+    });
+
+    return [...deferredList, ...reviewingDueList];
+  } catch (error) {
+    console.warn("[db] Failed to get due mistakes:", error);
+    return [];
   }
 }
 

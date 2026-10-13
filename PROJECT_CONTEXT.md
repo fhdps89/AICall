@@ -1,7 +1,7 @@
 # 📖 프로젝트 컨텍스트 및 히스토리 (Project Context)
 
 > **프로젝트**: 「오늘도 한 통」 (One Call English) — AI 1:1 전화영어 올인원 랩  
-> **현재 버전**: `v2.4.0` | **공식 빌드 버전**: `20261013-multilingual-1557` | **최종 갱신**: 2026-10-13 (KST)  
+> **현재 버전**: `v2.5.0` | **공식 빌드 버전**: `20261013-multilingual-1632` | **최종 갱신**: 2026-10-13 (KST)  
 > **관리 규칙**: `README.md` 변경 시 본 문서의 아키텍처 및 히스토리를 함께 최신화하며, 모든 일시는 한국 표준시(KST)를 기준으로 합니다.
 
 ---
@@ -12,7 +12,7 @@
 
 ---
 
-## 2. 모델 인프라 구성 (Part B-1 & B-2 & B-3 & B-4 확정 사양)
+## 2. 모델 인프라 구성 (Part B-1 ~ B-5 확정 사양)
 - **실시간 통화 (Live)**: `LIVE_MODEL = "gemini-3.8-live"`
 - **통화 복기 & 퀴즈·코치 (Text)**: `TEXT_MODEL = "gemini-3.8-flash"`
 - **기록용 받아쓰기 & 1분 임시 전사 (STT)**: `STT_ENGINE = "gemini"` (`gemini-3.5-transcribe`, 모드 `VERBATIM`) / 비실시간 대안 `universal-3-5-pro` (AssemblyAI)
@@ -21,8 +21,14 @@
 
 ---
 
-## 3. 핵심 자동화 아키텍처 (Part B-12 뼈대 & B-2 통화 & B-3 녹음 & B-4 복기)
-1. **B-4 통화 후 복기 파이프라인 (`reviewPipeline.ts`, `ReviewModal.tsx`, `/api/review`, `/api/gemini/transcribe-final`)**:
+## 3. 핵심 자동화 아키텍처 (Part B-12 뼈대 & B-2 통화 & B-3 녹음 & B-4 복기 & B-5 간격반복)
+1. **B-5 간격 반복과 졸업 파이프라인 (`db.ts`, `reviewPipeline.ts`, `HomeScreen.tsx`)**:
+   - **실수 간격 반복 모델**: `stage`(1일→3일→7일→14일), `status`(reviewing | graduated | deferred), `nextReviewAt`(KST YYYY-MM-DD). 신규 실수는 1일차 reviewing, nextReviewAt=내일로 시작.
+   - **아침 강의 수강 기반 승급 (`advanceMistakeAfterLesson`)**: reviewing 상태에서 1→3→7→14일로 단계 승급 및 nextReviewAt 계산. 14일차 수강 후 퀴즈 미통과 시 `status = deferred`(보류) 전환.
+   - **빠른 졸업 & 재복습 연동 (`applyCallMistakeUpdates`)**: 복기 생성 시 `usedCorrectly`에 매칭된 실수는 퀴즈 없이 즉시 `status = graduated`. `repeatedMistakes`에 매칭된 졸업 실수는 `status = reviewing`, 1일차, 내일로 강등 재학습.
+   - **오늘 복습 대상 쿼리 (`getDueMistakes`)**: `status == 'deferred'`(목록 최우선 맨 앞) + `status == 'reviewing' && nextReviewAt <= 오늘`. 홈 화면에 "오늘 복습 N개" 숫자 표출.
+   - **디버그 시뮬레이터**: 홈 화면에 "임시 디버그: 단계 진행" 패널 제공 (`[이 실수 강의 들었음 처리]` 버튼으로 1→3→7→14→deferred 단계 전진 수동 테스트 가능). 수동 졸업 버튼은 엄격 배제.
+2. **B-4 통화 후 복기 파이프라인 (`reviewPipeline.ts`, `ReviewModal.tsx`, `/api/review`, `/api/gemini/transcribe-final`)**:
    - **기록용 최종 받아쓰기 (sttFinal)**: 세션 종료 시 10초 조각들을 합쳐 `gemini-3.5-transcribe` VERBATIM 전사. 실패 시 `sttPartial` 합본으로 폴백하여 `sessions.sttFinal`에 저장.
    - **myPhrase 원문 보존 복기 생성**: `gemini-3.8-flash` 기반 오답 분석 시 "적당히 다듬어라"를 배제하고 sttFinal의 학습자 발화를 글자 그대로 복사하여 `mistakes[]`에 수록.
    - **5대 핵심 표현 & AI 등급**: 오늘 외울 표현 5개 추출, `estimatedLevel` 산출 및 "AI 예상치, 공식 등급 아님" 안내.

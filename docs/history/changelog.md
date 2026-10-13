@@ -4,6 +4,41 @@
 
 ---
 
+### [2026-10-13 KST] v2.5.0 — [작업 지시서 5] 2-A 간격 반복과 졸업 — 가이드 B-5 완료
+- **문제 원인 및 기획 의도 (Context & Motivation)**:
+  - 오답 분석을 통해 수집된 실수를 망각 곡선에 따라 체계적으로 장기 기억화하기 위해, 1일 ➔ 3일 ➔ 7일 ➔ 14일 간격 반복(Spaced Repetition) 단계 시스템과 졸업/보류/재학습 라이프사이클 구현.
+  - 다음 통화에서 맞게 발화했을 경우(`usedCorrectly`) 퀴즈 없이 즉시 졸업시키는 빠른 졸업 경로와, 이미 졸업한 실수를 재반복했을 경우(`repeatedMistakes`) 1일차로 강등시켜 다시 학습시키는 안전망 연동.
+  - 퀴즈(B-6) 및 아침 강의(B-7) 출시에 앞서 핵심 데이터 모델, 상태 전이 함수, 오늘 복습 대상 쿼리 및 임시 디버그 검증 도구 완비.
+- **적용된 수정 내역 (Applied Changes)**:
+  1. **실수 상태 모델 확장 (`db.ts`, `firebase-blueprint.json`)**:
+     - `MistakeData` 필드 정의: `stage`(1 | 3 | 7 | 14), `status`("reviewing" | "graduated" | "deferred"), `nextReviewAt`(KST YYYY-MM-DD), `graduatedAt`, `graduatedReason`, `reopenedAt`, `reopenCount`.
+     - 신규 실수 저장 시(`saveCallMistakes`) `stage: 1일`, `status: "reviewing"`, `nextReviewAt: 내일(KST+1일)` 자동 설정.
+  2. **아침 강의 수강 기반 단계 진행 (`advanceMistakeAfterLesson`)**:
+     - `reviewing` 상태의 실수를 다음 단계로 승급하고 KST 기준 `nextReviewAt` 갱신:
+       - 1일차 ➔ 3일차 (`nextReviewAt = 오늘 + 3일`)
+       - 3일차 ➔ 7일차 (`nextReviewAt = 오늘 + 7일`)
+       - 7일차 ➔ 14일차 (`nextReviewAt = 오늘 + 14일`)
+       - 14일차에서 수강 완료(퀴즈 미통과 상태) ➔ `status = "deferred"` (보류).
+     - 홈 화면에 "임시 디버그: 단계 진행" 시뮬레이터 제공: 각 실수 항목 옆 `[이 실수 강의 들었음 처리]` 버튼을 제공하여 1→3→7→14→deferred 순차 전진을 실시간 수동 테스트 가능.
+  3. **빠른 졸업 & 다시 복습 실반영 (`applyCallMistakeUpdates`, `reviewPipeline.ts`)**:
+     - 지시서 4에서 저장만 해 두었던 `sessions.review.usedCorrectly` 및 `repeatedMistakes`를 실제로 Firestore에 반영:
+       - `usedCorrectly`: `status = "graduated"`, `graduatedReason = "call_used_correctly"`, `graduatedAt` 갱신 (퀴즈 없이 즉시 졸업).
+       - `repeatedMistakes`: `status = "reviewing"`, `stage = 1일`, `nextReviewAt = 내일`, `reopenCount += 1`, `reopenedAt` 갱신 (1일차 다시 복습).
+  4. **퀴즈 통과 졸업 훅 준비 (`graduateMistakeAfterQuiz`)**:
+     - B-6 퀴즈 통과 시 단일 호출할 수 있는 `graduateMistakeAfterQuiz(userId, mistakeId)` 함수 구현 (`status = "graduated"`, `graduatedReason = "quiz_passed"`). 퀴즈 UI는 만들지 않고 훅만 보존.
+  5. **오늘 복습 대상 집계 쿼리 (`getDueMistakes`)**:
+     - `status == "deferred"` 및 `status == "reviewing" && nextReviewAt <= 오늘` 필터링.
+     - **`deferred`(보류) 실수가 목록의 맨 앞**에 위치하도록 정렬.
+     - 홈 화면에 "오늘 복습 N개" 숫자 카드 표출 (보류 개수 및 오늘 대상 개수 보조 표시).
+  6. **수동 졸업 버튼 엄격 배제**:
+     - 기획 스펙 지침에 따라 임의 수동 졸업 버튼은 일체 배치하지 않고, 통화 정상 발화 또는 퀴즈를 통해서만 졸업되도록 통제.
+- **방어 조치 및 호환성 (Safety & Guardrails)**:
+  - 기존 Live·녹음·복기·세션 재개 경로 100% 무변경 유지.
+  - `src/config/models.ts` 모델명 및 Firebase 단일 계정 화이트리스트(`episode.kim@gmail.com`) 불변 유지.
+  - 빌드 버전 `20261013-multilingual-1632` 동기화.
+
+---
+
 ### [2026-10-13 KST] v2.4.0 — [작업 지시서 4] 1-D 통화 후 복기 (기록용) — 가이드 B-4 완료
 - **문제 원인 및 기획 의도 (Context & Motivation)**:
   - 통화가 끝난 후 사용자의 실제 발화 실수를 왜곡 없이 정확하게 짚어내기 위해, "임의로 다듬지 않는" 원문 그대로의 기록용 받아쓰기(VERBATIM sttFinal) 기반 정밀 복기 파이프라인 구현.

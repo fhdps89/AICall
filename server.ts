@@ -37,7 +37,7 @@ export function getBuildVersion(): string {
     const m = String(mtime.getUTCMinutes()).padStart(2, '0');
     return `${Y}${M}${D}-multilingual-${h}${m}`;
   } catch {
-    return '20261013-multilingual-1529';
+    return '20261013-multilingual-1633';
   }
 }
 

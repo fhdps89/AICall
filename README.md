@@ -1,8 +1,32 @@
 # 오늘도 한 통 (One Call English) — AI 1:1 전화영어 올인원 랩
 
-> **버전**: `v2.4.0` | **빌드**: `20261013-multilingual-1557` | **최종 갱신**: 2026-10-13 (KST)
+> **버전**: `v2.5.0` | **빌드**: `20261013-multilingual-1632` | **최종 갱신**: 2026-10-13 (KST)
 
 여러 도구(Claude, Gemini Live, Google Keep, Grok, ElevenLabs, Telegram)로 분산되어 있던 실전 영어회화 학습 파이프라인을 **단 하나의 통합 웹/모바일 앱에서 원클릭으로 완벽하게 자동화**한 AI 1:1 전화영어 플랫폼입니다.
+
+### 📌 [Phase 2: B-5 간격 반복과 졸업 (2-A) 완성]
+- **실수 간격 반복 모델 (mistakes 컬렉션)**:
+  - `stage`: 1일 → 3일 → 7일 → 14일 (일수 단계 관리).
+  - `status`: `reviewing` (복습 중) | `graduated` (졸업) | `deferred` (보류).
+  - `nextReviewAt`: KST 기준 다음 복습일자 (`YYYY-MM-DD`).
+  - 신규 등록 실수(복기 결과)는 기본 `stage=1일`, `status=reviewing`, `nextReviewAt=내일(KST+1일)`로 시작.
+- **아침 강의 수강 기반 단계 진행 (`advanceMistakeAfterLesson`)**:
+  - `reviewing` 상태의 실수를 다음 단계로 승급하고 `nextReviewAt` 갱신:
+    - 1일차 ➔ 3일차 (`nextReviewAt = 오늘 + 3일`)
+    - 3일차 ➔ 7일차 (`nextReviewAt = 오늘 + 7일`)
+    - 7일차 ➔ 14일차 (`nextReviewAt = 오늘 + 14일`)
+    - 14일차에서 강의 수강 완료(퀴즈 미응시) ➔ `status = deferred` (보류).
+  - 홈 화면에 **"임시 디버그: 단계 진행"** 시뮬레이터를 제공하여, 각 실수의 1→3→7→14→deferred 진행을 `[이 실수 강의 들었음 처리]` 버튼으로 수동 검증 지원.
+- **빠른 졸업 & 다시 복습 (복기 결과 연동)**:
+  - 통화 복기 시 `sessions.review.usedCorrectly[]`에 포함된 실수 ID ➔ `status = graduated` (퀴즈 없이 즉시 졸업).
+  - `sessions.review.repeatedMistakes[]`에 포함된 실수 ID ➔ `status = reviewing`, `stage = 1일`, `nextReviewAt = 내일` (다시 복습으로 강등).
+- **퀴즈 통과 졸업 훅 (`graduateMistakeAfterQuiz`)**:
+  - B-6 퀴즈 연동을 위한 함수 준비 완료 (호출 시 `status = graduated`, `graduatedReason = 'quiz_passed'`).
+- **오늘 복습 대상 집계 (`getDueMistakes`)**:
+  - `status == 'reviewing'` 및 `nextReviewAt <= 오늘` 인 항목 + `status == 'deferred'` 인 항목 집계.
+  - 정렬 순서: **`deferred`(보류) 항목이 목록 맨 앞**에 위치.
+  - 홈 화면 상단에 **"오늘 복습 N개"** 카운터 명시 (보류 수 및 오늘 복습 대상 수 세부 표시).
+- **엄격한 수동 졸업 버튼 배제**: 임의 조작 방지를 위해 수동 졸업 버튼은 배제하고, 복기 정상 발화(`usedCorrectly`) 및 퀴즈 통과를 통해서만 졸업되도록 시스템 규칙 준수.
 
 ### 📌 [Phase 1: B-4 통화 후 복기 (기록용) 완성]
 - **최종 받아쓰기 (기록용 sttFinal)**:

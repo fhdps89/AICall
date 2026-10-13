@@ -25,6 +25,8 @@ import {
   saveSessionReview,
   saveCallMistakes,
   getUserMistakes,
+  applyCallMistakeUpdates,
+  getKSTTomorrow,
   SessionReviewData,
   SttFinalData,
   MistakeData,
@@ -221,7 +223,8 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
 
   onProgress?.("3/3 복기 결과 및 실수 보관함 저장 중...");
 
-  // Step 6: Save mistakes to mistakes collection (stage 1, status reviewing, source call)
+  // Step 6: Save mistakes to mistakes collection (stage 1, status reviewing, nextReviewAt=내일)
+  const tomorrow = getKSTTomorrow();
   const mistakeDocs: MistakeData[] = (review.mistakes || []).map((m) => ({
     myPhrase: m.myPhrase,
     naturalPhrase: m.naturalPhrase,
@@ -229,6 +232,8 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
     sourceStt: m.sourceStt || sourceStt,
     stage: 1,
     status: "reviewing",
+    nextReviewAt: tomorrow,
+    nextReviewDate: tomorrow,
     source: "call",
     sessionId,
     goalId: goal.id,
@@ -244,6 +249,18 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
     }
   } catch (mistakeErr) {
     console.error("[ReviewPipeline] Failed to save mistakes collection:", mistakeErr);
+  }
+
+  // B-5 Requirement 3: 빠른 졸업 & 다시 복습 (usedCorrectly -> graduated, repeatedMistakes -> reviewing stage 1)
+  try {
+    const usedList = Array.isArray(review.usedCorrectly) ? review.usedCorrectly : [];
+    const repeatedList = Array.isArray(review.repeatedMistakes) ? review.repeatedMistakes : [];
+    if (usedList.length > 0 || repeatedList.length > 0) {
+      const updateResult = await applyCallMistakeUpdates(userId, usedList, repeatedList);
+      console.log(`[ReviewPipeline] Applied B-5 mistake updates: ${updateResult.graduatedCount} graduated, ${updateResult.reopenedCount} reopened.`);
+    }
+  } catch (b5Err) {
+    console.error("[ReviewPipeline] Failed to apply B-5 usedCorrectly/repeatedMistakes:", b5Err);
   }
 
   // Step 7: Save review & sttFinal to session document, mark done

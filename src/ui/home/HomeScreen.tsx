@@ -1,6 +1,13 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { User } from "firebase/auth";
-import { GoalData } from "../../services/firebase/db";
+import {
+  GoalData,
+  MistakeData,
+  getDueMistakes,
+  getUserMistakes,
+  advanceMistakeAfterLesson,
+  getKSTToday,
+} from "../../services/firebase/db";
 import { WEEKLY_ROUTINE, getTodayRoutine } from "../../data/defaultGoals";
 import { PromptPlaceholders, hydrateTutorPrompt } from "../../data/promptCustomizer";
 import {
@@ -15,6 +22,13 @@ import {
   ExternalLink,
   Layers,
   PhoneCall,
+  GraduationCap,
+  Wrench,
+  Clock,
+  ArrowRight,
+  CheckCircle2,
+  AlertCircle,
+  Loader2,
 } from "lucide-react";
 
 interface HomeScreenProps {
@@ -39,6 +53,54 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const [selectedPromptGoal, setSelectedPromptGoal] = useState<GoalData | null>(null);
   const [showPromptModal, setShowPromptModal] = useState(false);
   const [promptViewMode, setPromptViewMode] = useState<"raw" | "hydrated">("hydrated");
+
+  // B-5 Spaced Repetition Due Mistakes State
+  const [dueMistakes, setDueMistakes] = useState<MistakeData[]>([]);
+  const [allMistakes, setAllMistakes] = useState<MistakeData[]>([]);
+  const [mistakesLoading, setMistakesLoading] = useState<boolean>(true);
+  const [showDebugSection, setShowDebugSection] = useState<boolean>(false);
+  const [advancingId, setAdvancingId] = useState<string | null>(null);
+  const [debugToast, setDebugToast] = useState<string | null>(null);
+
+  const loadMistakes = async () => {
+    try {
+      setMistakesLoading(true);
+      const [due, all] = await Promise.all([
+        getDueMistakes(user.uid),
+        getUserMistakes(user.uid),
+      ]);
+      setDueMistakes(due);
+      setAllMistakes(all);
+    } catch (err) {
+      console.warn("[HomeScreen] Failed to load mistakes:", err);
+    } finally {
+      setMistakesLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (user?.uid) {
+      loadMistakes();
+    }
+  }, [user?.uid]);
+
+  // Handle B-5 Requirement 2: advanceMistakeAfterLesson (임시 디버그)
+  const handleAdvanceMistake = async (mistakeId: string, phrase: string) => {
+    if (!user?.uid) return;
+    setAdvancingId(mistakeId);
+    try {
+      const res = await advanceMistakeAfterLesson(user.uid, mistakeId);
+      await loadMistakes();
+      setDebugToast(
+        `"${phrase}" 진행 완료: ${res.prevStage}일차 ➔ ${res.nextStage}일차 (${res.nextStatus === "deferred" ? "보류 전환" : res.nextStatus}) | 다음 복습: ${res.nextReviewAt}`
+      );
+      setTimeout(() => setDebugToast(null), 4000);
+    } catch (err: any) {
+      alert(`단계 진행 오류: ${err?.message || err}`);
+    } finally {
+      setAdvancingId(null);
+    }
+  };
 
   const todayRoutine = getTodayRoutine();
   const currentDayIndex = new Date().getDay();
@@ -133,6 +195,153 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               );
             })}
           </div>
+        </section>
+
+        {/* B-5 Spaced Repetition & Due Mistakes Card (간격 반복 & 오늘 복습) */}
+        <section className="bg-[#161D2A] border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-lg space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-400 flex items-center justify-center shrink-0">
+                <GraduationCap className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-amber-400">간격 반복 복습 (B-5)</span>
+                  <span className="text-[11px] text-slate-400">
+                    보류 {dueMistakes.filter((m) => m.status === "deferred").length}개 · 오늘 복습 대상 {dueMistakes.filter((m) => m.status === "reviewing").length}개
+                  </span>
+                </div>
+                <div className="text-xl sm:text-2xl font-black text-white mt-0.5 flex items-center gap-2">
+                  <span>오늘 복습</span>
+                  <span className="text-amber-400 font-mono underline decoration-amber-400/30">
+                    {dueMistakes.length}개
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 self-start sm:self-auto">
+              <button
+                onClick={() => setShowDebugSection(!showDebugSection)}
+                className="px-3 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer border border-slate-700/60"
+              >
+                <Wrench className="w-3.5 h-3.5 text-amber-400" />
+                <span>{showDebugSection ? "디버그 닫기" : "임시 디버그: 단계 진행"}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Toast feedback for debug advance */}
+          {debugToast && (
+            <div className="p-2.5 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-200 text-xs flex items-center gap-2 animate-in fade-in duration-200">
+              <CheckCircle2 className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>{debugToast}</span>
+            </div>
+          )}
+
+          {/* Temporary Debug Tool (B-5 requirement 2): "이 실수 강의 들었음 처리" */}
+          {showDebugSection && (
+            <div className="pt-3 border-t border-slate-800/80 space-y-3">
+              <div className="flex items-center justify-between text-xs text-slate-400">
+                <span className="font-semibold text-amber-300 flex items-center gap-1.5">
+                  <Wrench className="w-3.5 h-3.5 text-amber-400" />
+                  <span>간격 반복 단계 진행 시뮬레이터 (1→3→7→14→deferred)</span>
+                </span>
+                <span className="text-[11px] font-mono">
+                  총 {allMistakes.length}개 보관
+                </span>
+              </div>
+
+              {allMistakes.length === 0 ? (
+                <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800 text-center text-xs text-slate-400">
+                  아직 등록된 실수가 없습니다. 통화 완료 후 복기를 생성하면 1일차 reviewing으로 자동 등록됩니다.
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                  {allMistakes.map((m) => {
+                    const isAdvancing = advancingId === m.id;
+                    const isGraduated = m.status === "graduated";
+                    const isDeferred = m.status === "deferred";
+
+                    return (
+                      <div
+                        key={m.id}
+                        className={`p-3 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 transition-all ${
+                          isDeferred
+                            ? "bg-purple-950/20 border-purple-800/40"
+                            : isGraduated
+                            ? "bg-emerald-950/15 border-emerald-800/30 opacity-75"
+                            : "bg-slate-900/60 border-slate-800"
+                        }`}
+                      >
+                        <div className="min-w-0 space-y-1">
+                          <div className="flex flex-wrap items-center gap-2 text-xs">
+                            <span className="font-mono text-red-300 font-semibold line-through decoration-red-400/50 truncate max-w-[200px] sm:max-w-none">
+                              "{m.myPhrase}"
+                            </span>
+                            <ArrowRight className="w-3 h-3 text-slate-500 shrink-0" />
+                            <span className="text-emerald-300 font-semibold truncate max-w-[200px] sm:max-w-none">
+                              "{m.naturalPhrase}"
+                            </span>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                            {/* Status badge */}
+                            <span
+                              className={`px-2 py-0.5 rounded-full font-bold font-mono text-[10px] border ${
+                                isDeferred
+                                  ? "bg-purple-500/20 border-purple-500/40 text-purple-300"
+                                  : isGraduated
+                                  ? "bg-emerald-500/20 border-emerald-500/40 text-emerald-300"
+                                  : "bg-amber-500/15 border-amber-500/30 text-amber-300"
+                              }`}
+                            >
+                              {isDeferred
+                                ? "보류 (deferred)"
+                                : isGraduated
+                                ? "졸업 (graduated)"
+                                : `복습 중 (${m.stage || 1}일차)`}
+                            </span>
+
+                            {/* Next review date */}
+                            {m.nextReviewAt && !isGraduated && (
+                              <span className="text-slate-400 flex items-center gap-1 font-mono text-[10px]">
+                                <Clock className="w-3 h-3 text-slate-500" />
+                                <span>다음 복습: {m.nextReviewAt}</span>
+                              </span>
+                            )}
+
+                            {isGraduated && m.graduatedReason && (
+                              <span className="text-[10px] text-emerald-400 font-mono">
+                                ({m.graduatedReason === "call_used_correctly" ? "통화에서 맞게 발화하여 즉시 졸업" : "퀴즈 통과 졸업"})
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Debug Action Button: "이 실수 강의 들었음 처리" */}
+                        {!isGraduated && m.id && (
+                          <button
+                            onClick={() => handleAdvanceMistake(m.id!, m.myPhrase)}
+                            disabled={isAdvancing}
+                            className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs shrink-0 flex items-center justify-center gap-1 transition-all cursor-pointer shadow-sm active:scale-95"
+                            title="B-7 아침 강의 수강을 가상으로 시뮬레이션하여 1->3->7->14->deferred 로 전진합니다"
+                          >
+                            {isAdvancing ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                            )}
+                            <span>이 실수 강의 들었음 처리</span>
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
         </section>
 
         {/* Today's Class Card (오늘 수업 카드) */}

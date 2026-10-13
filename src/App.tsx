@@ -71,6 +71,7 @@ export const App: React.FC = () => {
   const [isGeneratingReview, setIsGeneratingReview] = useState<boolean>(false);
   const [reviewProgressStep, setReviewProgressStep] = useState<string>("");
   const [activeReviewData, setActiveReviewData] = useState<ActiveReviewState | null>(null);
+  const [homeRefreshKey, setHomeRefreshKey] = useState<number>(0);
 
   // Placeholders for prompts
   const [placeholders, setPlaceholders] = useState<PromptPlaceholders>(DEFAULT_PROMPT_PLACEHOLDERS);
@@ -389,6 +390,7 @@ export const App: React.FC = () => {
   return (
     <>
       <HomeScreen
+        key={homeRefreshKey}
         user={user}
         goals={goals}
         placeholders={placeholders}
@@ -430,7 +432,10 @@ export const App: React.FC = () => {
           lessonTitle={activeReviewData.lessonTitle}
           review={activeReviewData.review}
           sttFinal={activeReviewData.sttFinal}
-          onClose={() => setActiveReviewData(null)}
+          onClose={() => {
+            setActiveReviewData(null);
+            setHomeRefreshKey((prev) => prev + 1);
+          }}
         />
       )}
 
