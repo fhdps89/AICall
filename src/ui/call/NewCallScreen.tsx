@@ -27,6 +27,14 @@ import {
   FileAudio,
 } from "lucide-react";
 
+const COMMAND_LABELS: Record<string, string> = {
+  Done: "끝내기",
+  Feedback: "피드백",
+  "Model answer": "모범답",
+  Pause: "잠깐",
+  Slow: "천천히",
+};
+
 interface NewCallScreenProps {
   userId?: string;
   goal: GoalData;
@@ -398,7 +406,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
         {/* Action feedback flash */}
         {lastAction && (
           <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 px-4 py-1.5 rounded-full bg-amber-500 text-slate-950 font-bold text-xs shadow-xl animate-bounce">
-            [{lastAction}] 명령 전송됨
+            {COMMAND_LABELS[lastAction] || lastAction} 요청을 보냈어요
           </div>
         )}
 
@@ -423,7 +431,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
             {isSpeakingModel
               ? "튜터가 답변하는 중..."
               : status === "connected"
-              ? "자유롭게 영어로 말씀하세요 (말씀을 마치면 'Done' 클릭)"
+              ? "자유롭게 영어로 말해 보세요 (다 말했으면 '끝내기')"
               : statusMessage}
           </p>
         </div>
@@ -464,58 +472,60 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
       {/* Bottom Controls Toolbar (B-2 requirement 5) */}
       <footer className="p-4 sm:p-5 border-t border-slate-800 bg-[#161D2A]/95 backdrop-blur-md">
         <div className="max-w-2xl mx-auto space-y-3">
-          {/* 5 Core Control Buttons: Done / Feedback / Model answer / Pause / Slow */}
+          {/* 5 Core Control Buttons: Done / Feedback / Model answer / Pause / Slow
+              Shown only once connected; before that, explain why. */}
+          {status !== "connected" ? (
+            <p className="text-center text-[11px] text-slate-400 py-1">
+              {status === "reconnecting" ? "다시 연결되면 버튼을 쓸 수 있어요." : "튜터와 연결되면 끝내기·피드백·모범답 버튼이 나와요."}
+            </p>
+          ) : (
           <div className="grid grid-cols-5 gap-2">
             <button
               onClick={() => handleCommand("Done")}
-              disabled={status !== "connected"}
               className="py-2.5 px-1 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 disabled:opacity-40 border border-amber-500/40 text-amber-300 font-bold text-xs flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95"
               title="답변 종료 및 핵심 피드백 요청"
             >
               <CheckCircle2 className="w-4 h-4 text-amber-400" />
-              <span>Done</span>
+              <span>끝내기</span>
             </button>
 
             <button
               onClick={() => handleCommand("Feedback")}
-              disabled={status !== "connected"}
               className="py-2.5 px-1 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 disabled:opacity-40 border border-slate-700/60 text-slate-200 font-bold text-xs flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95"
               title="방금 답변에 대한 피드백 요청"
             >
               <MessageSquare className="w-4 h-4 text-sky-400" />
-              <span>Feedback</span>
+              <span>피드백</span>
             </button>
 
             <button
               onClick={() => handleCommand("Model answer")}
-              disabled={status !== "connected"}
               className="py-2.5 px-1 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 disabled:opacity-40 border border-slate-700/60 text-slate-200 font-bold text-xs flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95"
               title="60초 AL 모범 답안 청취"
             >
               <Sparkles className="w-4 h-4 text-purple-400" />
-              <span className="truncate max-w-[55px]">Model</span>
+              <span>모범답</span>
             </button>
 
             <button
               onClick={() => handleCommand("Pause")}
-              disabled={status !== "connected"}
               className="py-2.5 px-1 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 disabled:opacity-40 border border-slate-700/60 text-slate-200 font-bold text-xs flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95"
               title="장면 일시정지 및 점검"
             >
               <Pause className="w-4 h-4 text-amber-400" />
-              <span>Pause</span>
+              <span>잠깐</span>
             </button>
 
             <button
               onClick={() => handleCommand("Slow")}
-              disabled={status !== "connected"}
               className="py-2.5 px-1 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 disabled:opacity-40 border border-slate-700/60 text-slate-200 font-bold text-xs flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95"
               title="천천히 또박또박 말하기"
             >
               <Clock className="w-4 h-4 text-emerald-400" />
-              <span>Slow</span>
+              <span>천천히</span>
             </button>
           </div>
+          )}
 
           {/* End Call Button */}
           <button
@@ -523,7 +533,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
             className="w-full py-3.5 px-4 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-rose-600/25 transition-all cursor-pointer"
           >
             <PhoneOff className="w-4 h-4" />
-            <span>통화 종료 (End Call)</span>
+            <span>통화 종료</span>
           </button>
         </div>
       </footer>
