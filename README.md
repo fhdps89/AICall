@@ -1,10 +1,15 @@
 # 오늘도 한 통 (One Call English) — AI 1:1 전화영어 올인원 랩
 
-> **버전**: `v2.2.0` | **빌드**: `20261013-multilingual-1442` | **최종 갱신**: 2026-10-13 (KST)
+> **버전**: `v2.2.1` | **빌드**: `20261013-multilingual-1502` | **최종 갱신**: 2026-10-13 (KST)
 
 여러 도구(Claude, Gemini Live, Google Keep, Grok, ElevenLabs, Telegram)로 분산되어 있던 실전 영어회화 학습 파이프라인을 **단 하나의 통합 웹/모바일 앱에서 원클릭으로 완벽하게 자동화**한 AI 1:1 전화영어 플랫폼입니다.
 
-### 📌 [Phase 1: 1단계 뼈대 및 B-2 실시간 통화(대화용) 완료]
+### 📌 [Phase 1: B-2 실시간 통화 및 2-1 브라우저 직접 연결 최적화 완료]
+- **브라우저 직접 연결 최적화 (수정 지시서 2-1)**:
+  - `BidiGenerateContentConstrained?access_token=${token}` 정식 주소 규격 적용 및 `@google/genai` v1alpha 임시 토큰 발급 (`uses: 1`, `expireTime: +30m`, `newSessionExpireTime: +1m`).
+  - `setupComplete` 수신 시에만 연결됨 판정 (8초 타임아웃 및 에러 시 서버 프록시로 투명 폴백).
+  - GoAway 및 재연결 시 신규 토큰 발급 + `resumeHandle` 지속 유지.
+  - 연결 경로 콘솔 로깅(`[Live] path=direct` / `[Live] path=proxy`) 및 세션 종료 시 `connectionPath`, `directFailCount` Firestore 자동 저장.
 - **B-2 실시간 음성 통화 (`gemini-3.8-live`)**:
   - **세션 재개(Session Resumption) & 컨텍스트 창 압축(Sliding Window Compression) 기본 적용**: 15분 이상 장시간 대화 지속 지원.
   - **GoAway 자동 재연결**: 서버의 GoAway 신호 및 일시적 연결 해제 감지 시 대화 문맥을 유지한 채 자동 재연결하며, 화면에는 "연결 유지 중" 상태를 직관적으로 표시.

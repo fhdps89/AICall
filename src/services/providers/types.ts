@@ -34,6 +34,7 @@ export interface LiveProvider {
   sendControlCommand(command: LiveCommand): void;
   getLiveTranscript(): LiveTranscriptItem[];
   getResumeToken(): string | null;
+  getConnectionStats(): { connectionPath: "direct" | "proxy"; directFailCount: number };
   disconnect(): Promise<void>;
 }
 

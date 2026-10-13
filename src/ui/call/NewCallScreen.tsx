@@ -21,7 +21,10 @@ interface NewCallScreenProps {
   goal: GoalData;
   lessonIndex: number;
   placeholders: PromptPlaceholders;
-  onEndCall: (transcript: LiveTranscriptItem[]) => void;
+  onEndCall: (
+    transcript: LiveTranscriptItem[],
+    stats?: { connectionPath: "direct" | "proxy"; directFailCount: number }
+  ) => void;
 }
 
 export const NewCallScreen: React.FC<NewCallScreenProps> = ({
@@ -130,8 +133,9 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
   // Handle End Call
   const handleHangUp = async () => {
     const finalTranscripts = providerRef.current.getLiveTranscript();
+    const stats = providerRef.current.getConnectionStats();
     await providerRef.current.disconnect();
-    onEndCall(finalTranscripts);
+    onEndCall(finalTranscripts, stats);
   };
 
   const formatTime = (seconds: number) => {

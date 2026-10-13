@@ -37,7 +37,7 @@ export function getBuildVersion(): string {
     const m = String(mtime.getUTCMinutes()).padStart(2, '0');
     return `${Y}${M}${D}-multilingual-${h}${m}`;
   } catch {
-    return '20261013-multilingual-1442';
+    return '20261013-multilingual-1502';
   }
 }
 
@@ -172,23 +172,42 @@ app.get('/api/gemini/status', async (req: Request, res: Response) => {
   });
 });
 
-// Ephemeral token endpoint for browser-direct Gemini Live connection (B-2 requirement 3)
+// Ephemeral token endpoint for browser-direct Gemini Live connection (B-2 requirement 3 & 2-1)
 app.post('/api/gemini/token', async (req: Request, res: Response) => {
   try {
-    const ai = createGenAI();
-    if (!ai) {
+    const key = resolveGeminiApiKey();
+    if (!key || key.startsWith('MY_')) {
       res.status(500).json({ ok: false, error: 'GEMINI_API_KEY가 서버 환경에 설정되지 않았습니다.', fallback: true });
       return;
     }
 
+    // GoogleGenAI with apiVersion v1alpha for authTokens support
+    const ai = new GoogleGenAI({
+      apiKey: key,
+      apiVersion: 'v1alpha',
+      httpOptions: {
+        apiVersion: 'v1alpha',
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
+
     if (typeof (ai as any).authTokens?.create === 'function') {
+      const now = Date.now();
       const token = await (ai as any).authTokens.create({
         config: {
-          // Defaults to 30 mins
+          uses: 1,
+          expireTime: new Date(now + 30 * 60 * 1000).toISOString(),
+          newSessionExpireTime: new Date(now + 60 * 1000).toISOString(),
         },
       });
-      res.json({ ok: true, token: token.name || token });
-      return;
+
+      const tokenName = typeof token?.name === 'string' ? token.name : (typeof token === 'string' ? token : null);
+      if (tokenName) {
+        res.json({ ok: true, token: tokenName });
+        return;
+      }
     }
 
     res.json({ ok: false, fallback: true, message: 'Direct ephemeral token not supported in this environment, using server proxy' });

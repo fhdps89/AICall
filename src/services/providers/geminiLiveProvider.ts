@@ -9,15 +9,17 @@ import {
 /**
  * GeminiLiveProvider
  *
- * Implements B-2 Specification:
+ * Implements B-2 Specification & 2-1 Fixes:
  * 1) Real-time conversation with gemini-3.8-live.
  * 2) Session resumption & context window compression enabled.
- * 3) Auto reconnection upon GoAway with "연결 유지 중" status.
- * 4) Ephemeral token direct browser connection with transparent fallback to server proxy.
- * 5) Audio in: 16kHz 16-bit PCM streaming with echo isolation.
- * 6) Audio out: 24kHz gapless playback scheduling.
- * 7) Control commands: Done, Feedback, Model answer, Pause, Slow.
- * 8) Stores live transcript in memory for sessions.liveTranscript.
+ * 3) Direct connection via BidiGenerateContentConstrained?access_token=${token}.
+ * 4) "Connected" determination: Wait for Gemini's setupComplete message (with 8s timeout fallback).
+ * 5) Fresh token fetched on every reconnection, with session resumption handle preserved.
+ * 6) Connection telemetry: [Live] path=direct or [Live] path=proxy logged, connectionPath & directFailCount tracked.
+ * 7) Audio in: 16kHz 16-bit PCM streaming with echo isolation.
+ * 8) Audio out: 24kHz gapless playback scheduling.
+ * 9) Control commands: Done, Feedback, Model answer, Pause, Slow.
+ * 10) Stores live transcript in memory for sessions.liveTranscript.
  */
 export class GeminiLiveProvider implements LiveProvider {
   public name = LIVE_MODEL;
@@ -27,6 +29,11 @@ export class GeminiLiveProvider implements LiveProvider {
   private isConnected = false;
   private isReconnecting = false;
   private resumeHandle: string | null = null;
+
+  // Connection path tracking (2-1 requirement 5)
+  private connectionPath: "direct" | "proxy" = "direct";
+  private directFailCount = 0;
+  private onDirectSetupComplete: (() => void) | null = null;
 
   // Audio contexts
   private inputAudioCtx: AudioContext | null = null;
@@ -62,7 +69,7 @@ export class GeminiLiveProvider implements LiveProvider {
   }
 
   private async establishConnection(): Promise<void> {
-    // 1. Try Ephemeral Token direct connection
+    // 1. Try Ephemeral Token direct connection (2-1 requirement 1, 2, 3)
     let directSucceeded = false;
     try {
       const tokenRes = await fetch("/api/gemini/token", {
@@ -79,9 +86,11 @@ export class GeminiLiveProvider implements LiveProvider {
         } catch (directErr) {
           console.warn("[GeminiLiveProvider] Direct connection failed, switching to server proxy:", directErr);
         }
+      } else {
+        console.warn("[GeminiLiveProvider] Token endpoint returned fallback:", tokenData);
       }
-    } catch {
-      // Ephemeral token endpoint unreachable or error -> proceed to fallback
+    } catch (err) {
+      console.warn("[GeminiLiveProvider] Ephemeral token fetch error, switching to proxy:", err);
     }
 
     // 2. Fallback to server proxy WebSocket
@@ -92,20 +101,50 @@ export class GeminiLiveProvider implements LiveProvider {
   }
 
   /**
-   * Direct connection to Gemini Live endpoint using ephemeral token
+   * Direct connection to Gemini Live endpoint using ephemeral token (2-1 requirement 1 & 3)
+   * URL: .../BidiGenerateContentConstrained?access_token=${token}
+   * Waits for setupComplete from server (8-second timeout).
    */
   private async connectDirect(token: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      const directUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(
+      // 1) Direct connection URL with BidiGenerateContentConstrained?access_token=
+      const directUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained?access_token=${encodeURIComponent(
         token
       )}`;
 
       const socket = new WebSocket(directUrl);
-      let opened = false;
+      let setupCompleted = false;
+
+      // 3) 8-second timeout waiting for setupComplete
+      const setupTimer = setTimeout(() => {
+        if (!setupCompleted) {
+          this.directFailCount++;
+          console.warn("[Live] Direct connection timeout (8s) waiting for setupComplete. Falling back to proxy.");
+          try {
+            socket.close();
+          } catch {
+            // ignore
+          }
+          reject(new Error("Direct setupComplete timeout"));
+        }
+      }, 8000);
 
       socket.onopen = () => {
-        opened = true;
         this.ws = socket;
+        this.onDirectSetupComplete = () => {
+          if (!setupCompleted) {
+            setupCompleted = true;
+            clearTimeout(setupTimer);
+            this.isConnected = true;
+            this.isReconnecting = false;
+            this.connectionPath = "direct";
+            // 5) Log path
+            console.log("[Live] path=direct");
+            this.options?.onStatusChange("connected", "Gemini Live 직접 연결 완료");
+            resolve();
+          }
+        };
+
         this.wireWebSocketEvents(true);
 
         // Send initial setup payload with session resumption & context compression
@@ -138,23 +177,25 @@ export class GeminiLiveProvider implements LiveProvider {
         };
 
         socket.send(JSON.stringify(setupPayload));
-        this.isConnected = true;
-        this.isReconnecting = false;
-        this.options?.onStatusChange("connected", "Gemini Live 직접 연결 완료");
-        resolve();
       };
 
       socket.onerror = (err) => {
-        if (!opened) {
+        if (!setupCompleted) {
+          clearTimeout(setupTimer);
+          this.directFailCount++;
+          console.warn("[Live] Direct connection error before setupComplete:", err);
           reject(err);
         } else {
           this.handleDisconnect("direct error");
         }
       };
 
-      socket.onclose = () => {
-        if (!opened) {
-          reject(new Error("Direct WebSocket closed before opening"));
+      socket.onclose = (event) => {
+        if (!setupCompleted) {
+          clearTimeout(setupTimer);
+          this.directFailCount++;
+          console.warn("[Live] Direct WebSocket closed before setupComplete:", event.code, event.reason);
+          reject(new Error(`Direct WebSocket closed before setupComplete (${event.code})`));
         } else {
           this.handleDisconnect("direct close");
         }
@@ -177,7 +218,7 @@ export class GeminiLiveProvider implements LiveProvider {
         this.ws = socket;
         this.wireWebSocketEvents(false);
 
-        // Send init message to server
+        // Send init message to server with resumeHandle
         socket.send(
           JSON.stringify({
             type: "init",
@@ -195,7 +236,10 @@ export class GeminiLiveProvider implements LiveProvider {
           if (data.type === "ready") {
             this.isConnected = true;
             this.isReconnecting = false;
-            this.options?.onStatusChange("connected", "Gemini 3.8 Live 연결됨");
+            this.connectionPath = "proxy";
+            // 5) Log path
+            console.log("[Live] path=proxy");
+            this.options?.onStatusChange("connected", "Gemini 3.8 Live 연결됨 (서버 중계)");
             resolve();
           } else if (data.type === "fallback_required" || data.type === "error") {
             reject(new Error(data.error || "Server proxy live connection failed"));
@@ -245,6 +289,14 @@ export class GeminiLiveProvider implements LiveProvider {
 
   private handleIncomingMessage(msg: any, isDirect: boolean): void {
     if (isDirect) {
+      // 3) setupComplete check for direct connection
+      if (msg.setupComplete) {
+        if (this.onDirectSetupComplete) {
+          this.onDirectSetupComplete();
+          this.onDirectSetupComplete = null;
+        }
+      }
+
       // Standard Direct BidiGenerateContent messages
       if (msg.serverContent) {
         const parts = msg.serverContent.modelTurn?.parts;
@@ -292,7 +344,7 @@ export class GeminiLiveProvider implements LiveProvider {
         }
       }
 
-      // GoAway message
+      // GoAway message (2-1 requirement 4)
       if (msg.goAway) {
         console.warn("[GeminiLiveProvider] Direct GoAway received. Triggering auto-reconnect...");
         this.triggerReconnection();
@@ -331,7 +383,8 @@ export class GeminiLiveProvider implements LiveProvider {
   }
 
   /**
-   * Automatic Reconnection upon GoAway or disconnect (B-2 requirement 2)
+   * Automatic Reconnection upon GoAway or disconnect (2-1 requirement 4)
+   * Fetches fresh token and attempts direct connection first with existing resumeHandle.
    */
   private triggerReconnection(): void {
     if (this.isReconnecting) return;
@@ -341,13 +394,26 @@ export class GeminiLiveProvider implements LiveProvider {
     // Show "연결 유지 중" briefly as requested in B-2
     this.options?.onStatusChange("reconnecting", "연결 유지 중");
 
+    if (this.ws) {
+      try {
+        this.ws.onopen = null;
+        this.ws.onmessage = null;
+        this.ws.onerror = null;
+        this.ws.onclose = null;
+        this.ws.close();
+      } catch {
+        // ignore
+      }
+      this.ws = null;
+    }
+
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = setTimeout(async () => {
       try {
-        console.log("[GeminiLiveProvider] Reconnecting with resume handle:", this.resumeHandle);
+        console.log("[Live] Reconnecting... resume handle:", this.resumeHandle);
         await this.establishConnection();
       } catch (err) {
-        console.error("[GeminiLiveProvider] Reconnection attempt failed, retrying in 3s:", err);
+        console.error("[Live] Reconnection attempt failed, retrying in 3s:", err);
         this.isReconnecting = false;
         this.reconnectTimer = setTimeout(() => this.triggerReconnection(), 3000);
       }
@@ -374,6 +440,13 @@ export class GeminiLiveProvider implements LiveProvider {
 
   public getResumeToken(): string | null {
     return this.resumeHandle;
+  }
+
+  public getConnectionStats(): { connectionPath: "direct" | "proxy"; directFailCount: number } {
+    return {
+      connectionPath: this.connectionPath,
+      directFailCount: this.directFailCount,
+    };
   }
 
   public sendAudioChunk(pcm16kChunk: ArrayBuffer): void {
@@ -544,6 +617,7 @@ export class GeminiLiveProvider implements LiveProvider {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.isConnected = false;
     this.isReconnecting = false;
+    this.onDirectSetupComplete = null;
 
     if (this.ws) {
       try {

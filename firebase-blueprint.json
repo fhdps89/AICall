@@ -54,6 +54,33 @@
         "reopenCount": { "type": "number" }
       },
       "required": ["createdAt", "source", "myPhrase", "naturalPhrase", "reason", "stage", "status"]
+    },
+    "Session": {
+      "title": "Session",
+      "description": "Call session record with live transcript, connection telemetry, and review data",
+      "type": "object",
+      "properties": {
+        "goalId": { "type": "string" },
+        "lessonIndex": { "type": "number" },
+        "startedAt": { "type": "string" },
+        "status": { "type": "string", "enum": ["done", "aborted", "in_progress"] },
+        "liveTranscript": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "role": { "type": "string", "enum": ["user", "model"] },
+              "text": { "type": "string" },
+              "timestamp": { "type": "number" }
+            },
+            "required": ["role", "text", "timestamp"]
+          }
+        },
+        "connectionPath": { "type": "string", "enum": ["direct", "proxy"] },
+        "directFailCount": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["goalId", "lessonIndex", "startedAt", "status", "liveTranscript"]
     }
   },
   "firestore": {
@@ -68,6 +95,10 @@
     "/users/{userId}/mistakes/{mistakeId}": {
       "schema": "Mistake",
       "description": "User mistake vault for spaced repetition"
+    },
+    "/users/{userId}/sessions/{sessionId}": {
+      "schema": "Session",
+      "description": "Call session history with connection telemetry"
     }
   }
 }

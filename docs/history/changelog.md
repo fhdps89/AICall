@@ -4,6 +4,31 @@
 
 ---
 
+### [2026-10-13 KST] v2.2.1 — [수정 지시서 2-1] 브라우저 직접 연결 고치기 (B-2 직접 연결 파이프라인 최적화)
+- **문제 원인 분석 (Root Cause)**:
+  - 기존 직접 연결 엔드포인트 URL이 `BidiGenerateContent?key=토큰` 형태로 지정되어 임시 토큰 인증 규격과 불일치(403/거절 발생 시 중계로 넘어감).
+  - 소켓 개방 즉시 `connected`로 판정하여 세션 `setupPayload` 거절 시 프록시 전환 기회를 놓칠 위험 존재.
+- **적용된 수정 내역 (Applied Changes)**:
+  - **직접 연결 주소 규격 동기화 (`geminiLiveProvider.ts`)**: `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained?access_token=${token}`로 수정.
+  - **서버 임시 토큰 발급 설정 보강 (`server.ts`, `/api/gemini/token`)**:
+    - `GoogleGenAI` 생성 시 `httpOptions.apiVersion: 'v1alpha'` 명시.
+    - `authTokens.create` 설정: `uses: 1`, `expireTime: now + 30분 (ISO)`, `newSessionExpireTime: now + 1분 (ISO)` 구성.
+    - 실제 API 키 노출 없이 `token.name`만 클라이언트로 안전하게 반환.
+  - **엄격한 "연결됨" 판정 시점 (`geminiLiveProvider.ts`)**:
+    - 소켓 `open` 후 setup을 전송하고, Gemini 서버로부터 `setupComplete` 메시지를 수신한 시점에만 `connected`로 전환.
+    - `setupComplete` 수신 전 소켓 종료/에러 발생 시 또는 8초 타임아웃 경과 시 "직접 연결 실패"로 판정하고 투명하게 서버 중계 프록시(`/api/gemini/live`)로 즉시 전환.
+  - **재연결 토큰 라이프사이클 (`geminiLiveProvider.ts`)**:
+    - `goAway` 수신 또는 일시 끊김 발생 시 기존 소켓 이벤트 클린업 후 `/api/gemini/token`에서 새로운 임시 토큰을 발급받아 세션 핸들(`resumeHandle`)을 이어 직접 연결부터 재시도.
+    - 새 토큰 발급 또는 직결 실패 시 서버 프록시로 안전 전환.
+  - **연결 경로 및 텔레메트리 영구 기록 (`geminiLiveProvider.ts`, `NewCallScreen.tsx`, `App.tsx`)**:
+    - 연결 수립 시 브라우저 콘솔에 `[Live] path=direct` 또는 `[Live] path=proxy` 1행 로깅.
+    - 통화 종료 시 Firestore `users/{userId}/sessions/{sessionId}` 문서에 `connectionPath`(마지막 연결 경로) 및 `directFailCount`(직접 직결 실패 횟수) 필드 영구 저장.
+- **방어 조치**:
+  - `firebase-blueprint.json` 내 `Session` 엔티티에 `connectionPath`, `directFailCount` 스키마 추가.
+  - 서버 프록시 경로, 통화 화면, 5대 제어 버튼, 음성 받아쓰기, `models.ts` 모델명 불변성 엄격 유지.
+
+---
+
 ### [2026-10-13 KST] v2.2.0 — Part B-2 실시간 통화(대화용 파이프) 구현 완료
 - **`gemini-3.8-live` 세션 재개 & 컨텍스트 창 압축 기본 탑재 (`geminiLiveProvider.ts`, `server.ts`)**:
   - `sessionResumption: { handle: resumeHandle, transparent: true }` 적용을 통해 연결 끊김 시 이전 세션 상태 복원 및 맥락 유지.

@@ -184,12 +184,15 @@ export const App: React.FC = () => {
     setActiveCallLesson(lessonIndex);
   };
 
-  const handleEndCall = async (transcripts: LiveTranscriptItem[]) => {
+  const handleEndCall = async (
+    transcripts: LiveTranscriptItem[],
+    stats?: { connectionPath: "direct" | "proxy"; directFailCount: number }
+  ) => {
     const endedGoal = activeCallGoal;
     const endedLesson = activeCallLesson;
     setActiveCallGoal(null);
 
-    // Save session liveTranscript to Firestore (B-2 requirement 6)
+    // Save session liveTranscript to Firestore (B-2 requirement 6 & 2-1 requirement 5)
     if (user && endedGoal) {
       try {
         const sessionRef = doc(collection(db, "users", user.uid, "sessions"));
@@ -199,6 +202,8 @@ export const App: React.FC = () => {
           startedAt: new Date().toISOString(),
           status: "done",
           liveTranscript: transcripts,
+          connectionPath: stats?.connectionPath || "direct",
+          directFailCount: stats?.directFailCount || 0,
           createdAt: new Date().toISOString(),
         });
       } catch (err) {

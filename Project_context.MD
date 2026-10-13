@@ -1,7 +1,7 @@
 # 📖 프로젝트 컨텍스트 및 히스토리 (Project Context)
 
 > **프로젝트**: 「오늘도 한 통」 (One Call English) — AI 1:1 전화영어 올인원 랩  
-> **현재 버전**: `v2.2.0` | **공식 빌드 버전**: `20261013-multilingual-1442` | **최종 갱신**: 2026-10-13 (KST)  
+> **현재 버전**: `v2.2.1` | **공식 빌드 버전**: `20261013-multilingual-1502` | **최종 갱신**: 2026-10-13 (KST)  
 > **관리 규칙**: `README.md` 변경 시 본 문서의 아키텍처 및 히스토리를 함께 최신화하며, 모든 일시는 한국 표준시(KST)를 기준으로 합니다.
 
 ---
@@ -21,11 +21,15 @@
 
 ---
 
-## 3. 핵심 자동화 아키텍처 (Part B-12 1단계 뼈대 & B-2 실시간 통화 완료)
+## 3. 핵심 자동화 아키텍처 (Part B-12 1단계 뼈대 & B-2 통화 & 2-1 직접 연결 최적화)
 1. **B-2 실시간 통화 엔진 (`src/services/providers/geminiLiveProvider.ts`, `NewCallScreen.tsx`)**:
    - `gemini-3.8-live` 세션 재개(Session Resumption) 및 컨텍스트 창 압축(Sliding Window) 기본 탑재 (15분 이상 장시간 대화 유지).
    - GoAway 수신 및 네트워크 단절 시 자동 재연결(화면에 "연결 유지 중" 표시).
-   - 브라우저 직접 연결(임시 토큰) 및 서버 프록시(`/api/gemini/live`) 투명한 2중 파이프라인.
+   - **브라우저 직접 연결 최적화 (수정 지시서 2-1)**:
+     - `BidiGenerateContentConstrained?access_token=${token}` 정식 주소 규격 및 `@google/genai` v1alpha 임시 토큰 발급 (`uses: 1`, `expireTime: +30m`, `newSessionExpireTime: +1m`).
+     - Gemini의 `setupComplete` 수신 시에만 연결됨 판정 (8초 타임아웃 및 조기 종료 시 서버 프록시로 투명 전환).
+     - 재연결 시 신규 토큰 발급 및 `resumeHandle` 지속 유지.
+     - 연결 경로 콘솔 로깅(`[Live] path=direct` / `[Live] path=proxy`) 및 Firestore `sessions` 문서에 `connectionPath`, `directFailCount` 저장.
    - 오늘 수업 지시서 주입 (`src/data/lessonPromptBuilder.ts`): 목표, 과 내용, 복습 대상 실수 최대 3개.
    - 5대 제어 버튼: Done / Feedback / Model answer / Pause / Slow.
    - Live 자체 받아쓰기 실시간 화면 롤링 표시 및 `sessions.liveTranscript`에 보조 저장.
