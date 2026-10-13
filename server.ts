@@ -7,6 +7,8 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { GoogleGenAI, Modality, Type } from '@google/genai';
+import { requireAuth } from './server/auth.ts';
+import { startLectureJob, readLectureState, lectureAudioPath, kstToday } from './server/lecture.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1073,6 +1075,48 @@ app.post('/api/telegram/send', async (req: Request, res: Response) => {
 });
 
 // Health check endpoints for Cloud Run container probes
+// B-7 Morning Lecture (auth required: Firebase ID token of the single allowed user)
+app.post('/api/lecture/generate', requireAuth, (req: Request, res: Response) => {
+  const uid = res.locals.user.uid as string;
+  const { date, newMistakes, reviewMistakes, force } = req.body || {};
+  const ai = createGenAI();
+  if (!ai) {
+    res.status(500).json({ ok: false, error: 'Gemini 서버 연동이 준비되지 않았습니다.' });
+    return;
+  }
+  try {
+    const state = startLectureJob(ai, uid, typeof date === 'string' ? date : kstToday(), newMistakes || [], reviewMistakes || [], { force: Boolean(force) });
+    res.json({ ok: true, lecture: state });
+  } catch (err: any) {
+    res.status(400).json({ ok: false, error: err?.message || '강의 생성 시작 실패' });
+  }
+});
+
+app.get('/api/lecture/status', requireAuth, (req: Request, res: Response) => {
+  const uid = res.locals.user.uid as string;
+  try {
+    const date = typeof req.query.date === 'string' ? req.query.date : kstToday();
+    res.json({ ok: true, lecture: readLectureState(uid, date) });
+  } catch (err: any) {
+    res.status(400).json({ ok: false, error: err?.message });
+  }
+});
+
+app.get('/api/lecture/audio', requireAuth, (req: Request, res: Response) => {
+  const uid = res.locals.user.uid as string;
+  try {
+    const date = typeof req.query.date === 'string' ? req.query.date : kstToday();
+    const file = lectureAudioPath(uid, date);
+    if (!file) {
+      res.status(404).json({ ok: false, error: '강의 오디오가 없습니다.' });
+      return;
+    }
+    res.type('audio/wav').sendFile(file);
+  } catch (err: any) {
+    res.status(400).json({ ok: false, error: err?.message });
+  }
+});
+
 app.get(['/healthz', '/api/health', '/health'], (_req: Request, res: Response) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });

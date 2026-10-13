@@ -32,6 +32,7 @@ import {
   Play,
 } from "lucide-react";
 import { QuizModal } from "../quiz/QuizModal";
+import { MorningLectureCard } from "../lecture/MorningLectureCard";
 
 interface HomeScreenProps {
   user: User;
@@ -199,6 +200,16 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             })}
           </div>
         </section>
+
+        {/* B-7 Morning Lecture Card (오늘 아침 강의) */}
+        <MorningLectureCard
+          user={user}
+          onOpenQuiz={async () => {
+            await loadMistakes();
+            setShowQuizModal(true);
+          }}
+          onLectureCompleted={() => loadMistakes()}
+        />
 
         {/* B-5 Spaced Repetition & Due Mistakes Card (간격 반복 & 오늘 복습) */}
         <section className="bg-[#161D2A] border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-lg space-y-3">
