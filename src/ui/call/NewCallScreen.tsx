@@ -1,0 +1,330 @@
+import React, { useState, useEffect, useRef } from "react";
+import { GoalData } from "../../services/firebase/db";
+import { PromptPlaceholders } from "../../data/promptCustomizer";
+import { buildTodayLessonSystemPrompt } from "../../data/lessonPromptBuilder";
+import { getLiveProvider } from "../../services/providers";
+import { LiveCommand, LiveTranscriptItem } from "../../services/providers/types";
+import {
+  PhoneOff,
+  Mic,
+  Volume2,
+  CheckCircle2,
+  MessageSquare,
+  Sparkles,
+  Pause,
+  Clock,
+  Shield,
+  HelpCircle,
+} from "lucide-react";
+
+interface NewCallScreenProps {
+  goal: GoalData;
+  lessonIndex: number;
+  placeholders: PromptPlaceholders;
+  onEndCall: (transcript: LiveTranscriptItem[]) => void;
+}
+
+export const NewCallScreen: React.FC<NewCallScreenProps> = ({
+  goal,
+  lessonIndex,
+  placeholders,
+  onEndCall,
+}) => {
+  const [status, setStatus] = useState<"connecting" | "connected" | "reconnecting" | "closed" | "error">("connecting");
+  const [statusMessage, setStatusMessage] = useState<string>("튜터 연결 준비 중...");
+  const [transcripts, setTranscripts] = useState<LiveTranscriptItem[]>([]);
+  const [callDuration, setCallDuration] = useState<number>(0);
+  const [isSpeakingModel, setIsSpeakingModel] = useState<boolean>(false);
+  const [lastAction, setLastAction] = useState<string | null>(null);
+
+  const transcriptsEndRef = useRef<HTMLDivElement>(null);
+  const providerRef = useRef(getLiveProvider());
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const modelSpeakingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const currentLesson = goal.lessons.find((l) => l.index === lessonIndex) || {
+    index: lessonIndex,
+    title: `${lessonIndex}과`,
+  };
+
+  // 1. Connect on Mount
+  useEffect(() => {
+    let isCancelled = false;
+    const provider = providerRef.current;
+
+    const systemPrompt = buildTodayLessonSystemPrompt(
+      goal,
+      lessonIndex,
+      placeholders,
+      [] // No mistakes in vault yet for Phase 1 Step 2
+    );
+
+    provider
+      .connect({
+        sessionId: `call-${Date.now()}`,
+        systemPrompt,
+        onAudioData: () => {
+          if (isCancelled) return;
+          setIsSpeakingModel(true);
+          if (modelSpeakingTimeoutRef.current) clearTimeout(modelSpeakingTimeoutRef.current);
+          modelSpeakingTimeoutRef.current = setTimeout(() => {
+            setIsSpeakingModel(false);
+          }, 400);
+        },
+        onTranscript: (text, isUser) => {
+          if (isCancelled) return;
+          setTranscripts((prev) => {
+            const role = isUser ? "user" : "model";
+            const last = prev[prev.length - 1];
+            if (last && last.role === role) {
+              return [
+                ...prev.slice(0, -1),
+                { ...last, text: last.text + " " + text.trim() },
+              ];
+            }
+            return [...prev, { role, text: text.trim(), timestamp: Date.now() }];
+          });
+        },
+        onStatusChange: (newStatus, msg) => {
+          if (isCancelled) return;
+          setStatus(newStatus);
+          if (msg) setStatusMessage(msg);
+
+          if (newStatus === "connected" && !timerRef.current) {
+            timerRef.current = setInterval(() => {
+              setCallDuration((prev) => prev + 1);
+            }, 1000);
+          }
+        },
+        onInterrupted: () => {
+          setIsSpeakingModel(false);
+        },
+      })
+      .catch((err) => {
+        if (!isCancelled) {
+          setStatus("error");
+          setStatusMessage(err?.message || "연결에 실패했습니다.");
+        }
+      });
+
+    return () => {
+      isCancelled = true;
+      if (timerRef.current) clearInterval(timerRef.current);
+      if (modelSpeakingTimeoutRef.current) clearTimeout(modelSpeakingTimeoutRef.current);
+      provider.disconnect().catch(() => {});
+    };
+  }, [goal, lessonIndex, placeholders]);
+
+  // Auto-scroll transcripts
+  useEffect(() => {
+    transcriptsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [transcripts]);
+
+  // Handle Control Buttons (B-2 requirement 5)
+  const handleCommand = (cmd: LiveCommand) => {
+    providerRef.current.sendControlCommand(cmd);
+    setLastAction(cmd);
+    setTimeout(() => setLastAction(null), 2500);
+  };
+
+  // Handle End Call
+  const handleHangUp = async () => {
+    const finalTranscripts = providerRef.current.getLiveTranscript();
+    await providerRef.current.disconnect();
+    onEndCall(finalTranscripts);
+  };
+
+  const formatTime = (seconds: number) => {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  };
+
+  return (
+    <div className="min-h-screen bg-[#0F141C] text-slate-100 flex flex-col justify-between select-none">
+      {/* Top Header */}
+      <header className="p-4 sm:p-5 border-b border-slate-800 bg-[#161D2A]/90 backdrop-blur-md flex items-center justify-between">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold text-amber-400 font-mono tracking-wider">
+              {goal.title}
+            </span>
+            <span className="text-slate-600">·</span>
+            <span className="text-xs text-slate-300 font-medium truncate max-w-[200px] sm:max-w-none">
+              {currentLesson.index}과. {currentLesson.title}
+            </span>
+          </div>
+          <div className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-1.5 font-mono">
+            <Shield className="w-3 h-3 text-emerald-400" />
+            <span>gemini-3.8-live · 세션 재개 & 컨텍스트 압축 ON</span>
+          </div>
+        </div>
+
+        {/* Status Pill */}
+        <div className="flex items-center gap-2">
+          {status === "reconnecting" ? (
+            <div className="px-3 py-1.5 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-bold animate-pulse flex items-center gap-1.5 shadow-lg shadow-amber-500/10">
+              <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+              <span>연결 유지 중</span>
+            </div>
+          ) : status === "connected" ? (
+            <div className="px-3 py-1.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-xs font-bold flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span>{formatTime(callDuration)}</span>
+            </div>
+          ) : status === "error" ? (
+            <div className="px-3 py-1.5 rounded-full bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs font-bold">
+              연결 오류
+            </div>
+          ) : (
+            <div className="px-3 py-1.5 rounded-full bg-slate-800 text-slate-300 text-xs font-medium animate-pulse">
+              연결 중...
+            </div>
+          )}
+        </div>
+      </header>
+
+      {/* Main Conversation Stream */}
+      <main className="flex-1 max-w-2xl w-full mx-auto p-4 sm:p-6 overflow-y-auto space-y-4">
+        {/* Reconnect notice banner */}
+        {status === "reconnecting" && (
+          <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs text-center font-medium animate-pulse">
+            네트워크 또는 GoAway 신호를 수신하여 <strong>연결 유지 중</strong>입니다. 대화 맥락이 그대로 보존됩니다.
+          </div>
+        )}
+
+        {/* Action feedback flash */}
+        {lastAction && (
+          <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 px-4 py-1.5 rounded-full bg-amber-500 text-slate-950 font-bold text-xs shadow-xl animate-bounce">
+            [{lastAction}] 명령 전송됨
+          </div>
+        )}
+
+        {/* Live Audio Indicator & Orb */}
+        <div className="py-6 flex flex-col items-center justify-center">
+          <div
+            className={`w-28 h-28 sm:w-32 sm:h-32 rounded-full flex items-center justify-center transition-all duration-300 shadow-2xl ${
+              isSpeakingModel
+                ? "bg-gradient-to-tr from-amber-500 to-amber-300 ring-8 ring-amber-500/30 scale-105"
+                : status === "connected"
+                ? "bg-slate-800/80 ring-4 ring-slate-700/50"
+                : "bg-slate-900 ring-2 ring-slate-800"
+            }`}
+          >
+            {isSpeakingModel ? (
+              <Volume2 className="w-12 h-12 text-slate-950 animate-pulse" />
+            ) : (
+              <Mic className="w-12 h-12 text-slate-400" />
+            )}
+          </div>
+          <p className="text-xs text-slate-400 mt-3 font-medium">
+            {isSpeakingModel
+              ? "튜터가 답변하는 중..."
+              : status === "connected"
+              ? "자유롭게 영어로 말씀하세요 (말씀을 마치면 'Done' 클릭)"
+              : statusMessage}
+          </p>
+        </div>
+
+        {/* Transcript rolling area (Live 자체 받아쓰기 보조 표시) */}
+        <div className="space-y-3 pt-2">
+          {transcripts.length === 0 ? (
+            <div className="p-4 rounded-xl bg-slate-900/40 border border-slate-800/60 text-center text-xs text-slate-500">
+              첫 마디를 나누면 실시간 받아쓰기 내용이 이곳에 표시됩니다.
+            </div>
+          ) : (
+            transcripts.map((item, idx) => (
+              <div
+                key={idx}
+                className={`flex gap-2.5 ${
+                  item.role === "user" ? "justify-end" : "justify-start"
+                }`}
+              >
+                <div
+                  className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-xs leading-relaxed ${
+                    item.role === "user"
+                      ? "bg-amber-500/20 border border-amber-500/30 text-amber-100 rounded-tr-none"
+                      : "bg-[#161D2A] border border-slate-800 text-slate-200 rounded-tl-none shadow-md"
+                  }`}
+                >
+                  <span className="text-[10px] uppercase font-bold block mb-0.5 opacity-60">
+                    {item.role === "user" ? "You" : "Tutor"}
+                  </span>
+                  <span>{item.text}</span>
+                </div>
+              </div>
+            ))
+          )}
+          <div ref={transcriptsEndRef} />
+        </div>
+      </main>
+
+      {/* Bottom Controls Toolbar (B-2 requirement 5) */}
+      <footer className="p-4 sm:p-5 border-t border-slate-800 bg-[#161D2A]/95 backdrop-blur-md">
+        <div className="max-w-2xl mx-auto space-y-3">
+          {/* 5 Core Control Buttons: Done / Feedback / Model answer / Pause / Slow */}
+          <div className="grid grid-cols-5 gap-2">
+            <button
+              onClick={() => handleCommand("Done")}
+              disabled={status !== "connected"}
+              className="py-2.5 px-1 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 disabled:opacity-40 border border-amber-500/40 text-amber-300 font-bold text-xs flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95"
+              title="답변 종료 및 핵심 피드백 요청"
+            >
+              <CheckCircle2 className="w-4 h-4 text-amber-400" />
+              <span>Done</span>
+            </button>
+
+            <button
+              onClick={() => handleCommand("Feedback")}
+              disabled={status !== "connected"}
+              className="py-2.5 px-1 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 disabled:opacity-40 border border-slate-700/60 text-slate-200 font-bold text-xs flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95"
+              title="방금 답변에 대한 피드백 요청"
+            >
+              <MessageSquare className="w-4 h-4 text-sky-400" />
+              <span>Feedback</span>
+            </button>
+
+            <button
+              onClick={() => handleCommand("Model answer")}
+              disabled={status !== "connected"}
+              className="py-2.5 px-1 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 disabled:opacity-40 border border-slate-700/60 text-slate-200 font-bold text-xs flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95"
+              title="60초 AL 모범 답안 청취"
+            >
+              <Sparkles className="w-4 h-4 text-purple-400" />
+              <span className="truncate max-w-[55px]">Model</span>
+            </button>
+
+            <button
+              onClick={() => handleCommand("Pause")}
+              disabled={status !== "connected"}
+              className="py-2.5 px-1 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 disabled:opacity-40 border border-slate-700/60 text-slate-200 font-bold text-xs flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95"
+              title="장면 일시정지 및 점검"
+            >
+              <Pause className="w-4 h-4 text-amber-400" />
+              <span>Pause</span>
+            </button>
+
+            <button
+              onClick={() => handleCommand("Slow")}
+              disabled={status !== "connected"}
+              className="py-2.5 px-1 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 disabled:opacity-40 border border-slate-700/60 text-slate-200 font-bold text-xs flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95"
+              title="천천히 또박또박 말하기"
+            >
+              <Clock className="w-4 h-4 text-emerald-400" />
+              <span>Slow</span>
+            </button>
+          </div>
+
+          {/* End Call Button */}
+          <button
+            onClick={handleHangUp}
+            className="w-full py-3.5 px-4 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-rose-600/25 transition-all cursor-pointer"
+          >
+            <PhoneOff className="w-4 h-4" />
+            <span>통화 종료 (End Call)</span>
+          </button>
+        </div>
+      </footer>
+    </div>
+  );
+};

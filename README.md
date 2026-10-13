@@ -1,19 +1,20 @@
 # 오늘도 한 통 (One Call English) — AI 1:1 전화영어 올인원 랩
 
-> **버전**: `v2.1.0` | **빌드**: `20261013-multilingual-1410` | **최종 갱신**: 2026-10-13 (KST)
+> **버전**: `v2.2.0` | **빌드**: `20261013-multilingual-1442` | **최종 갱신**: 2026-10-13 (KST)
 
 여러 도구(Claude, Gemini Live, Google Keep, Grok, ElevenLabs, Telegram)로 분산되어 있던 실전 영어회화 학습 파이프라인을 **단 하나의 통합 웹/모바일 앱에서 원클릭으로 완벽하게 자동화**한 AI 1:1 전화영어 플랫폼입니다.
 
-### 📌 [Phase 1: 1단계 뼈대 구축 완료 (Part B-12)]
+### 📌 [Phase 1: 1단계 뼈대 및 B-2 실시간 통화(대화용) 완료]
+- **B-2 실시간 음성 통화 (`gemini-3.8-live`)**:
+  - **세션 재개(Session Resumption) & 컨텍스트 창 압축(Sliding Window Compression) 기본 적용**: 15분 이상 장시간 대화 지속 지원.
+  - **GoAway 자동 재연결**: 서버의 GoAway 신호 및 일시적 연결 해제 감지 시 대화 문맥을 유지한 채 자동 재연결하며, 화면에는 "연결 유지 중" 상태를 직관적으로 표시.
+  - **직접 연결 및 서버 중계 이중 파이프**: 브라우저 임시 토큰(`POST /api/gemini/token`)을 통한 직결 시도 및 실패 시 투명한 서버 프록시(`/api/gemini/live`) 자동 폴백.
+  - **오늘 수업 지시서 주입**: 목표, 진행 과, 복습 대상 실수 최대 3개가 주입된 전문 프롬프트 빌더 탑재 (`src/data/lessonPromptBuilder.ts`).
+  - **5대 핵심 제어 버튼**: `Done` (답변 종료 및 핵심 피드백), `Feedback` (즉시 피드백), `Model answer` (60초 AL 모범 답안), `Pause` (일시 정지), `Slow` (천천히 말하기).
+  - **Live 자체 받아쓰기 보조 기록**: 실시간 발화 내역을 화면에 롤링 표시하고 통화 종료 시 `sessions.liveTranscript`에 보조 데이터로 저장.
+  - **순수 공급자 인터페이스 격리**: 화면 UI(`NewCallScreen.tsx`)는 `LiveProvider` 인터페이스만을 호출하여 특정 벤더에 종속되지 않음.
 - **Firebase 단일 계정 접근 제어 (B-1)**: `episode.kim@gmail.com` 1인 전용 Google 로그인, 비인가 계정 즉시 차단 및 자동 로그아웃, Firestore 및 Cloud Storage 연결.
-- **Part B-1 확정 모델 및 공급자 인터페이스**:
-  - `src/config/models.ts`: `gemini-3.8-live` (대화), `gemini-3.8-flash` (복기), `gemini-3.5-transcribe` VERBATIM (STT), `gemini-3.8-flash-tts` (TTS) 명시 및 단가표 구성.
-  - 공급자 추상화(`LiveProvider`, `SttProvider`, `LlmProvider`, `TtsProvider`): UI 계층의 특정 벤더 종속 배제.
-- **4대 목표 데이터 & 요일 루틴 (B-9)**:
-  - 목표: OPIc AL (14과), 필리조선소 주재원 (15과), 미국·호주 여행 (13과), Bluey 듣기 (12과).
-  - 부록 원문 튜터 프롬프트 100% 무삭제 보존 및 `[직무]`, `[Survey topics I chose]`, `[My role in Philly]` 설정 커스텀 지원.
-  - 요일 루틴: 월·토 OPIc, 화·목 Philly, 수 Bluey, 금 여행, 일 주간 복기.
-  - 첫 실행 진도 입력 모달 (10/10~10/12 1~3과 진행 히스토리 반영) 및 홈 화면 '오늘의 추천 수업 카드'.
+- **4대 목표 데이터 & 요일 루틴 (B-9)**: OPIc AL (14과), 필리조선소 주재원 (15과), 미국·호주 여행 (13과), Bluey 듣기 (12과), 부록 원문 프롬프트 100% 무삭제 보존 및 변수 커스텀.
 
 ---
 

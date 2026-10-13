@@ -14,6 +14,7 @@ import {
   CheckCircle,
   ExternalLink,
   Layers,
+  PhoneCall,
 } from "lucide-react";
 
 interface HomeScreenProps {
@@ -21,6 +22,7 @@ interface HomeScreenProps {
   goals: GoalData[];
   placeholders: PromptPlaceholders;
   onUpdateGoalProgress: (goalId: string, nextLessonIndex: number) => Promise<void>;
+  onStartCall: (goal: GoalData, lessonIndex: number) => void;
   onOpenSettings: () => void;
   onLogout: () => void;
 }
@@ -30,6 +32,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   goals,
   placeholders,
   onUpdateGoalProgress,
+  onStartCall,
   onOpenSettings,
   onLogout,
 }) => {
@@ -202,14 +205,23 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                 </button>
               </div>
 
+              {/* Start Call CTA (B-2 requirement) */}
+              <button
+                onClick={() => onStartCall(todayGoal, currentLesson.index)}
+                className="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-slate-950 font-black text-sm tracking-tight flex items-center justify-center gap-2.5 shadow-xl shadow-amber-500/20 transition-all cursor-pointer active:scale-98"
+              >
+                <PhoneCall className="w-5 h-5" />
+                <span>오늘 수업 통화 시작하기 ({currentLesson.index}과: {currentLesson.title})</span>
+              </button>
+
               {/* Status info */}
               <div className="pt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs border-t border-slate-800/70 text-slate-400">
                 <div className="flex items-center gap-2">
                   <CheckCircle className="w-4 h-4 text-emerald-400" />
-                  <span>1단계: Firestore 진도 & 원문 프롬프트 저장 완료</span>
+                  <span>B-2 통화 엔진: gemini-3.8-live · 세션 재개 & 컨텍스트 압축 준비 완료</span>
                 </div>
                 <div className="text-[11px] text-slate-500 font-mono">
-                  실시간 통화 엔진(B-2)은 1단계 후속에서 활성화됩니다
+                  GoAway 자동 재연결 지원
                 </div>
               </div>
             </div>
@@ -227,7 +239,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               <Layers className="w-4 h-4 text-amber-400" />
               <span>4대 집중 트랙 현황</span>
             </h3>
-            <span className="text-[11px] text-slate-400">각 목표별 다음 과 번호 관리</span>
+            <span className="text-[11px] text-slate-400">각 목표별 다음 과 번호 관리 및 통화</span>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -259,28 +271,38 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between pt-2 border-t border-slate-800/60 text-xs">
-                    <select
-                      value={nextIdx}
-                      onChange={(e) => handleLessonChange(goal.id, Number(e.target.value))}
-                      className="bg-[#121824] border border-slate-700 rounded-lg px-2.5 py-1 text-[11px] text-slate-300 focus:outline-none focus:border-amber-400"
-                    >
-                      {goal.lessons.map((l) => (
-                        <option key={l.index} value={l.index}>
-                          {l.index}과: {l.title.slice(0, 24)}...
-                        </option>
-                      ))}
-                    </select>
+                  <div className="space-y-2 pt-2 border-t border-slate-800/60">
+                    <div className="flex items-center justify-between text-xs">
+                      <select
+                        value={nextIdx}
+                        onChange={(e) => handleLessonChange(goal.id, Number(e.target.value))}
+                        className="bg-[#121824] border border-slate-700 rounded-lg px-2.5 py-1 text-[11px] text-slate-300 focus:outline-none focus:border-amber-400"
+                      >
+                        {goal.lessons.map((l) => (
+                          <option key={l.index} value={l.index}>
+                            {l.index}과: {l.title.slice(0, 24)}...
+                          </option>
+                        ))}
+                      </select>
+
+                      <button
+                        onClick={() => {
+                          setSelectedPromptGoal(goal);
+                          setShowPromptModal(true);
+                        }}
+                        className="text-amber-400 hover:text-amber-300 font-semibold text-[11px] flex items-center gap-1 cursor-pointer transition-colors"
+                      >
+                        <span>프롬프트 원문</span>
+                        <ChevronRight className="w-3 h-3" />
+                      </button>
+                    </div>
 
                     <button
-                      onClick={() => {
-                        setSelectedPromptGoal(goal);
-                        setShowPromptModal(true);
-                      }}
-                      className="text-amber-400 hover:text-amber-300 font-semibold text-[11px] flex items-center gap-1 cursor-pointer transition-colors"
+                      onClick={() => onStartCall(goal, nextIdx)}
+                      className="w-full py-2 px-3 rounded-xl bg-slate-800 hover:bg-amber-500 hover:text-slate-950 text-amber-300 text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer border border-slate-700 hover:border-amber-400"
                     >
-                      <span>프롬프트 원문</span>
-                      <ChevronRight className="w-3 h-3" />
+                      <PhoneCall className="w-3.5 h-3.5" />
+                      <span>{nextIdx}과 통화 시작</span>
                     </button>
                   </div>
                 </div>

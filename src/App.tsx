@@ -22,10 +22,14 @@ import {
   DEFAULT_PROMPT_PLACEHOLDERS,
   PromptPlaceholders,
 } from "./data/promptCustomizer";
+import { doc, setDoc, collection } from "firebase/firestore";
+import { db } from "./services/firebase/config";
 import { LoginScreen } from "./ui/auth/LoginScreen";
 import { HomeScreen } from "./ui/home/HomeScreen";
+import { NewCallScreen } from "./ui/call/NewCallScreen";
 import { InitialProgressModal } from "./ui/onboarding/InitialProgressModal";
 import { SettingsModal } from "./ui/settings/SettingsModal";
+import { LiveTranscriptItem } from "./services/providers/types";
 import { ShieldAlert, Loader2 } from "lucide-react";
 
 export const App: React.FC = () => {
@@ -44,6 +48,10 @@ export const App: React.FC = () => {
 
   // Placeholders for prompts
   const [placeholders, setPlaceholders] = useState<PromptPlaceholders>(DEFAULT_PROMPT_PLACEHOLDERS);
+
+  // Active Call State (B-2 requirement)
+  const [activeCallGoal, setActiveCallGoal] = useState<GoalData | null>(null);
+  const [activeCallLesson, setActiveCallLesson] = useState<number>(1);
 
   // 1. Connection check & Auth listener
   useEffect(() => {
@@ -170,6 +178,35 @@ export const App: React.FC = () => {
     await logOut();
   };
 
+  // Handle Call Start & End (B-2)
+  const handleStartCall = (goal: GoalData, lessonIndex: number) => {
+    setActiveCallGoal(goal);
+    setActiveCallLesson(lessonIndex);
+  };
+
+  const handleEndCall = async (transcripts: LiveTranscriptItem[]) => {
+    const endedGoal = activeCallGoal;
+    const endedLesson = activeCallLesson;
+    setActiveCallGoal(null);
+
+    // Save session liveTranscript to Firestore (B-2 requirement 6)
+    if (user && endedGoal) {
+      try {
+        const sessionRef = doc(collection(db, "users", user.uid, "sessions"));
+        await setDoc(sessionRef, {
+          goalId: endedGoal.id,
+          lessonIndex: endedLesson,
+          startedAt: new Date().toISOString(),
+          status: "done",
+          liveTranscript: transcripts,
+          createdAt: new Date().toISOString(),
+        });
+      } catch (err) {
+        console.error("Failed to save session liveTranscript to Firestore:", err);
+      }
+    }
+  };
+
   // 1. Initial Auth Loading State
   if (authLoading) {
     return (
@@ -195,7 +232,19 @@ export const App: React.FC = () => {
     );
   }
 
-  // 4. Authenticated Main View
+  // 4. Live Call View (B-2)
+  if (activeCallGoal) {
+    return (
+      <NewCallScreen
+        goal={activeCallGoal}
+        lessonIndex={activeCallLesson}
+        placeholders={placeholders}
+        onEndCall={handleEndCall}
+      />
+    );
+  }
+
+  // 5. Authenticated Main Home View
   return (
     <>
       <HomeScreen
@@ -203,6 +252,7 @@ export const App: React.FC = () => {
         goals={goals}
         placeholders={placeholders}
         onUpdateGoalProgress={handleUpdateGoalProgress}
+        onStartCall={handleStartCall}
         onOpenSettings={() => setShowSettingsModal(true)}
         onLogout={handleLogout}
       />

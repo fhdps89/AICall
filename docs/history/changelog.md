@@ -4,6 +4,30 @@
 
 ---
 
+### [2026-10-13 KST] v2.2.0 — Part B-2 실시간 통화(대화용 파이프) 구현 완료
+- **`gemini-3.8-live` 세션 재개 & 컨텍스트 창 압축 기본 탑재 (`geminiLiveProvider.ts`, `server.ts`)**:
+  - `sessionResumption: { handle: resumeHandle, transparent: true }` 적용을 통해 연결 끊김 시 이전 세션 상태 복원 및 맥락 유지.
+  - `contextWindowCompression: { slidingWindow: {} }` 설정으로 15분 이상 장시간 지속 통화 지원 (토큰 한도 초과 방지).
+- **GoAway 자동 재연결 및 상태 표시 UI (`NewCallScreen.tsx`)**:
+  - 서버 `goAway` 신호 또는 일시적 네트워크 단절 수신 시 저장된 세션 핸들(`resumeHandle`)을 이용해 1초 내 즉시 재연결 수행.
+  - 재연결 중 사용자 화면 상단에 "연결 유지 중" 상태 뱃지를 짧게 노출하여 안정감 제공.
+- **임시 토큰 직결 및 서버 프록시 이중 파이프라인 구축 (`POST /api/gemini/token`, `/api/gemini/live`)**:
+  - 브라우저가 먼저 서버의 임시 토큰 발급 API를 호출하여 Gemini 엔드포인트 직결을 시도하고, 임시 토큰 미지원 또는 실패 시 서버 WebSocket 프록시로 투명하게 자동 전환.
+- **오늘 수업 지시서 시스템 프롬프트 주입 (`lessonPromptBuilder.ts`)**:
+  - 목표명, 과 내용, 사용자 커스텀 변수([직무], [서베이 주제], [Philly 역할]) 치환본, 복습 대상 실수 최대 3개(대화 중 자연스럽게 유도)를 결합하여 Gemini Live 초기 세션에 주입.
+- **5대 핵심 화면 제어 버튼 탑재**:
+  - `Done`: 답변 종료 및 40초 이내 핵심 피드백(등급, 교정, AL 표현) 요청.
+  - `Feedback`: 즉시 발화 교정 요청.
+  - `Model answer`: 60초 AL 모범 답안 요청.
+  - `Pause`: 장면 일시 정지 및 점검.
+  - `Slow`: 천천히 또박또박 말하기 요청.
+- **Live 자체 받아쓰기 보조 저장**:
+  - `inputAudioTranscription`을 실시간 활성화하여 통화 화면에 롤링 자막으로 노출하고, 통화 종료 시 Firestore `users/{userId}/sessions/{sessionId}`의 `liveTranscript` 필드에 보조 데이터로 저장.
+- **격리 원칙 준수**:
+  - 녹음(10초 청크), 받아쓰기(gemini-3.5-transcribe), 복기(Mistake Vault), Keep 가져오기 등 후속 단계 기능은 요청에 따라 배제하고 B-2 통화 파이프에만 집중.
+
+---
+
 ### [2026-10-13 KST] v2.1.0 — Part B-12 1단계 뼈대 구축 완료
 - **Firebase 단일 계정 접근 제어 & 클라우드 스토리지 연동 (`B-1`, `B-11`)**:
   - `episode.kim@gmail.com` 1인 전용 Google 로그인 인증 체계 구현 (`src/services/firebase/auth.ts`).

@@ -18,8 +18,8 @@ const isProd = process.env.NODE_ENV === 'production';
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Target Native Audio Dialog Model and standard Gemini models
-const LIVE_MODELS = ['gemini-3.8-live', 'gemini-2.5-flash-native-audio-latest'];
+// Target Native Audio Dialog Model (Part B-1: gemini-3.8-live)
+const LIVE_MODELS = ['gemini-3.8-live'];
 const NATIVE_AUDIO_MODEL = 'gemini-3.8-live';
 const FALLBACK_CHAT_MODEL = 'gemini-3.8-flash';
 const FALLBACK_TTS_MODEL = 'gemini-3.8-flash-lite-tts';
@@ -37,7 +37,7 @@ export function getBuildVersion(): string {
     const m = String(mtime.getUTCMinutes()).padStart(2, '0');
     return `${Y}${M}${D}-multilingual-${h}${m}`;
   } catch {
-    return '20261013-multilingual-1410';
+    return '20261013-multilingual-1442';
   }
 }
 
@@ -170,6 +170,32 @@ app.get('/api/gemini/status', async (req: Request, res: Response) => {
     gdpConnected: hasServerKey,
     hasServerKey,
   });
+});
+
+// Ephemeral token endpoint for browser-direct Gemini Live connection (B-2 requirement 3)
+app.post('/api/gemini/token', async (req: Request, res: Response) => {
+  try {
+    const ai = createGenAI();
+    if (!ai) {
+      res.status(500).json({ ok: false, error: 'GEMINI_API_KEY가 서버 환경에 설정되지 않았습니다.', fallback: true });
+      return;
+    }
+
+    if (typeof (ai as any).authTokens?.create === 'function') {
+      const token = await (ai as any).authTokens.create({
+        config: {
+          // Defaults to 30 mins
+        },
+      });
+      res.json({ ok: true, token: token.name || token });
+      return;
+    }
+
+    res.json({ ok: false, fallback: true, message: 'Direct ephemeral token not supported in this environment, using server proxy' });
+  } catch (err: any) {
+    console.warn('[Gemini Token] Ephemeral token creation failed, falling back to server proxy:', err?.message || err);
+    res.json({ ok: false, fallback: true, error: err?.message });
+  }
 });
 
 // 2. Test Gemini connection endpoint
@@ -738,6 +764,23 @@ async function startServer() {
               if (serverMsg.serverContent?.interrupted) {
                 clientWs.send(JSON.stringify({ type: 'interrupted' }));
               }
+
+              // Forward session resumption update
+              if (serverMsg.sessionResumptionUpdate) {
+                clientWs.send(JSON.stringify({
+                  type: 'session_resumption_update',
+                  handle: serverMsg.sessionResumptionUpdate.newHandle,
+                  resumable: serverMsg.sessionResumptionUpdate.resumable,
+                }));
+              }
+
+              // Forward GoAway event
+              if (serverMsg.goAway) {
+                clientWs.send(JSON.stringify({
+                  type: 'go_away',
+                  timeLimit: serverMsg.goAway.timeLimit,
+                }));
+              }
             },
             onerror: (err: any) => {
               console.error('Gemini Live session error:', err);
@@ -761,11 +804,18 @@ async function startServer() {
             lock: string;
           }> = [
             {
-              desc: `Bilingual lock (${targetLang} + ko-KR)`,
+              desc: `gemini-3.8-live with session resumption & context compression`,
               config: {
                 responseModalities: [Modality.AUDIO],
-                inputAudioTranscription: { languageCodes: [targetLang, 'ko-KR'] },
-                outputAudioTranscription: { languageCodes: [targetLang] },
+                inputAudioTranscription: {},
+                outputAudioTranscription: {},
+                sessionResumption: {
+                  handle: msg.resumeHandle || undefined,
+                  transparent: true,
+                },
+                contextWindowCompression: {
+                  slidingWindow: {},
+                },
                 speechConfig: {
                   voiceConfig: { prebuiltVoiceConfig: { voiceName } },
                   languageCode: targetLang,
@@ -775,31 +825,17 @@ async function startServer() {
               lock: targetLang,
             },
             {
-              desc: `${targetLang} speechConfig with auto transcription`,
+              desc: 'gemini-3.8-live standard audio session',
               config: {
                 responseModalities: [Modality.AUDIO],
                 inputAudioTranscription: {},
                 outputAudioTranscription: {},
                 speechConfig: {
                   voiceConfig: { prebuiltVoiceConfig: { voiceName } },
-                  languageCode: targetLang,
                 },
                 systemInstruction,
               },
               lock: targetLang,
-            },
-            {
-              desc: 'voice-only fallback without languageCode',
-              config: {
-                responseModalities: [Modality.AUDIO],
-                inputAudioTranscription: {},
-                outputAudioTranscription: {},
-                speechConfig: {
-                  voiceConfig: { prebuiltVoiceConfig: { voiceName } },
-                },
-                systemInstruction,
-              },
-              lock: 'voice-only',
             },
           ];
 
@@ -831,14 +867,14 @@ async function startServer() {
             clientWs.send(JSON.stringify({
               type: 'ready',
               model: activeModel,
-              modelName: activeModel === 'gemini-3.8-live' ? 'Gemini 3.8 Live Native Audio' : 'Gemini 2.5 Flash Native Audio Dialog',
+              modelName: 'Gemini 3.8 Live Native Audio',
               languageLock: activeLock,
             }));
           } else {
-            console.error('Failed to establish Gemini Live session across all language configurations:', connectError);
+            console.error('Failed to establish Gemini Live session across all configurations:', connectError);
             clientWs.send(JSON.stringify({
               type: 'fallback_required',
-              error: connectError?.message || 'Live connect failed, falling back to HTTP dialog',
+              error: connectError?.message || 'Live connect failed',
             }));
           }
         } else if (msg.type === 'realtime_audio' && liveSession) {
@@ -860,6 +896,20 @@ async function startServer() {
             });
           } catch (sendErr) {
             console.error('Error forwarding text to Live session:', sendErr);
+          }
+        } else if (msg.type === 'control_command' && liveSession) {
+          const commandPrompts: Record<string, string> = {
+            Done: "Done. (I have finished my answer. Please provide concise feedback, estimated level, and AL upgrade expression under 40 seconds.)",
+            Feedback: "Feedback. (Please provide quick feedback on what I just said.)",
+            "Model answer": "Model answer. (Please give a 60-second AL model answer to this question using my details.)",
+            Pause: "Pause. (Let's pause here. How did I sound in this scene?)",
+            Slow: "Please speak a bit slower and enunciate clearly.",
+          };
+          const prompt = commandPrompts[msg.command] || msg.command;
+          try {
+            liveSession.sendRealtimeInput({ text: prompt });
+          } catch (cmdErr) {
+            console.error('Error forwarding control command to Live session:', cmdErr);
           }
         } else if (msg.type === 'interrupt' && liveSession) {
           try {
