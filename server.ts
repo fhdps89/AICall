@@ -25,8 +25,8 @@ app.use(express.json({ limit: '10mb' }));
 // Target Native Audio Dialog Model (Part B-1: gemini-3.8-live)
 const LIVE_MODELS = ['gemini-3.8-live'];
 const NATIVE_AUDIO_MODEL = 'gemini-3.8-live';
-// Server-side Live connect timeout; shorter than the client's 15s proxy ready timeout.
-const LIVE_CONNECT_TIMEOUT_MS = 6000; // x2 config attempts = 12s < client 15s
+// Server-side Live connect timeout; shorter than the client's proxy ready timeout.
+const LIVE_CONNECT_TIMEOUT_MS = 10000;
 const FALLBACK_CHAT_MODEL = 'gemini-3.8-flash';
 const FALLBACK_TTS_MODEL = 'gemini-3.8-flash-lite-tts';
 const TRANSCRIBE_MODEL = 'gemini-3.5-transcribe';
@@ -95,8 +95,22 @@ function resolveGeminiApiKeyInner(): string | undefined {
   const fromEnv = pickFromEnvPairs(Object.entries(process.env).map(([k, v]) => [k, v ?? '']), 'env');
   if (fromEnv) return fromEnv;
 
-  const dirs = Array.from(new Set([__dirname, process.cwd(), path.resolve(__dirname, '..')]));
+  const dirs = Array.from(new Set([__dirname, process.cwd(), path.resolve(__dirname, '..'), '/app']));
   for (const dir of dirs) {
+    // Check .dev.env.json written by container/environment
+    try {
+      const devEnvFile = path.resolve(dir, '.dev.env.json');
+      if (fs.existsSync(devEnvFile)) {
+        const json = JSON.parse(fs.readFileSync(devEnvFile, 'utf-8'));
+        for (const name of GEMINI_KEY_NAMES) {
+          if (isUsableKey(json[name])) {
+            lastKeySource = `json:${devEnvFile}:${name}`;
+            return json[name].trim().replace(/^["']|["']$/g, '');
+          }
+        }
+      }
+    } catch { /* ignore */ }
+
     try {
       const keyFile = path.resolve(dir, '.gemini_api_key');
       if (fs.existsSync(keyFile)) {
@@ -104,6 +118,7 @@ function resolveGeminiApiKeyInner(): string | undefined {
         if (isUsableKey(v)) { lastKeySource = `file:${keyFile}`; return v; }
       }
     } catch { /* ignore */ }
+
     for (const f of ['.env.local', '.env']) {
       try {
         const envFile = path.resolve(dir, f);
@@ -115,28 +130,27 @@ function resolveGeminiApiKeyInner(): string | undefined {
     }
   }
 
-  // Ancestor processes (incl. PID 1), for runtimes that only set env on the launcher.
-  const seen = new Set<number>();
-  let pid = process.pid;
-  for (let i = 0; i < 10; i++) {
-    try {
-      const stat = fs.readFileSync(`/proc/${pid}/status`, 'utf-8');
-      const ppidLine = stat.split('\n').find((l) => l.startsWith('PPid:'));
-      const ppid = ppidLine ? parseInt(ppidLine.split(':')[1].trim(), 10) : 0;
-      if (!ppid || ppid < 1 || seen.has(ppid)) break;
-      seen.add(ppid);
-      pid = ppid;
-    } catch { break; }
-  }
-  seen.add(1);
-  for (const p of seen) {
-    try {
-      const pairs = fs.readFileSync(`/proc/${p}/environ`, 'utf-8').split('\0').filter((x) => x.includes('='))
-        .map((x) => { const i = x.indexOf('='); return [x.slice(0, i), x.slice(i + 1)] as [string, string]; });
-      const v = pickFromEnvPairs(pairs, `proc:${p}`);
+  // Check /etc/environment
+  try {
+    if (fs.existsSync('/etc/environment')) {
+      const v = pickFromEnvPairs(parseDotenv(fs.readFileSync('/etc/environment', 'utf-8')), 'file:/etc/environment');
       if (v) return v;
-    } catch { /* ignore */ }
-  }
+    }
+  } catch { /* ignore */ }
+
+  // Scan all running processes in /proc/*/environ
+  try {
+    const pids = fs.readdirSync('/proc').filter((p) => /^\d+$/.test(p));
+    for (const p of pids) {
+      try {
+        const pairs = fs.readFileSync(`/proc/${p}/environ`, 'utf-8').split('\0').filter((x) => x.includes('='))
+          .map((x) => { const i = x.indexOf('='); return [x.slice(0, i), x.slice(i + 1)] as [string, string]; });
+        const v = pickFromEnvPairs(pairs, `proc:${p}`);
+        if (v) return v;
+      } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+
   return undefined;
 }
 
@@ -1305,12 +1319,16 @@ async function startServer() {
   const wss = new WebSocketServer({ noServer: true });
 
   server.on('upgrade', (request, socket, head) => {
-    const url = new URL(request.url || '', `http://${request.headers.host}`);
-    if (url.pathname === '/live' || url.pathname === '/api/gemini/live') {
-      wss.handleUpgrade(request, socket, head, (ws) => {
-        wss.emit('connection', ws, request);
-      });
-    } else {
+    try {
+      const pathname = new URL(request.url || '/', 'http://localhost').pathname;
+      if (pathname === '/live' || pathname === '/api/gemini/live') {
+        wss.handleUpgrade(request, socket, head, (ws) => {
+          wss.emit('connection', ws, request);
+        });
+      } else {
+        socket.destroy();
+      }
+    } catch {
       socket.destroy();
     }
   });

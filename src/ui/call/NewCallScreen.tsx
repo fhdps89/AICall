@@ -368,6 +368,10 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
             <div className="px-3 py-1.5 rounded-full bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs font-bold">
               연결 오류
             </div>
+          ) : status === "closed" ? (
+            <div className="px-3 py-1.5 rounded-full bg-slate-800 text-slate-400 text-xs font-medium">
+              통화 종료
+            </div>
           ) : (
             <div className="px-3 py-1.5 rounded-full bg-slate-800 text-slate-300 text-xs font-medium animate-pulse">
               연결 중...

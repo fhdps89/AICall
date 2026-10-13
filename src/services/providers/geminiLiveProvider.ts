@@ -81,8 +81,8 @@ export class GeminiLiveProvider implements LiveProvider {
       console.log("[Live] stage=connected path=" + this.connectionPath);
     } catch (err: any) {
       console.error("[GeminiLiveProvider] Connect failed:", err);
-      // Release anything half-opened so a retry starts clean.
-      await this.disconnect().catch(() => {});
+      // Release anything half-opened so a retry starts clean, without overwriting error status.
+      await this.disconnect(false).catch(() => {});
       this.options?.onStatusChange(
         "error",
         err?.userMessage || "연결하지 못했어요. 인터넷을 확인하고 다시 시도해 주세요."
@@ -96,6 +96,8 @@ export class GeminiLiveProvider implements LiveProvider {
     // 1. Try Ephemeral Token direct connection (2-1 requirement 1, 2, 3)
     let directSucceeded = false;
     console.log("[Live] stage=token_fetch");
+    this.options?.onStatusChange("connecting", "Gemini Live 연결 준비 중...");
+
     try {
       const tokenAbort = new AbortController();
       const tokenTimer = setTimeout(() => tokenAbort.abort(), 8000);
@@ -108,6 +110,7 @@ export class GeminiLiveProvider implements LiveProvider {
 
       if (tokenData.ok && tokenData.token) {
         console.log("[GeminiLiveProvider] Ephemeral token acquired. Attempting direct connection...");
+        this.options?.onStatusChange("connecting", "Gemini Live 직접 연결 중...");
         try {
           await this.connectDirect(tokenData.token);
           directSucceeded = true;
@@ -124,6 +127,7 @@ export class GeminiLiveProvider implements LiveProvider {
     // 2. Fallback to server proxy WebSocket
     if (!directSucceeded) {
       console.log("[GeminiLiveProvider] Connecting via server proxy WebSocket...");
+      this.options?.onStatusChange("connecting", "서버 중계로 Gemini Live 연결 중...");
       await this.connectViaServerProxy();
     }
   }
@@ -234,7 +238,7 @@ export class GeminiLiveProvider implements LiveProvider {
    * Fallback connection via Server Proxy WebSocket
    */
   private async connectViaServerProxy(): Promise<void> {
-    const PROXY_READY_TIMEOUT_MS = 15000;
+    const PROXY_READY_TIMEOUT_MS = 20000;
     return new Promise((resolve, reject) => {
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const host = window.location.host;
@@ -737,7 +741,7 @@ export class GeminiLiveProvider implements LiveProvider {
     }
   }
 
-  public async disconnect(): Promise<void> {
+  public async disconnect(notifyClosed: boolean = true): Promise<void> {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.isConnected = false;
     this.isReconnecting = false;
@@ -782,7 +786,9 @@ export class GeminiLiveProvider implements LiveProvider {
       this.mediaStream = null;
     }
 
-    this.options?.onStatusChange("closed", "통화가 정상 종료되었습니다.");
+    if (notifyClosed) {
+      this.options?.onStatusChange("closed", "통화가 정상 종료되었습니다.");
+    }
   }
 
   private arrayBufferToBase64(buffer: ArrayBuffer): string {
