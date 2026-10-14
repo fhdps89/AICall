@@ -1,4 +1,4 @@
-# 📚 「오늘도 한 통」 심층 기술 및 아카이브 문서 (Documentation Hub)
+# 📚 One Call English (옛 「오늘도 한 통」) 심층 기술 및 아카이브 문서 (Documentation Hub)
 
 > **일시 표기 기준**: 모든 아카이브 문서의 작성 및 변경 일시는 **한국 표준시 (KST, UTC+9)** 기준으로 기록됩니다.  
 > 본 디렉토리(`docs/`)는 **Cloud Run 배포 환경 변수 크기 제한(32KB)과 무관하게**, 프로젝트의 모든 아키텍처 결정, 문제 해결 과정, 외부 기술 검수 합의, 상세 버전 히스토리를 100% 온전하게 보존하는 영구 아카이브 허브입니다.
@@ -7,6 +7,11 @@
 ---
 
 ## 🗂 문서 인덱스 (Document Index)
+
+### 0. [기준 기획 (`docs/plan/`)](./plan/)
+- **[`implementation_plan_v4.md`](./plan/implementation_plan_v4.md)**: 지금 앱이 따르는 기획(Part B). 진행 가이드·작업 지시서·차이표도 같은 폴더.
+
+> ⚠️ 아래 1·3·4번 문서는 v1(한국어 친구 통화 앱) 시절 기록입니다. 여기 나오는 `downsampleTo16kHz`, `PcmAudioSink`, `playWavProof` 등은 2026-10-14 코드 정리로 삭제되었고, 지금 통화 음성 처리는 `src/services/providers/geminiLiveProvider.ts`에 있습니다.
 
 ### 1. [아키텍처 상세 설계 (`docs/architecture/`)](./architecture/)
 - **[`audio-pipeline.md`](./architecture/audio-pipeline.md)**:
@@ -19,7 +24,7 @@
 
 ### 2. [상세 릴리즈 및 변경 히스토리 (`docs/history/`)](./history/)
 - **[`changelog.md`](./history/changelog.md)**:
-  - v1.0.0부터 v1.2.1까지 모든 기능 추가, 버그 패치, 구조 변경점의 상세 무삭제 기록
+  - v1.0.0부터 v2.7.3까지 모든 기능 추가, 버그 패치, 구조 변경점의 상세 기록
 
 ### 3. [외부 기술 검수 및 실증 보고서 (`docs/reviews/`)](./reviews/)
 - **[`grok-review-response.md`](./reviews/grok-review-response.md)**:
@@ -37,6 +42,6 @@
 ---
 
 ## 🛡 문서 관리 및 배포 격리 정책
-1. **루트 문서 경량화**: `README.md`와 `PROJECT_CONTEXT.md`는 핵심 인덱스 및 요약본(Executive Summary)으로 10KB 미만으로 유지하여 Cloud Run 배포 에러를 영구 방지합니다.
+1. **루트 문서 경량화**: `README.md`와 `PROJECT_CONTEXT.md`는 핵심 인덱스 및 요약본(Executive Summary)으로 10KB 미만을 목표로 합니다. (2026-10-14 기준 `README.md` 약 5KB, `PROJECT_CONTEXT.md` 약 19KB로 목표 초과 — 오래된 상세 내용은 `docs/history/`로 옮겨 줄일 것)
 2. **무제한 기록**: 모든 상세 내용, 코드 스니펫, 디버깅 로그는 `docs/` 하위 문서에 제한 없이 자유롭게 기록합니다.
 3. **배포 제외**: `.dockerignore` 및 `.gcloudignore`를 통해 `docs/` 디렉토리가 Cloud Run 컨테이너 메타데이터/환경 변수로 주입되지 않도록 격리합니다.
