@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { GoogleGenAI, Modality, Type } from '@google/genai';
 import { requireAuth, verifyFirebaseIdToken } from './server/auth.ts';
+import { geminiLimit, checkLiveSessionStart } from './server/rateLimit.ts';
 import { DATA_DIR, startLectureJob, readLectureState, lectureAudioPath, kstToday } from './server/lecture.ts';
 import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive } from './server/sttBench.ts';
 import { isValidFeedSecret, writeFeedSync, feedForSecret, buildFeedToday, feedAudioFile, renderFeedHtml } from './server/feed.ts';
@@ -190,7 +191,7 @@ app.get('/api/gemini/status', async (req: Request, res: Response) => {
 });
 
 // Ephemeral token endpoint for browser-direct Gemini Live connection (B-2 requirement 3 & 2-1)
-app.post('/api/gemini/token', requireAuth, async (req: Request, res: Response) => {
+app.post('/api/gemini/token', requireAuth, geminiLimit, async (req: Request, res: Response) => {
   try {
     const key = resolveGeminiApiKey();
     if (!key || key.startsWith('MY_')) {
@@ -237,7 +238,7 @@ app.post('/api/gemini/token', requireAuth, async (req: Request, res: Response) =
 
 
 // 4. Native Gemini Voice Speech (TTS) endpoint
-app.post('/api/gemini/tts', requireAuth, async (req: Request, res: Response) => {
+app.post('/api/gemini/tts', requireAuth, geminiLimit, async (req: Request, res: Response) => {
   const start = performance.now();
   const { text, voiceName } = req.body || {};
 
@@ -307,7 +308,7 @@ if (!fs.existsSync(RECORDINGS_DIR)) {
 }
 
 // B-3 Requirement 2: 1-minute asynchronous partial transcription via gemini-3.5-transcribe VERBATIM
-app.post('/api/gemini/transcribe-partial', requireAuth, async (req: Request, res: Response) => {
+app.post('/api/gemini/transcribe-partial', requireAuth, geminiLimit, async (req: Request, res: Response) => {
   const start = performance.now();
   const { sessionId, userId, minuteIndex, timeRange, audioBase64, mimeType = 'audio/webm' } = req.body || {};
 
@@ -470,7 +471,7 @@ app.get('/api/recordings/file', requireAuth, (req: Request, res: Response) => {
 });
 
 // B-4 Final Full-Audio Transcription endpoint via gemini-3.5-transcribe (VERBATIM)
-app.post('/api/gemini/transcribe-final', requireAuth, async (req: Request, res: Response) => {
+app.post('/api/gemini/transcribe-final', requireAuth, geminiLimit, async (req: Request, res: Response) => {
   const start = performance.now();
   const { audioBase64, mimeType = 'audio/webm' } = req.body || {};
 
@@ -521,7 +522,7 @@ app.post('/api/gemini/transcribe-final', requireAuth, async (req: Request, res: 
 });
 
 // 6. Post-Call Review & Mistake Log Generation (Gemini 3.8 Flash structured JSON) - B-4 Specification
-app.post('/api/review', requireAuth, async (req: Request, res: Response) => {
+app.post('/api/review', requireAuth, geminiLimit, async (req: Request, res: Response) => {
   const start = performance.now();
   const {
     trackId,
@@ -680,7 +681,7 @@ STRICT ANALYSIS RULES (Part B-4):
 });
 
 // B-6 Requirement 3: Quiz Grading endpoint (TEXT_MODEL = gemini-3.8-flash)
-app.post('/api/quiz/grade', requireAuth, async (req: Request, res: Response) => {
+app.post('/api/quiz/grade', requireAuth, geminiLimit, async (req: Request, res: Response) => {
   const { mistakeId, myPhrase, naturalPhrase, reason, answer } = req.body || {};
 
   if (!naturalPhrase || answer === undefined) {
@@ -749,7 +750,7 @@ app.post('/api/quiz/grade', requireAuth, async (req: Request, res: Response) => 
 });
 
 // B-6 Requirement 2: Quiz Flashcard Korean Meaning generator (gemini-3.8-flash)
-app.post('/api/quiz/meaning-ko', requireAuth, async (req: Request, res: Response) => {
+app.post('/api/quiz/meaning-ko', requireAuth, geminiLimit, async (req: Request, res: Response) => {
   const { items } = req.body || {};
 
   if (!Array.isArray(items) || items.length === 0) {
@@ -809,7 +810,7 @@ ${listStr}
 });
 
 // B-9 Requirement 4: Coach LLM chat endpoint (gemini-3.8-flash + function calling)
-app.post('/api/coach/chat', requireAuth, async (req: Request, res: Response) => {
+app.post('/api/coach/chat', requireAuth, geminiLimit, async (req: Request, res: Response) => {
   const { text, plan, goals, mistakeStats, recentSessions, memory, history = [] } = req.body || {};
 
   if (!text || typeof text !== 'string' || !text.trim()) {
@@ -969,7 +970,7 @@ app.post('/api/coach/chat', requireAuth, async (req: Request, res: Response) => 
 
 // Health check endpoints for Cloud Run container probes
 // B-7 Morning Lecture (auth required: Firebase ID token of the single allowed user)
-app.post('/api/lecture/generate', requireAuth, (req: Request, res: Response) => {
+app.post('/api/lecture/generate', requireAuth, geminiLimit, (req: Request, res: Response) => {
   const uid = res.locals.user.uid as string;
   const { date, newMistakes, reviewMistakes, force } = req.body || {};
   const ai = createGenAI();
@@ -1068,7 +1069,7 @@ app.get('/feed/:secret/audio/:file', (req: Request, res: Response) => {
 });
 
 // B-10 Keep import: split pasted Keep "English mistake log" text into [내가 한 말 / 자연스러운 표현 / 이유]
-app.post('/api/keep/parse', requireAuth, async (req: Request, res: Response) => {
+app.post('/api/keep/parse', requireAuth, geminiLimit, async (req: Request, res: Response) => {
   const { text } = req.body || {};
   if (typeof text !== 'string' || !text.trim()) {
     res.status(400).json({ ok: false, error: '붙여넣은 Keep 텍스트가 없습니다.' });
@@ -1148,7 +1149,7 @@ app.get('/api/stt-bench/engines', requireAuth, (_req: Request, res: Response) =>
   res.json({ ok: true, engines: { live: true, gemini_transcribe: true, assemblyai: assemblyAvailable() } });
 });
 
-app.post('/api/stt-bench/transcribe', requireAuth, async (req: Request, res: Response) => {
+app.post('/api/stt-bench/transcribe', requireAuth, geminiLimit, async (req: Request, res: Response) => {
   const { engine, audioBase64, mimeType = 'audio/webm', pcm16kBase64 } = req.body || {};
   const ai = createGenAI();
   const start = performance.now();
@@ -1201,7 +1202,15 @@ async function startServer() {
         // Auth: Firebase ID token in ?token= (browsers cannot set headers on WebSocket).
         const token = new URL(request.url || '/', 'http://localhost').searchParams.get('token') || '';
         verifyFirebaseIdToken(token)
-          .then(() => {
+          .then((user) => {
+            const lim = checkLiveSessionStart(user.uid);
+            if (!lim.ok) {
+              console.warn('[Gemini Live] stage=ws_rate_limited', user.uid);
+              const body = JSON.stringify({ ok: false, error: lim.error, code: 'rate_limited' });
+              socket.write(`HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
+              socket.destroy();
+              return;
+            }
             wss.handleUpgrade(request, socket, head, (ws) => {
               wss.emit('connection', ws, request);
             });
