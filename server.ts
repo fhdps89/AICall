@@ -389,8 +389,9 @@ const activeSessionsMap = new Map<string, ActiveSessionTracker>();
 
 // Heartbeat / Chunk registration to track active call sessions
 app.post('/api/sessions/heartbeat', requireAuth, (req: Request, res: Response) => {
-  const { sessionId, userId, status = 'in-progress' } = req.body || {};
-  if (sessionId && userId) {
+  const { sessionId, status = 'in-progress' } = req.body || {};
+  const userId = res.locals.user.uid as string; // the signed-in user, never a client-supplied id
+  if (sessionId) {
     activeSessionsMap.set(sessionId, {
       sessionId,
       userId,
@@ -416,16 +417,16 @@ setInterval(() => {
 
 // Check interrupted sessions status
 app.get('/api/sessions/interrupted-check', requireAuth, (req: Request, res: Response) => {
-  const { userId } = req.query;
+  const userId = res.locals.user.uid as string; // only the signed-in user's sessions
   const interrupted: string[] = [];
   const now = Date.now();
   const TWO_MINUTES_MS = 2 * 60 * 1000;
 
   for (const [sId, sess] of activeSessionsMap.entries()) {
-    if ((!userId || sess.userId === userId) && sess.status === 'in-progress' && now - sess.lastChunkAt > TWO_MINUTES_MS) {
+    if (sess.userId === userId && sess.status === 'in-progress' && now - sess.lastChunkAt > TWO_MINUTES_MS) {
       sess.status = 'pending_review';
       interrupted.push(sId);
-    } else if ((!userId || sess.userId === userId) && sess.status === 'pending_review') {
+    } else if (sess.userId === userId && sess.status === 'pending_review') {
       interrupted.push(sId);
     }
   }
