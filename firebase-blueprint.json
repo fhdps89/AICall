@@ -49,11 +49,73 @@
         "reason": { "type": "string" },
         "sourceStt": { "type": "string" },
         "stage": { "type": "number", "enum": [1, 3, 7, 14] },
+        "nextReviewAt": { "type": "string" },
         "nextReviewDate": { "type": "string" },
-        "status": { "type": "string", "enum": ["reviewing", "on_hold", "graduated"] },
-        "reopenCount": { "type": "number" }
+        "status": { "type": "string", "enum": ["reviewing", "graduated", "deferred", "on_hold"] },
+        "reopenCount": { "type": "number" },
+        "graduatedAt": { "type": "string" },
+        "graduatedReason": { "type": "string" }
       },
       "required": ["createdAt", "source", "myPhrase", "naturalPhrase", "reason", "stage", "status"]
+    },
+    "Session": {
+      "title": "Session",
+      "description": "Call session record with live transcript, audio recording chunks, partial STT, and connection telemetry",
+      "type": "object",
+      "properties": {
+        "goalId": { "type": "string" },
+        "lessonIndex": { "type": "number" },
+        "startedAt": { "type": "string" },
+        "endedAt": { "type": "string" },
+        "lastChunkAt": { "type": "string" },
+        "status": { "type": "string", "enum": ["in-progress", "pending_review", "done", "aborted"] },
+        "liveTranscript": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "role": { "type": "string", "enum": ["user", "model"] },
+              "text": { "type": "string" },
+              "timestamp": { "type": "number" }
+            },
+            "required": ["role", "text"]
+          }
+        },
+        "recordingChunks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "index": { "type": "number" },
+              "path": { "type": "string" },
+              "storageUrl": { "type": "string" },
+              "timestamp": { "type": "string" },
+              "uploaded": { "type": "boolean" },
+              "durationSeconds": { "type": "number" },
+              "sizeBytes": { "type": "number" }
+            },
+            "required": ["index", "path", "timestamp", "uploaded", "durationSeconds"]
+          }
+        },
+        "sttPartial": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "minuteIndex": { "type": "number" },
+              "timeRange": { "type": "string" },
+              "transcript": { "type": "string" },
+              "timestamp": { "type": "string" },
+              "sourceChunkIndices": { "type": "array", "items": { "type": "number" } }
+            },
+            "required": ["minuteIndex", "timeRange", "transcript", "timestamp"]
+          }
+        },
+        "connectionPath": { "type": "string", "enum": ["direct", "proxy"] },
+        "directFailCount": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["goalId", "lessonIndex", "startedAt", "status", "liveTranscript"]
     }
   },
   "firestore": {
@@ -68,6 +130,10 @@
     "/users/{userId}/mistakes/{mistakeId}": {
       "schema": "Mistake",
       "description": "User mistake vault for spaced repetition"
+    },
+    "/users/{userId}/sessions/{sessionId}": {
+      "schema": "Session",
+      "description": "Call session history with connection telemetry"
     }
   }
 }

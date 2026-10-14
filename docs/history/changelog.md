@@ -4,6 +4,196 @@
 
 ---
 
+### [2026-10-13 KST] v2.6.0 — [작업 지시서 6] 2-B 퀴즈 — 가이드 B-6 완료
+- **문제 원인 및 기획 의도 (Context & Motivation)**:
+  - B-5 간격 반복(1→3→7→14일) 단계에서 누적된 복습 대상 실수를 플래시카드 퀴즈로 능동 인출(Active Recall)하고 졸업(Graduation)시킬 수 있는 카드형 퀴즈 엔진 구현.
+  - 학습자의 발화 편의성을 위해 음성(말하기, `gemini-3.5-transcribe` VERBATIM) 및 텍스트(타이핑) 두 가지 모드를 지원하고, `gemini-3.8-flash` 기반의 엄격하면서도 합리적인 의미 기반 채점 로직 구축.
+  - 오답 기억 왜곡을 방지하기 위해 정답 확인 전에는 과거 오답(`myPhrase`)을 은닉하고, 실패 시 1회 재도전 큐를 제공하여 학습 효과 극대화.
+- **적용된 수정 내역 (Applied Changes)**:
+  1. **퀴즈 대상 산출 및 홈 화면 연동 (`HomeScreen.tsx`, `getDueMistakes`)**:
+     - `getDueMistakes(today)` 결과를 그대로 사용하여 보류(`deferred`) 실수가 최우선 맨 앞에 정렬.
+     - 하루 최대 10개 제한(`Math.min(dueMistakes.length, 10)`).
+     - 홈 화면 간격 반복 카드 내 "오늘 복습 N개" 옆에 "오늘 퀴즈 N개" 카운터 및 "퀴즈 풀기" 버튼 배치.
+  2. **카드형 플래시카드 & 즉시 피드백 인터페이스 (`src/ui/quiz/QuizModal.tsx`)**:
+     - **카드 앞면**: 원어민 표현의 한국어 뜻(`meaningKo`) + 한 줄 이유(`reason`) 힌트 노출.
+     - **한국어 뜻 자동 생성 및 Firestore 영구 저장**: 실수 문서에 `meaningKo` 필드가 없으면 퀴즈 시작 시 `gemini-3.8-flash`(`/api/quiz/meaning-ko`)로 한 번 번역 생성 후 Firestore `mistakes/{id}.meaningKo`에 저장하여 재사용 (`updateMistakeMeaningKo`).
+     - **과거 오답 은닉**: 학습자가 과거 통화에서 했던 오답(`myPhrase`)은 채점 및 정답 확인 뒤에만 노출.
+  3. **말하기 vs 타이핑 2가지 입력 모드**:
+     - **말하기 모드**: Web Audio 녹음 ➔ `POST /api/gemini/transcribe-final` (`gemini-3.5-transcribe`, VERBATIM) 전사 ➔ 받아쓴 문장을 화면에 "인식된 발화 (VERBATIM): ..."로 그대로 노출 ➔ 즉시 채점.
+     - **타이핑 모드**: 텍스트 입력창 ➔ 제출 시 입력한 문장 그대로 채점.
+  4. **채점 서버 API (`/api/quiz/grade`, `gemini-3.8-flash`)**:
+     - 프롬프트 지침: "핵심 교정 포인트(reason이 고친 부분)가 맞으면 통과(passed: true). 사소한 철자(typo), 관사(a/an/the), 구두점, 대소문자 차이는 허용."
+     - 응답 스키마(JSON Schema): `{ passed: boolean, feedback: string(한국어 1~2문장), correctAnswer: string }`.
+  5. **결과 반영 & 1회 재도전 로직**:
+     - **통과**: `graduateMistakeAfterQuiz(userId, mistakeId)` 호출 (`status = 'graduated'`), 카드에 "졸업!" 축하 배지 및 통계 갱신.
+     - **실패**: 정답, 이유, 과거 오답을 즉시 노출하고, 해당 문항을 오늘 퀴즈 **맨 뒤에 1회 재도전 문항(`isRetry: true`)으로 다시 추가**. 재도전도 틀리면 상태는 그대로 유지하고 다음으로 진행.
+     - **퀴즈 시도 기록 영구 보존**: Firestore `users/{uid}/quizAttempts` 서브컬렉션에 `{ mistakeId, mode, answer, passed, feedback, createdAt }` 기록 (`saveQuizAttempt`).
+  6. **B-5 잔여 연동 확장 (`reviewPipeline.ts`, Requirement 5)**:
+     - 복기 파이프라인에서 복기 AI에 전달하는 복습 대상 실수 필터를 `status == 'reviewing'`뿐만 아니라 **`reviewing` + `deferred`**로 확장하여, 보류 상태의 실수도 통화 중 자연스럽게 맞게 쓰면 빠른 졸업(`usedCorrectly`)되도록 연동.
+  7. **엄격한 규칙 준수**:
+     - 수동 졸업 버튼 배제, 아침 강의(B-7) 미연결 시 홈 진입만 제공, 말해보카 등 상표 및 문제 복제 금지.
+- **방어 조치 및 호환성 (Safety & Guardrails)**:
+  - 기존 Live 직접연결·중계·세션 재개·10초 청크 녹음·B-4 복기 경로 100% 무변경 유지.
+  - `src/config/models.ts` 모델명 및 Firebase 단일 계정 화이트리스트(`episode.kim@gmail.com`) 불변 유지.
+  - 빌드 버전 `20261013-multilingual-1652` 동기화.
+
+---
+
+### [2026-10-13 KST] v2.5.0 — [작업 지시서 5] 2-A 간격 반복과 졸업 — 가이드 B-5 완료
+- **문제 원인 및 기획 의도 (Context & Motivation)**:
+  - 오답 분석을 통해 수집된 실수를 망각 곡선에 따라 체계적으로 장기 기억화하기 위해, 1일 ➔ 3일 ➔ 7일 ➔ 14일 간격 반복(Spaced Repetition) 단계 시스템과 졸업/보류/재학습 라이프사이클 구현.
+  - 다음 통화에서 맞게 발화했을 경우(`usedCorrectly`) 퀴즈 없이 즉시 졸업시키는 빠른 졸업 경로와, 이미 졸업한 실수를 재반복했을 경우(`repeatedMistakes`) 1일차로 강등시켜 다시 학습시키는 안전망 연동.
+  - 퀴즈(B-6) 및 아침 강의(B-7) 출시에 앞서 핵심 데이터 모델, 상태 전이 함수, 오늘 복습 대상 쿼리 및 임시 디버그 검증 도구 완비.
+- **적용된 수정 내역 (Applied Changes)**:
+  1. **실수 상태 모델 확장 (`db.ts`, `firebase-blueprint.json`)**:
+     - `MistakeData` 필드 정의: `stage`(1 | 3 | 7 | 14), `status`("reviewing" | "graduated" | "deferred"), `nextReviewAt`(KST YYYY-MM-DD), `graduatedAt`, `graduatedReason`, `reopenedAt`, `reopenCount`.
+     - 신규 실수 저장 시(`saveCallMistakes`) `stage: 1일`, `status: "reviewing"`, `nextReviewAt: 내일(KST+1일)` 자동 설정.
+  2. **아침 강의 수강 기반 단계 진행 (`advanceMistakeAfterLesson`)**:
+     - `reviewing` 상태의 실수를 다음 단계로 승급하고 KST 기준 `nextReviewAt` 갱신:
+       - 1일차 ➔ 3일차 (`nextReviewAt = 오늘 + 3일`)
+       - 3일차 ➔ 7일차 (`nextReviewAt = 오늘 + 7일`)
+       - 7일차 ➔ 14일차 (`nextReviewAt = 오늘 + 14일`)
+       - 14일차에서 수강 완료(퀴즈 미통과 상태) ➔ `status = "deferred"` (보류).
+     - 홈 화면에 "임시 디버그: 단계 진행" 시뮬레이터 제공: 각 실수 항목 옆 `[이 실수 강의 들었음 처리]` 버튼을 제공하여 1→3→7→14→deferred 순차 전진을 실시간 수동 테스트 가능.
+  3. **빠른 졸업 & 다시 복습 실반영 (`applyCallMistakeUpdates`, `reviewPipeline.ts`)**:
+     - 지시서 4에서 저장만 해 두었던 `sessions.review.usedCorrectly` 및 `repeatedMistakes`를 실제로 Firestore에 반영:
+       - `usedCorrectly`: `status = "graduated"`, `graduatedReason = "call_used_correctly"`, `graduatedAt` 갱신 (퀴즈 없이 즉시 졸업).
+       - `repeatedMistakes`: `status = "reviewing"`, `stage = 1일`, `nextReviewAt = 내일`, `reopenCount += 1`, `reopenedAt` 갱신 (1일차 다시 복습).
+  4. **퀴즈 통과 졸업 훅 준비 (`graduateMistakeAfterQuiz`)**:
+     - B-6 퀴즈 통과 시 단일 호출할 수 있는 `graduateMistakeAfterQuiz(userId, mistakeId)` 함수 구현 (`status = "graduated"`, `graduatedReason = "quiz_passed"`). 퀴즈 UI는 만들지 않고 훅만 보존.
+  5. **오늘 복습 대상 집계 쿼리 (`getDueMistakes`)**:
+     - `status == "deferred"` 및 `status == "reviewing" && nextReviewAt <= 오늘` 필터링.
+     - **`deferred`(보류) 실수가 목록의 맨 앞**에 위치하도록 정렬.
+     - 홈 화면에 "오늘 복습 N개" 숫자 카드 표출 (보류 개수 및 오늘 대상 개수 보조 표시).
+  6. **수동 졸업 버튼 엄격 배제**:
+     - 기획 스펙 지침에 따라 임의 수동 졸업 버튼은 일체 배치하지 않고, 통화 정상 발화 또는 퀴즈를 통해서만 졸업되도록 통제.
+- **방어 조치 및 호환성 (Safety & Guardrails)**:
+  - 기존 Live·녹음·복기·세션 재개 경로 100% 무변경 유지.
+  - `src/config/models.ts` 모델명 및 Firebase 단일 계정 화이트리스트(`episode.kim@gmail.com`) 불변 유지.
+  - 빌드 버전 `20261013-multilingual-1632` 동기화.
+
+---
+
+### [2026-10-13 KST] v2.4.0 — [작업 지시서 4] 1-D 통화 후 복기 (기록용) — 가이드 B-4 완료
+- **문제 원인 및 기획 의도 (Context & Motivation)**:
+  - 통화가 끝난 후 사용자의 실제 발화 실수를 왜곡 없이 정확하게 짚어내기 위해, "임의로 다듬지 않는" 원문 그대로의 기록용 받아쓰기(VERBATIM sttFinal) 기반 정밀 복기 파이프라인 구현.
+  - 음성 인식 오인식으로 인한 잘못된 오답 지적을 사용자가 직접 신고 및 제외할 수 있는 피드백 메커니즘 제공 및 Google Keep 단일 블록 복사 지원.
+  - 지시서 3에서 남은 미완료 통화 판정 및 실패 청크 자동 재업로드 보완.
+- **적용된 수정 내역 (Applied Changes)**:
+  0. **지시서 3 보완 (Requirement 0)**:
+     - 10초 조각 업로드 시마다 Firestore `sessions.lastChunkAt` 갱신 (`db.ts`, `appendSessionChunk`).
+     - "끊긴 통화" 판단을 Firestore 기준으로 일원화: `in-progress` 상태에서 `lastChunkAt`이 2분을 초과하면 `pending_review`로 전환 (`checkAndMarkInterruptedSessions`). 앱 시작 시에도 동일 검사 실행.
+     - 앱 시작 시 IndexedDB에 남은 미업로드 조각 자동 재업로드 및 Firestore `recordingChunks.uploaded: true` 갱신 후 IndexedDB 삭제 (`retryPendingUploads`).
+  1. **최종 받아쓰기 (기록용 sttFinal - `reviewPipeline.ts`, `server.ts`)**:
+     - 통화 종료(정상 종료 및 끊긴 통화) 시 저장된 10초 조각들을 순서대로 결합하여 `/api/gemini/transcribe-final` (`gemini-3.5-transcribe` VERBATIM)으로 전사.
+     - 전사 결과를 Firestore `sessions.sttFinal`에 영구 보존.
+     - 최종 받아쓰기 실패 시 통화 중 임시본(`sttPartial`)을 이어붙여 폴백 처리하며 `sourceStt: 'sttPartial_fallback'` 명시.
+  2. **복기 생성 파이프라인 (`/api/review`, `gemini-3.8-flash`)**:
+     - [기록용 받아쓰기(sttFinal) + Live 대화 로그 + 오늘 수업 지시서 + 기존 실수 목록]을 입력으로 주입.
+     - "인식이 어색하면 적당히 다듬어라" 지시를 완전히 삭제하고, `myPhrase`는 기록용 받아쓰기 문장을 글자 그대로 복사(절대 수정 금지).
+     - `mistakes[]`: `myPhrase`(글자 그대로 복사), `naturalPhrase`, `reason`(한국어 1~2문장), `sourceStt`.
+     - `keyExpressions[]`: 정확히 5개 필수 암기 표현.
+     - `estimatedLevel`: IM2, IH, AL, Native 등급.
+     - `usedCorrectly`: 현재 복습 중인 실수 중 이번 통화에서 맞게 쓴 ID 목록 저장.
+     - `repeatedMistakes`: 이미 졸업한 실수를 이번 통화에서 다시 틀린 ID 목록 저장.
+  3. **결과 화면 (Review Screen - `ReviewModal.tsx`)**:
+     - 표: 내가 한 말 (verbatim) -> 자연스러운 표현 (발음 듣기 지원) -> 교정 이유.
+     - 외울 표현 5선 목록 및 TTS 발음 재생.
+     - AI 예상 레벨 옆에 **"AI 예상치, 공식 등급 아님"** 문구 명시.
+     - 각 실수 항목 옆 **"이건 내가 한 말이 아니에요"** 버튼: 클릭 시 해당 실수를 숨기고 `qualityReports` 컬렉션에 `(sessionId, myPhrase, sourceStt, 시각)` 즉시 보존.
+     - **"Keep에 붙여넣기용 복사"** 버튼: 화면에 표시된 실수 목록을 줄마다 `[내가 한 말] -> [자연스러운 표현]` 단일 텍스트 블록으로 일괄 복사.
+     - "끝나지 않은 통화가 있어요" 복구 모달에서 **"복기 시작"** 클릭 시 본 복기 화면으로 자연스럽게 이어지도록 연동.
+  4. **영구 저장**:
+     - 실수는 `mistakes` 컬렉션에 `stage: 1`, `status: "reviewing"`, `source: "call"`, `sessionId`와 함께 자동 저장.
+     - 세션 문서에 review 결과와 `status: "done"` 저장.
+- **방어 조치 및 호환성 (Safety & Guardrails)**:
+  - 기존 Live 직접연결·중계·세션 재개·청크 녹음 경로 무변경 보존.
+  - `src/config/models.ts` 모델명 절대 불변 준수(`gemini-3.8-live`, `gemini-3.5-transcribe`, `gemini-3.8-flash`).
+  - 단일 허용 계정(`episode.kim@gmail.com`) ABAC 보안 규칙 및 firestore.rules 호환 검증.
+
+---
+
+### [2026-10-13 KST] v2.3.0 — [작업 지시서 3] 1-C 통화 중 녹음 (끊김 대비) — 가이드 B-3 완료
+- **문제 원인 및 기획 의도 (Context & Motivation)**:
+  - 모바일 웹앱 환경에서 화면 꺼짐, 네트워크 순단, 브라우저 탭 닫힘 등으로 인해 Live 연결이 끊기더라도 학생의 음성과 대화 맥락이 유실되지 않도록 이중 안전망 구축 필요.
+  - 10초 단위 로컬 우선(Local-First IndexedDB) 저장 후 클라우드 스토리지 전송, 세션 재개 실패 시 대화 요약 자동 주입, 미완료 통화 자동 복기 감지 파이프라인 구현.
+- **적용된 수정 내역 (Applied Changes)**:
+  1. **마이크 청크 녹음 파이프라인 (`chunkIndexedDb.ts`, `chunkRecorder.ts`)**:
+     - `MediaRecorder`를 활용하여 마이크 음성을 독립적으로 **10초** 조각으로 분할 녹음.
+     - 각 조각을 IndexedDB(`OneCallRecordingsDB`의 `pending_chunks`)에 먼저 즉시 영구 저장 후 Cloud Storage(`uploadAudioFile`)로 업로드.
+     - 업로드 성공 시 IndexedDB에서 해당 조각 삭제(순단 시 보존 및 백그라운드 재시도).
+     - Live 소켓 재연결/GoAway/프록시 전환과 완전 분리되어 녹음이 끊김 없이 연속 진행.
+  2. **통화 중 1분 단위 임시 받아쓰기 (`server.ts`, `/api/gemini/transcribe-partial`)**:
+     - 녹음이 6조각(~60초) 쌓일 때마다 서버가 비동기로 `gemini-3.5-transcribe` **VERBATIM** 모드로 전사하여 Firestore `sessions.sttPartial`에 누적 기록.
+     - 실시간 Live 대화와 별도 비동기로 동작하며 환경 설정(SettingsModal)에서 On/Off 토글 지원.
+  3. **Live 대화 로그 지속 저장 & 세션 재개 실패 대비 (`geminiLiveProvider.ts`, `db.ts`)**:
+     - Live 대화 턴이 발생할 때마다 실시간으로 Firestore `sessions.liveTranscript`에 동기화.
+     - 세션 재개 handle이 거부/실패할 경우, 그때까지의 대화 히스토리 요약을 새 세션 시스템 프롬프트에 자동 주입하여 튜터가 맥락을 잃지 않고 대화를 연속하도록 안전망 구축.
+  4. **끊긴 통화 자동 처리 및 복구 모달 (`server.ts`, `UnfinishedSessionModal.tsx`, `App.tsx`)**:
+     - 마지막 조각 이후 **2분** 동안 새 조각이 인입되지 않으면 서버 워치독 및 클라이언트가 끊긴 통화로 판정하여 `pending_review`("복기 대기")로 상태 자동 전환.
+     - 사용자가 앱을 닫았다가 다시 열면 **"끝나지 않은 통화가 있어요. 복기할까요?"** 복구 모달 표시.
+  5. **화면 안내 및 Screen Wake Lock (`NewCallScreen.tsx`)**:
+     - 통화 화면 상단에 **"통화 중에는 화면을 켜 두세요"** 안내 배너 및 10초 녹음 조각 카운터/보존 상태 표시.
+     - Screen Wake Lock API(`navigator.wakeLock.request('screen')`) 자동 요청.
+  6. **세션 메타데이터 & 스토리지 보관함 인스펙터 (`db.ts`, `firebase-blueprint.json`, `SettingsModal.tsx`)**:
+     - `sessions.recordingChunks`에 각 조각의 index, path, storageUrl, timestamp, uploaded, durationSeconds 저장.
+     - 설정 모달 내 "녹음 보관함 (Storage Chunks)" 탭을 신설하여 실제 저장된 10초 파일 목록과 1분 부분 전사 기록을 바로 검증할 수 있도록 지원.
+- **방어 조치 및 호환성 (Safety & Guardrails)**:
+  - `src/config/models.ts` 모델명 절대 불변 준수(`gemini-3.8-live`, `gemini-3.5-transcribe` VERBATIM).
+  - 허용 계정(`episode.kim@gmail.com`) 인증 규칙 및 CORS, 스토리지 폴백 보존.
+  - 빌드 버전 `20261013-multilingual-1529` KST 동기화.
+
+---
+
+### [2026-10-13 KST] v2.2.1 — [수정 지시서 2-1] 브라우저 직접 연결 고치기 (B-2 직접 연결 파이프라인 최적화)
+- **문제 원인 분석 (Root Cause)**:
+  - 기존 직접 연결 엔드포인트 URL이 `BidiGenerateContent?key=토큰` 형태로 지정되어 임시 토큰 인증 규격과 불일치(403/거절 발생 시 중계로 넘어감).
+  - 소켓 개방 즉시 `connected`로 판정하여 세션 `setupPayload` 거절 시 프록시 전환 기회를 놓칠 위험 존재.
+- **적용된 수정 내역 (Applied Changes)**:
+  - **직접 연결 주소 규격 동기화 (`geminiLiveProvider.ts`)**: `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained?access_token=${token}`로 수정.
+  - **서버 임시 토큰 발급 설정 보강 (`server.ts`, `/api/gemini/token`)**:
+    - `GoogleGenAI` 생성 시 `httpOptions.apiVersion: 'v1alpha'` 명시.
+    - `authTokens.create` 설정: `uses: 1`, `expireTime: now + 30분 (ISO)`, `newSessionExpireTime: now + 1분 (ISO)` 구성.
+    - 실제 API 키 노출 없이 `token.name`만 클라이언트로 안전하게 반환.
+  - **엄격한 "연결됨" 판정 시점 (`geminiLiveProvider.ts`)**:
+    - 소켓 `open` 후 setup을 전송하고, Gemini 서버로부터 `setupComplete` 메시지를 수신한 시점에만 `connected`로 전환.
+    - `setupComplete` 수신 전 소켓 종료/에러 발생 시 또는 8초 타임아웃 경과 시 "직접 연결 실패"로 판정하고 투명하게 서버 중계 프록시(`/api/gemini/live`)로 즉시 전환.
+  - **재연결 토큰 라이프사이클 (`geminiLiveProvider.ts`)**:
+    - `goAway` 수신 또는 일시 끊김 발생 시 기존 소켓 이벤트 클린업 후 `/api/gemini/token`에서 새로운 임시 토큰을 발급받아 세션 핸들(`resumeHandle`)을 이어 직접 연결부터 재시도.
+    - 새 토큰 발급 또는 직결 실패 시 서버 프록시로 안전 전환.
+  - **연결 경로 및 텔레메트리 영구 기록 (`geminiLiveProvider.ts`, `NewCallScreen.tsx`, `App.tsx`)**:
+    - 연결 수립 시 브라우저 콘솔에 `[Live] path=direct` 또는 `[Live] path=proxy` 1행 로깅.
+    - 통화 종료 시 Firestore `users/{userId}/sessions/{sessionId}` 문서에 `connectionPath`(마지막 연결 경로) 및 `directFailCount`(직접 직결 실패 횟수) 필드 영구 저장.
+- **방어 조치**:
+  - `firebase-blueprint.json` 내 `Session` 엔티티에 `connectionPath`, `directFailCount` 스키마 추가.
+  - 서버 프록시 경로, 통화 화면, 5대 제어 버튼, 음성 받아쓰기, `models.ts` 모델명 불변성 엄격 유지.
+
+---
+
+### [2026-10-13 KST] v2.2.0 — Part B-2 실시간 통화(대화용 파이프) 구현 완료
+- **`gemini-3.8-live` 세션 재개 & 컨텍스트 창 압축 기본 탑재 (`geminiLiveProvider.ts`, `server.ts`)**:
+  - `sessionResumption: { handle: resumeHandle, transparent: true }` 적용을 통해 연결 끊김 시 이전 세션 상태 복원 및 맥락 유지.
+  - `contextWindowCompression: { slidingWindow: {} }` 설정으로 15분 이상 장시간 지속 통화 지원 (토큰 한도 초과 방지).
+- **GoAway 자동 재연결 및 상태 표시 UI (`NewCallScreen.tsx`)**:
+  - 서버 `goAway` 신호 또는 일시적 네트워크 단절 수신 시 저장된 세션 핸들(`resumeHandle`)을 이용해 1초 내 즉시 재연결 수행.
+  - 재연결 중 사용자 화면 상단에 "연결 유지 중" 상태 뱃지를 짧게 노출하여 안정감 제공.
+- **임시 토큰 직결 및 서버 프록시 이중 파이프라인 구축 (`POST /api/gemini/token`, `/api/gemini/live`)**:
+  - 브라우저가 먼저 서버의 임시 토큰 발급 API를 호출하여 Gemini 엔드포인트 직결을 시도하고, 임시 토큰 미지원 또는 실패 시 서버 WebSocket 프록시로 투명하게 자동 전환.
+- **오늘 수업 지시서 시스템 프롬프트 주입 (`lessonPromptBuilder.ts`)**:
+  - 목표명, 과 내용, 사용자 커스텀 변수([직무], [서베이 주제], [Philly 역할]) 치환본, 복습 대상 실수 최대 3개(대화 중 자연스럽게 유도)를 결합하여 Gemini Live 초기 세션에 주입.
+- **5대 핵심 화면 제어 버튼 탑재**:
+  - `Done`: 답변 종료 및 40초 이내 핵심 피드백(등급, 교정, AL 표현) 요청.
+  - `Feedback`: 즉시 발화 교정 요청.
+  - `Model answer`: 60초 AL 모범 답안 요청.
+  - `Pause`: 장면 일시 정지 및 점검.
+  - `Slow`: 천천히 또박또박 말하기 요청.
+- **Live 자체 받아쓰기 보조 저장**:
+  - `inputAudioTranscription`을 실시간 활성화하여 통화 화면에 롤링 자막으로 노출하고, 통화 종료 시 Firestore `users/{userId}/sessions/{sessionId}`의 `liveTranscript` 필드에 보조 데이터로 저장.
+- **격리 원칙 준수**:
+  - 녹음(10초 청크), 받아쓰기(gemini-3.5-transcribe), 복기(Mistake Vault), Keep 가져오기 등 후속 단계 기능은 요청에 따라 배제하고 B-2 통화 파이프에만 집중.
+
+---
+
 ### [2026-10-13 KST] v2.1.0 — Part B-12 1단계 뼈대 구축 완료
 - **Firebase 단일 계정 접근 제어 & 클라우드 스토리지 연동 (`B-1`, `B-11`)**:
   - `episode.kim@gmail.com` 1인 전용 Google 로그인 인증 체계 구현 (`src/services/firebase/auth.ts`).

@@ -1,23 +1,46 @@
 /**
- * Abstract Provider Interfaces (Part B-1)
+ * Abstract Provider Interfaces (Part B-1 & B-2)
  * UI and Feature components call these interfaces rather than concrete vendor implementations.
  */
+
+export type LiveCommand = "Done" | "Feedback" | "Model answer" | "Pause" | "Slow";
+
+export interface LiveTranscriptItem {
+  role: "user" | "model";
+  text: string;
+  timestamp: number;
+}
 
 export interface LiveSessionOptions {
   sessionId: string;
   systemPrompt: string;
   onAudioData: (pcmBuffer: ArrayBuffer) => void;
   onTranscript: (text: string, isUser: boolean) => void;
-  onStatusChange: (status: "connecting" | "connected" | "reconnecting" | "closed" | "error", message?: string) => void;
+  onStatusChange: (
+    status: "connecting" | "connected" | "reconnecting" | "closed" | "error",
+    message?: string
+  ) => void;
+  onInterrupted?: () => void;
+  onTurnComplete?: () => void;
   resumeToken?: string;
+  voiceName?: string;
+  onMediaStreamReady?: (stream: MediaStream) => void;
+  /** Mic failed; the session stays connected. Show guidance only. */
+  onMicWarning?: (message: string) => void;
+  onTranscriptLogged?: (item: LiveTranscriptItem, allTranscripts: LiveTranscriptItem[]) => void;
 }
 
 export interface LiveProvider {
   name: string;
   connect(options: LiveSessionOptions): Promise<void>;
   sendAudioChunk(pcm16kChunk: ArrayBuffer): void;
+  sendTextPrompt(prompt: string): void;
+  sendControlCommand(command: LiveCommand): void;
+  getLiveTranscript(): LiveTranscriptItem[];
+  getResumeToken(): string | null;
+  getMediaStream(): MediaStream | null;
+  getConnectionStats(): { connectionPath: "direct" | "proxy"; directFailCount: number };
   disconnect(): Promise<void>;
-  getResumeToken?(): string | null;
 }
 
 export interface SttTranscriptionOptions {

@@ -63,7 +63,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
           <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 text-xs text-slate-300 flex items-center gap-3">
             <ShieldCheck className="w-5 h-5 text-emerald-400 shrink-0" />
             <div>
-              <p className="font-medium text-slate-200">단일 계정 접근 제어 (B-1)</p>
+              <p className="font-medium text-slate-200">단일 계정 접근 제어</p>
               <p className="text-slate-400 font-mono text-[11px] mt-0.5">
                 허용 계정: {ALLOWED_USER_EMAIL}
               </p>

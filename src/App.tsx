@@ -14,9 +14,17 @@ import {
   getUserGoals,
   batchInitGoals,
   updateGoalProgress,
+  getUnfinishedSessions,
+  markSessionPendingReview,
+  checkAndMarkInterruptedSessions,
   GoalData,
   UserProfileData,
+  SessionData,
+  SessionReviewData,
+  SttFinalData,
 } from "./services/firebase/db";
+import { retryPendingUploads } from "./services/recording/chunkIndexedDb";
+import { runPostCallReview } from "./services/review/reviewPipeline";
 import { DEFAULT_GOALS } from "./data/defaultGoals";
 import {
   DEFAULT_PROMPT_PLACEHOLDERS,
@@ -24,9 +32,25 @@ import {
 } from "./data/promptCustomizer";
 import { LoginScreen } from "./ui/auth/LoginScreen";
 import { HomeScreen } from "./ui/home/HomeScreen";
+import { NewCallScreen } from "./ui/call/NewCallScreen";
+import { PreCallScreen } from "./ui/call/PreCallScreen";
+import { UnfinishedSessionModal } from "./ui/call/UnfinishedSessionModal";
 import { InitialProgressModal } from "./ui/onboarding/InitialProgressModal";
 import { SettingsModal } from "./ui/settings/SettingsModal";
-import { ShieldAlert, Loader2 } from "lucide-react";
+import { ReviewModal } from "./ui/review/ReviewModal";
+import { ReviewFlowScreen } from "./ui/review/ReviewFlowScreen";
+import { LiveTranscriptItem } from "./services/providers/types";
+import { Loader2 } from "lucide-react";
+
+interface ActiveReviewState {
+  review: SessionReviewData;
+  sttFinal?: SttFinalData;
+  goalId: string;
+  lessonIndex: number;
+  goalTitle: string;
+  lessonTitle: string;
+  sessionId: string;
+}
 
 export const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(null);
@@ -42,8 +66,29 @@ export const App: React.FC = () => {
   const [showInitialProgressModal, setShowInitialProgressModal] = useState<boolean>(false);
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
 
+  // Unfinished session state (B-3 & B-4 requirement 0)
+  const [unfinishedSessions, setUnfinishedSessions] = useState<SessionData[]>([]);
+  const [showUnfinishedModal, setShowUnfinishedModal] = useState<boolean>(false);
+
+  // Post-Call Review state (B-4 requirement 1, 2, 3)
+  const [isGeneratingReview, setIsGeneratingReview] = useState<boolean>(false);
+  const [reviewProgressStep, setReviewProgressStep] = useState<string>("");
+  const [activeReviewData, setActiveReviewData] = useState<ActiveReviewState | null>(null);
+  // Failed review: kept so the in-app card can retry the same session
+  const [reviewFailure, setReviewFailure] = useState<{
+    message: string;
+    retry: () => void;
+  } | null>(null);
+  const [homeRefreshKey, setHomeRefreshKey] = useState<number>(0);
+
   // Placeholders for prompts
   const [placeholders, setPlaceholders] = useState<PromptPlaceholders>(DEFAULT_PROMPT_PLACEHOLDERS);
+
+  // Active Call State (B-2 requirement)
+  const [activeCallGoal, setActiveCallGoal] = useState<GoalData | null>(null);
+  const [activeCallLesson, setActiveCallLesson] = useState<number>(1);
+  // Pre-call prep screen (lesson, expressions, mic check) shown before connecting
+  const [prepCall, setPrepCall] = useState<{ goal: GoalData; lessonIndex: number } | null>(null);
 
   // 1. Connection check & Auth listener
   useEffect(() => {
@@ -65,7 +110,7 @@ export const App: React.FC = () => {
     return () => unsubscribe();
   }, []);
 
-  // 2. Load Firestore Data when authenticated
+  // 2. Load Firestore Data when authenticated + B-4 requirement 0 retry/watchdog
   useEffect(() => {
     if (!user) {
       setUserProfile(null);
@@ -116,6 +161,22 @@ export const App: React.FC = () => {
         // Check if first-run progress setup is needed
         if (!profile.initialProgressConfigured) {
           setShowInitialProgressModal(true);
+        }
+
+        // B-4 Requirement 0: Auto retry uploading pending/failed chunks from IndexedDB
+        retryPendingUploads(user.uid).catch((retryErr) => {
+          console.warn("[App] Auto retry failed chunks error:", retryErr);
+        });
+
+        // B-4 Requirement 0: Firestore-based watchdog (in-progress && lastChunkAt > 2m => pending_review)
+        try {
+          const interrupted = await checkAndMarkInterruptedSessions(user.uid);
+          if (interrupted.length > 0) {
+            setUnfinishedSessions(interrupted);
+            setShowUnfinishedModal(true);
+          }
+        } catch (sessErr) {
+          console.warn("[App] Watchdog check interrupted sessions error:", sessErr);
         }
       } catch (err) {
         console.error("Failed to load user data from Firestore:", err);
@@ -170,6 +231,144 @@ export const App: React.FC = () => {
     await logOut();
   };
 
+  // Handle Call Start & End (B-2, B-3, B-4)
+  const handleStartCall = (goal: GoalData, lessonIndex: number) => {
+    setPrepCall({ goal, lessonIndex });
+  };
+
+  const handlePrepConfirmed = () => {
+    if (!prepCall) return;
+    setActiveCallGoal(prepCall.goal);
+    setActiveCallLesson(prepCall.lessonIndex);
+    setPrepCall(null);
+  };
+
+  const handleEndCall = async (
+    transcripts: LiveTranscriptItem[],
+    stats?: { connectionPath: "direct" | "proxy"; directFailCount: number },
+    sessionId?: string,
+    audioBlobs?: Blob[]
+  ) => {
+    const endedGoal = activeCallGoal;
+    const endedLesson = activeCallLesson;
+    const finalSessionId = sessionId || `call-${Date.now()}`;
+    setActiveCallGoal(null);
+
+    if (!user || !endedGoal) return;
+
+    const sessionUser = user;
+    const lessonTitle = endedGoal.lessons.find((l) => l.index === endedLesson)?.title || `${endedLesson}과`;
+    const run = async () => {
+      setReviewFailure(null);
+      setIsGeneratingReview(true);
+      setReviewProgressStep("1/3 녹음을 정리하고 받아쓰는 중...");
+      try {
+        const result = await runPostCallReview({
+          userId: sessionUser.uid,
+          sessionId: finalSessionId,
+          goal: endedGoal,
+          lessonIndex: endedLesson,
+          placeholders,
+          audioBlobs,
+          liveTranscript: transcripts,
+          onProgress: (step) => setReviewProgressStep(step),
+        });
+        setActiveReviewData({
+          review: result.review,
+          sttFinal: result.sttFinal,
+          goalId: endedGoal.id,
+          lessonIndex: endedLesson,
+          goalTitle: endedGoal.title,
+          lessonTitle,
+          sessionId: finalSessionId,
+        });
+      } catch (err: any) {
+        console.error("[App] Post-call review generation failed:", err);
+        // Keep the session reopenable from 끝나지 않은 통화 (finalize marked it done).
+        markSessionPendingReview(sessionUser.uid, finalSessionId).catch(() => {});
+        setReviewFailure({ message: err?.message || "알 수 없는 오류", retry: run });
+      } finally {
+        setIsGeneratingReview(false);
+        setReviewProgressStep("");
+      }
+    };
+    await run();
+  };
+
+  // B-4: Handle "복기 시작" from Unfinished Session Modal
+  const handleStartReviewFromSession = async (session: SessionData) => {
+    if (!user) return;
+
+    const matchedGoal: GoalData = goals.find((g) => g.id === session.goalId) ||
+      goals[0] || {
+        id: session.goalId || "opic",
+        title: session.goalId?.toUpperCase() || "영어 회화",
+        type: "opic",
+        why: "",
+        priority: 1,
+        tutorPrompt: "",
+        lessons: [{ index: session.lessonIndex, title: `${session.lessonIndex}과` }],
+        nextLessonIndex: session.lessonIndex,
+        status: "active",
+        updatedAt: new Date().toISOString(),
+      };
+
+    const lessonTitle = matchedGoal.lessons.find((l) => l.index === session.lessonIndex)?.title || `${session.lessonIndex}과`;
+
+    // If review already exists for this session, open it directly
+    if (session.review) {
+      setActiveReviewData({
+        review: session.review,
+        sttFinal: session.sttFinal,
+        goalId: matchedGoal.id,
+        lessonIndex: session.lessonIndex,
+        goalTitle: matchedGoal.title,
+        lessonTitle,
+        sessionId: session.id,
+      });
+      return;
+    }
+
+    // Otherwise generate post-call review for the unfinished session
+    const sessionUser = user;
+    const run = async () => {
+      setReviewFailure(null);
+      setIsGeneratingReview(true);
+      setReviewProgressStep("1/3 저장된 녹음을 정리하고 받아쓰는 중...");
+      try {
+        const result = await runPostCallReview({
+          userId: sessionUser.uid,
+          sessionId: session.id,
+          goal: matchedGoal,
+          lessonIndex: session.lessonIndex,
+          placeholders,
+          liveTranscript: session.liveTranscript,
+          onProgress: (step) => setReviewProgressStep(step),
+        });
+
+        setActiveReviewData({
+          review: result.review,
+          sttFinal: result.sttFinal,
+          goalId: matchedGoal.id,
+          lessonIndex: session.lessonIndex,
+          goalTitle: matchedGoal.title,
+          lessonTitle,
+          sessionId: session.id,
+        });
+
+        const remaining = await getUnfinishedSessions(sessionUser.uid);
+        setUnfinishedSessions(remaining);
+      } catch (err: any) {
+        console.error("[App] Unfinished session review failed:", err);
+        setReviewFailure({ message: err?.message || "알 수 없는 오류", retry: run });
+      } finally {
+        setIsGeneratingReview(false);
+        setReviewProgressStep("");
+      }
+    };
+    await run();
+  };
+
   // 1. Initial Auth Loading State
   if (authLoading) {
     return (
@@ -195,17 +394,94 @@ export const App: React.FC = () => {
     );
   }
 
-  // 4. Authenticated Main View
+  // 4. Live Call View (B-2 & B-3)
+  if (activeCallGoal && user) {
+    return (
+      <NewCallScreen
+        userId={user.uid}
+        goal={activeCallGoal}
+        lessonIndex={activeCallLesson}
+        placeholders={placeholders}
+        enablePartialTranscribe={(userProfile as any)?.enablePartialTranscribe !== false}
+        onEndCall={handleEndCall}
+        onExit={() => setActiveCallGoal(null)}
+      />
+    );
+  }
+
+  // 4-0. Pre-call prep
+  if (prepCall && user) {
+    return (
+      <PreCallScreen
+        userId={user.uid}
+        goal={prepCall.goal}
+        lessonIndex={prepCall.lessonIndex}
+        onStart={handlePrepConfirmed}
+        onBack={() => setPrepCall(null)}
+      />
+    );
+  }
+
+  // 5. Authenticated Main Home View
   return (
     <>
       <HomeScreen
+        key={homeRefreshKey}
         user={user}
         goals={goals}
         placeholders={placeholders}
         onUpdateGoalProgress={handleUpdateGoalProgress}
+        onStartCall={handleStartCall}
         onOpenSettings={() => setShowSettingsModal(true)}
         onLogout={handleLogout}
       />
+
+      {/* Dedicated post-call review flow: loading → (ReviewModal) | in-app failure card */}
+      {(isGeneratingReview || reviewFailure) && (
+        <ReviewFlowScreen
+          loading={isGeneratingReview}
+          progressStep={reviewProgressStep}
+          errorMessage={reviewFailure?.message || null}
+          onRetry={() => reviewFailure?.retry()}
+          onLater={() => {
+            setReviewFailure(null);
+            setHomeRefreshKey((prev) => prev + 1);
+          }}
+        />
+      )}
+
+      {/* Review Modal Screen (B-4 requirement 3) */}
+      {activeReviewData && (
+        <ReviewModal
+          userId={user.uid}
+          sessionId={activeReviewData.sessionId}
+          goalId={activeReviewData.goalId}
+          lessonIndex={activeReviewData.lessonIndex}
+          goalTitle={activeReviewData.goalTitle}
+          lessonTitle={activeReviewData.lessonTitle}
+          review={activeReviewData.review}
+          sttFinal={activeReviewData.sttFinal}
+          onClose={() => {
+            setActiveReviewData(null);
+            setHomeRefreshKey((prev) => prev + 1);
+          }}
+        />
+      )}
+
+      {/* Unfinished Session Modal (B-3 requirement 4 & B-4 requirement 0) */}
+      {showUnfinishedModal && unfinishedSessions.length > 0 && user && (
+        <UnfinishedSessionModal
+          userId={user.uid}
+          unfinishedSessions={unfinishedSessions}
+          onClose={() => setShowUnfinishedModal(false)}
+          onStartReview={handleStartReviewFromSession}
+          onResolved={async () => {
+            setShowUnfinishedModal(false);
+            const remaining = await getUnfinishedSessions(user.uid);
+            setUnfinishedSessions(remaining);
+          }}
+        />
+      )}
 
       {/* Initial Progress Modal on First Run */}
       {showInitialProgressModal && (
@@ -217,6 +493,7 @@ export const App: React.FC = () => {
 
       {/* Settings Modal */}
       <SettingsModal
+        userId={user.uid}
         isOpen={showSettingsModal}
         onClose={() => setShowSettingsModal(false)}
         placeholders={placeholders}

@@ -27,25 +27,7 @@ import {
   TtsResult,
 } from "./types";
 
-/**
- * Skeleton Implementation of LiveProvider
- */
-class GeminiLiveProvider implements LiveProvider {
-  name = LIVE_MODEL;
-
-  async connect(options: LiveSessionOptions): Promise<void> {
-    options.onStatusChange("connecting", "Initializing live session with " + this.name);
-    // Real WebRTC / WebSocket connection to be implemented in Step 2 of Phase 1
-  }
-
-  sendAudioChunk(_chunk: ArrayBuffer): void {
-    // Media streaming chunk sender
-  }
-
-  async disconnect(): Promise<void> {
-    // Teardown
-  }
-}
+import { GeminiLiveProvider } from "./geminiLiveProvider";
 
 /**
  * Skeleton Implementation of SttProvider

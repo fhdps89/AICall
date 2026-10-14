@@ -1,22 +1,105 @@
 # 오늘도 한 통 (One Call English) — AI 1:1 전화영어 올인원 랩
 
-> **버전**: `v2.1.0` | **빌드**: `20261013-multilingual-1410` | **최종 갱신**: 2026-10-13 (KST)
+> **버전**: `v2.6.0` | **빌드**: `20261013-multilingual-1652` | **최종 갱신**: 2026-10-13 (KST)
 >
 > **기준 기획 (2026-10-13~)**: [`docs/plan/implementation_plan_v4.md`](./docs/plan/implementation_plan_v4.md) Part B · 진행 가이드 [`docs/plan/ai-studio-build-guide.md`](./docs/plan/ai-studio-build-guide.md) · 현재 앱과의 차이 [`docs/plan/gap-v2.1.0-vs-plan-v4.md`](./docs/plan/gap-v2.1.0-vs-plan-v4.md)  
 > 아래 기능 중 텔레그램 발송, 3분 팟캐스트, 수동 "복습 완료"는 v2.0.0 때 예전 기획으로 만든 것이며 v4 기준으로 바뀔 예정입니다(차이표 참고).
 
 여러 도구(Claude, Gemini Live, Google Keep, Grok, ElevenLabs, Telegram)로 분산되어 있던 실전 영어회화 학습 파이프라인을 **단 하나의 통합 웹/모바일 앱에서 원클릭으로 완벽하게 자동화**한 AI 1:1 전화영어 플랫폼입니다.
 
-### 📌 [Phase 1: 1단계 뼈대 구축 완료 (Part B-12)]
+### 📌 [Phase 2: B-6 퀴즈 (2-B) 완성]
+- **퀴즈 대상 산출 (최대 10개)**:
+  - `getDueMistakes(today)` 결과를 그대로 사용하여 보류(`deferred`) 실수가 목록 최우선 맨 앞에 정렬.
+  - 홈 화면의 "오늘 복습 N개" 옆에 **"오늘 퀴즈 N개"** 카운터(`N = min(대상 수, 10)`) 및 **"퀴즈 풀기"** 버튼 배치.
+- **카드형 플래시카드 & 즉시 피드백 (`QuizModal`)**:
+  - **카드 앞면**: 원어민 표현의 한국어 뜻(`meaningKo`) + 교정 이유(`reason`) 한 줄 힌트 노출.
+  - **한국어 뜻 자동 생성 & 영구 보존**: 실수 문서에 `meaningKo`가 없으면 퀴즈 시작 시 `gemini-3.8-flash`(`/api/quiz/meaning-ko`)로 한 번 번역하여 Firestore `mistakes.meaningKo`에 저장 후 영구 재사용.
+  - **오답 은닉 원칙**: 내가 과거 통화에서 했던 오답(`myPhrase`)은 **정답 확인 뒤에만 노출**하여 힌트 노출 및 기억 왜곡 원천 차단.
+- **2가지 응답 방식 (말하기 vs 타이핑)**:
+  - **말하기**: 마이크 녹음 ➔ `gemini-3.5-transcribe` **VERBATIM** 모드로 전사(`/api/gemini/transcribe-final`) ➔ 인식된 문장을 화면에 그대로 보여준 뒤 채점.
+  - **타이핑**: 텍스트 입력창에 작성한 문장 그대로 채점.
+- **엄격한 채점 엔진 (`gemini-3.8-flash`, `/api/quiz/grade`)**:
+  - 채점 규칙: **"핵심 교정 포인트(reason이 고친 부분)가 맞으면 통과."** 사소한 철자(typo), 관사(a/an/the), 구두점, 대소문자 차이는 허용.
+  - 응답 JSON Schema 강제: `{ passed: boolean, feedback: string(한국어 1~2문장), correctAnswer: string }`.
+- **결과 반영 & 1회 재도전 큐**:
+  - **통과 시**: `graduateMistakeAfterQuiz(mistakeId)` 자동 호출 (`status = graduated`, "졸업!" 축하 배지 표시).
+  - **실패 시**: 정답(`correctAnswer`), 이유(`reason`), 과거 오답(`myPhrase`)을 즉시 표시하고, 해당 문항을 오늘 퀴즈 **맨 뒤에 1회 재도전 문항으로 다시 추가**. 재시도도 틀리면 상태를 유지하고 통과.
+  - **퀴즈 기록 저장**: `users/{uid}/quizAttempts` 서브컬렉션에 `{ mistakeId, mode, answer, passed, feedback, createdAt }` 영구 저장.
+- **B-5 연동 보완 (Requirement 5)**:
+  - 복기 파이프라인(`reviewPipeline.ts`)이 복기 AI에 전달하는 복습 대상 목록을 `status == 'reviewing'` 뿐만 아니라 **`reviewing` + `deferred`**로 확장하여, 보류 상태의 실수도 통화 중 자연스럽게 사용하면 빠른 졸업(`usedCorrectly`)되도록 연동.
+- **규정 준수**: 수동 졸업 버튼 배제, 아침 강의(B-7) 미연결 시 홈 진입만 제공, 말해보카 등 상표 및 문제 복제 금지.
+
+### 📌 [Phase 2: B-5 간격 반복과 졸업 (2-A) 완성]
+- **실수 간격 반복 모델 (mistakes 컬렉션)**:
+  - `stage`: 1일 → 3일 → 7일 → 14일 (일수 단계 관리).
+  - `status`: `reviewing` (복습 중) | `graduated` (졸업) | `deferred` (보류).
+  - `nextReviewAt`: KST 기준 다음 복습일자 (`YYYY-MM-DD`).
+  - 신규 등록 실수(복기 결과)는 기본 `stage=1일`, `status=reviewing`, `nextReviewAt=내일(KST+1일)`로 시작.
+- **아침 강의 수강 기반 단계 진행 (`advanceMistakeAfterLesson`)**:
+  - `reviewing` 상태의 실수를 다음 단계로 승급하고 `nextReviewAt` 갱신:
+    - 1일차 ➔ 3일차 (`nextReviewAt = 오늘 + 3일`)
+    - 3일차 ➔ 7일차 (`nextReviewAt = 오늘 + 7일`)
+    - 7일차 ➔ 14일차 (`nextReviewAt = 오늘 + 14일`)
+    - 14일차에서 강의 수강 완료(퀴즈 미응시) ➔ `status = deferred` (보류).
+  - 홈 화면에 **"임시 디버그: 단계 진행"** 시뮬레이터를 제공하여, 각 실수의 1→3→7→14→deferred 진행을 `[이 실수 강의 들었음 처리]` 버튼으로 수동 검증 지원.
+- **빠른 졸업 & 다시 복습 (복기 결과 연동)**:
+  - 통화 복기 시 `sessions.review.usedCorrectly[]`에 포함된 실수 ID ➔ `status = graduated` (퀴즈 없이 즉시 졸업).
+  - `sessions.review.repeatedMistakes[]`에 포함된 실수 ID ➔ `status = reviewing`, `stage = 1일`, `nextReviewAt = 내일` (다시 복습으로 강등).
+- **퀴즈 통과 졸업 훅 (`graduateMistakeAfterQuiz`)**:
+  - B-6 퀴즈 연동을 위한 함수 준비 완료 (호출 시 `status = graduated`, `graduatedReason = 'quiz_passed'`).
+- **오늘 복습 대상 집계 (`getDueMistakes`)**:
+  - `status == 'reviewing'` 및 `nextReviewAt <= 오늘` 인 항목 + `status == 'deferred'` 인 항목 집계.
+  - 정렬 순서: **`deferred`(보류) 항목이 목록 맨 앞**에 위치.
+  - 홈 화면 상단에 **"오늘 복습 N개"** 카운터 명시 (보류 수 및 오늘 복습 대상 수 세부 표시).
+- **엄격한 수동 졸업 버튼 배제**: 임의 조작 방지를 위해 수동 졸업 버튼은 배제하고, 복기 정상 발화(`usedCorrectly`) 및 퀴즈 통과를 통해서만 졸업되도록 시스템 규칙 준수.
+
+### 📌 [Phase 1: B-4 통화 후 복기 (기록용) 완성]
+- **최종 받아쓰기 (기록용 sttFinal)**:
+  - 통화 종료(정상 종료 또는 끊긴 통화 판정) 시 세션의 10초 녹음 조각들을 순서대로 합쳐 `gemini-3.5-transcribe` **VERBATIM** 모드로 전사 후 `sessions.sttFinal`에 영구 보존 (화자가 발화한 말 토씨 하나 틀리지 않고 그대로 전사).
+  - 최종 받아쓰기 실패 시 통화 중 임시본(`sttPartial`)을 이어 붙여 자동 대체(`sourceStt: 'sttPartial_fallback'`).
+- **구조화된 복기 생성 (`gemini-3.8-flash`)**:
+  - [기록용 받아쓰기(sttFinal) + Live 대화 로그 + 오늘 수업 지시서 + 기존 오답 목록]을 주입하여 엄격한 JSON 스키마로 복기 생성.
+  - **myPhrase 절대 불변 규칙**: "인식이 어색하면 적당히 다듬어라" 지시를 완전히 삭제하고, 기록용 받아쓰기 문장을 글자 그대로 복사하여 학습자의 실제 문법 오류와 어색한 어휘를 가감 없이 보존.
+  - **오답 교정 (mistakes[])**: `myPhrase`(글자 그대로 복사), `naturalPhrase`(원어민 자연스러운 표현), `reason`(한국어 1~2문장 교정 이유), `sourceStt`.
+  - **외울 표현 5개 (keyExpressions[])**: 오늘 꼭 외워야 할 핵심 표현 정확히 5개 추출 (상황 및 예문 포함).
+  - **AI 예상 레벨 (estimatedLevel)**: IM2 / IH / AL / Native 산출.
+  - **복습 연동 데이터 (usedCorrectly / repeatedMistakes)**: 복습 중인 실수를 맞게 쓴 것 및 이미 졸업한 실수를 재반복한 것의 ID를 감지 및 저장.
+- **복기 결과 화면 (Review Screen)**:
+  - 표: 내가 한 말 (verbatim) -> 원어민 자연스러운 표현 (발음 듣기) -> 교정 이유.
+  - AI 예상 레벨 옆에 **"AI 예상치, 공식 등급 아님"** 안내 명시.
+  - 각 실수 항목별 **"이건 내가 한 말이 아니에요"** 버튼: 클릭 시 해당 항목을 화면과 Keep 복사 블록에서 숨기고 `qualityReports` 컬렉션에 `(sessionId, myPhrase, sourceStt, 시각)` 즉시 기록.
+  - **"Keep에 붙여넣기용 복사"** 버튼: 줄마다 `[내가 한 말] -> [원어민 표현]` 형태로 일괄 클립보드 복사.
+  - "끝나지 않은 통화가 있어요" 복구 모달에서 **"복기 시작"** 클릭 시 본 복기 파이프라인으로 자연스럽게 연결.
+- **지시서 3 보완 (Requirement 0)**:
+  - 조각 업로드 시마다 Firestore `sessions.lastChunkAt` 자동 갱신.
+  - 끊긴 통화 기준을 **Firestore 기준**으로 일원화: `in-progress` 상태에서 `lastChunkAt`이 2분 초과 시 `pending_review`로 전환하고 복기 가능하도록 처리 (서버 잠듦 대비 앱 시작 시 자동 판정).
+  - 앱 실행 시 IndexedDB에 남아 있는 업로드 실패 조각 자동 재업로드 및 `recordingChunks.uploaded: true` 갱신 후 IndexedDB 삭제.
+
+### 📌 [Phase 1: B-3 통화 중 녹음 (끊김 대비) 완성]
+- **마이크 청크 녹음 (10초 단위 Local-First)**:
+  - `MediaRecorder`로 10초마다 완전한 WebM 오디오 조각 생성.
+  - IndexedDB(`OneCallRecordingsDB`)에 즉시 1차 저장 후 Cloud Storage로 업로드, 업로드 완료 시 IndexedDB에서 자동 삭제.
+  - Live 연결 끊김이나 GoAway, 서버 재연결 중에도 녹음은 백그라운드에서 중단 없이 지속.
+- **1분 단위 임시 받아쓰기 (비동기 STT)**:
+  - 약 1분(6조각) 누적 시 서버가 `gemini-3.5-transcribe` **VERBATIM** 모드로 음성을 전사하여 `sessions.sttPartial`에 자동 저장.
+  - 실시간 Live 대화에 영향 주지 않는 비동기 처리, 환경설정(SettingsModal)에서 자유롭게 On/Off 가능.
+- **Live 대화 로그 지속 저장 & 세션 재개 실패 대비**:
+  - 통화 중 실시간으로 Firestore `sessions.liveTranscript`에 대화 로그 누적.
+  - 세션 재개 handle이 거절/실패할 경우, 직전 대화 요약을 신규 세션 시스템 프롬프트에 자동 주입하여 튜터가 맥락을 유지한 채 대화 지속.
+- **끊긴 통화 자동 감지 & 복구 모달**:
+  - 마지막 조각 이후 2분 이상 새 조각이 없으면 끊긴 통화로 보고 `pending_review`("복기 대기")로 자동 전환.
+  - 브라우저를 닫았다가 다시 열면 **"끝나지 않은 통화가 있어요. 복기할까요?"** 복구 모달 자동 노출.
+- **화면 안내 및 Screen Wake Lock**:
+  - 통화 화면 상단에 **"통화 중에는 화면을 켜 두세요"** 배너 및 10초 녹음 조각 카운터/보존 현황 표시.
+  - Screen Wake Lock API를 호출하여 화면 꺼짐 방지.
+- **녹음 보관함 (Storage Chunks) 인스펙터**:
+  - 환경설정 모달 내 "녹음 보관함" 탭에서 실제 저장된 10초 오디오 파일 목록과 1분 전사본을 직접 확인 및 검증 가능.
+
+### 📌 [기존 탑재 기능: B-2 실시간 통화 & 직접 연결 최적화]
+- **브라우저 직접 연결 최적화 (2-1)**: `BidiGenerateContentConstrained?access_token=${token}` 정식 규격, v1alpha 임시 토큰, `setupComplete` 기반 엄격한 연결 판정, 서버 프록시 자동 폴백, `connectionPath` / `directFailCount` 텔레메트리.
+- **B-2 실시간 음성 통화 (`gemini-3.8-live`)**: 세션 재개 & 컨텍스트 압축 기본 적용, GoAway 자동 재연결, 5대 핵심 제어 버튼(Done / Feedback / Model / Pause / Slow).
 - **Firebase 단일 계정 접근 제어 (B-1)**: `episode.kim@gmail.com` 1인 전용 Google 로그인, 비인가 계정 즉시 차단 및 자동 로그아웃, Firestore 및 Cloud Storage 연결.
-- **Part B-1 확정 모델 및 공급자 인터페이스**:
-  - `src/config/models.ts`: `gemini-3.8-live` (대화), `gemini-3.8-flash` (복기), `gemini-3.5-transcribe` VERBATIM (STT), `gemini-3.8-flash-tts` (TTS) 명시 및 단가표 구성.
-  - 공급자 추상화(`LiveProvider`, `SttProvider`, `LlmProvider`, `TtsProvider`): UI 계층의 특정 벤더 종속 배제.
-- **4대 목표 데이터 & 요일 루틴 (B-9)**:
-  - 목표: OPIc AL (14과), 필리조선소 주재원 (15과), 미국·호주 여행 (13과), Bluey 듣기 (12과).
-  - 부록 원문 튜터 프롬프트 100% 무삭제 보존 및 `[직무]`, `[Survey topics I chose]`, `[My role in Philly]` 설정 커스텀 지원.
-  - 요일 루틴: 월·토 OPIc, 화·목 Philly, 수 Bluey, 금 여행, 일 주간 복기.
-  - 첫 실행 진도 입력 모달 (10/10~10/12 1~3과 진행 히스토리 반영) 및 홈 화면 '오늘의 추천 수업 카드'.
+- **4대 목표 데이터 & 요일 루틴 (B-9)**: OPIc AL (14과), 필리조선소 주재원 (15과), 미국·호주 여행 (13과), Bluey 듣기 (12과), 부록 원문 프롬프트 100% 무삭제 보존 및 변수 커스텀.
 
 ---
 

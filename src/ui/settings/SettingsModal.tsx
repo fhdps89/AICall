@@ -1,10 +1,30 @@
-import React, { useState } from "react";
-import { X, Save, Sliders, Cpu, Shield, RefreshCw } from "lucide-react";
+import React, { useState, useEffect } from "react";
+import { useDevMode, setDevMode } from "../../data/devMode";
+import {
+  X,
+  Save,
+  Sliders,
+  Cpu,
+  Shield,
+  RefreshCw,
+  FileAudio,
+  Play,
+  HardDrive,
+  CheckCircle2,
+  AlertCircle,
+} from "lucide-react";
 import { PromptPlaceholders } from "../../data/promptCustomizer";
 import { CURRENT_MODEL_CONFIG } from "../../config/models";
+import { collection, getDocs, query, orderBy, limit } from "firebase/firestore";
+import { db } from "../../services/firebase/config";
+import { SessionData } from "../../services/firebase/db";
+import { getAllPendingChunks, LocalRecordingChunk } from "../../services/recording/chunkIndexedDb";
 import { ALLOWED_USER_EMAIL } from "../../services/firebase/auth";
+import { FeedSettingsPanel } from "./FeedSettingsPanel";
+import { UsagePanel } from "./UsagePanel";
 
 interface SettingsModalProps {
+  userId?: string;
   isOpen: boolean;
   onClose: () => void;
   placeholders: PromptPlaceholders;
@@ -13,6 +33,7 @@ interface SettingsModalProps {
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
+  userId,
   isOpen,
   onClose,
   placeholders,
@@ -21,9 +42,45 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 }) => {
   const [formData, setFormData] = useState<PromptPlaceholders>(placeholders);
   const [saving, setSaving] = useState(false);
-  const [activeTab, setActiveTab] = useState<"prompts" | "models">("prompts");
+  const devMode = useDevMode();
+  const [activeTab, setActiveTab] = useState<"prompts" | "models" | "recordings" | "feed" | "usage">("prompts");
+  const [enablePartialStt, setEnablePartialStt] = useState<boolean>(() => {
+    return localStorage.getItem("onecall_enable_partial_transcribe") !== "false";
+  });
+  const [sessionsList, setSessionsList] = useState<SessionData[]>([]);
+  const [pendingLocalChunks, setPendingLocalChunks] = useState<LocalRecordingChunk[]>([]);
+  const [loadingRecordings, setLoadingRecordings] = useState(false);
 
   if (!isOpen) return null;
+
+  // Fetch recordings when tab opened
+  useEffect(() => {
+    if (activeTab === "recordings" && userId) {
+      setLoadingRecordings(true);
+      Promise.all([
+        (async () => {
+          try {
+            const snap = await getDocs(
+              query(
+                collection(db, "users", userId, "sessions"),
+                orderBy("startedAt", "desc"),
+                limit(10)
+              )
+            );
+            return snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+          } catch {
+            return [];
+          }
+        })(),
+        getAllPendingChunks(),
+      ])
+        .then(([sess, pending]) => {
+          setSessionsList(sess);
+          setPendingLocalChunks(pending);
+        })
+        .finally(() => setLoadingRecordings(false));
+    }
+  }, [activeTab, userId]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -71,6 +128,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           >
             프롬프트 변수 입력 (빈칸 채우기)
           </button>
+          {devMode && (
           <button
             type="button"
             onClick={() => setActiveTab("models")}
@@ -80,13 +138,51 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 : "border-transparent text-slate-400 hover:text-slate-200"
             }`}
           >
-            연동 모델 및 보안 정보 (Part B-1)
+            개발자: 모델·보안
+          </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setActiveTab("recordings")}
+            className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
+              activeTab === "recordings"
+                ? "border-amber-400 text-amber-300"
+                : "border-transparent text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            녹음 보관함
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("feed")}
+            className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
+              activeTab === "feed"
+                ? "border-amber-400 text-amber-300"
+                : "border-transparent text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            그록봇 피드
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("usage")}
+            className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
+              activeTab === "usage"
+                ? "border-amber-400 text-amber-300"
+                : "border-transparent text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            사용량·예상 비용
           </button>
         </div>
 
         {/* Body */}
         <div className="p-6 overflow-y-auto flex-1">
-          {activeTab === "prompts" ? (
+          {activeTab === "models" && !devMode ? null : activeTab === "usage" ? (
+            <UsagePanel userId={userId} />
+          ) : activeTab === "feed" ? (
+            <FeedSettingsPanel userId={userId} />
+          ) : activeTab === "prompts" ? (
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="p-3 rounded-lg bg-amber-500/5 border border-amber-500/20 text-xs text-amber-300">
                 원문 튜터 프롬프트는 그대로 보존되며, 아래 입력한 내용이 통화 시 프롬프트 내 대괄호 <code>[직무]</code>, <code>[Survey topics]</code> 등에 자동으로 주입됩니다.
@@ -179,7 +275,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </button>
               </div>
             </form>
-          ) : (
+          ) : activeTab === "models" ? (
             <div className="space-y-4">
               <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 space-y-3">
                 <div className="flex items-center gap-2 text-slate-200 text-xs font-bold">
@@ -208,6 +304,32 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               </div>
 
+              {/* B-3 Requirement 2 Toggle: 1-minute partial transcribe */}
+              <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2.5 text-xs">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="font-bold text-slate-200 block">통화 중 1분 단위 임시 받아쓰기</span>
+                    <span className="text-[11px] text-slate-400 font-mono text-purple-300">gemini-3.5-transcribe VERBATIM (B-3)</span>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={enablePartialStt}
+                      onChange={(e) => {
+                        const val = e.target.checked;
+                        setEnablePartialStt(val);
+                        localStorage.setItem("onecall_enable_partial_transcribe", String(val));
+                      }}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-amber-500"></div>
+                  </label>
+                </div>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  10초 녹음 조각이 약 1분(6조각) 쌓일 때마다 백그라운드에서 별도로 받아써서 sessions.sttPartial에 저장합니다. 대화와 독립적으로 작동하며 필요 시 끌 수 있습니다.
+                </p>
+              </div>
+
               <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2 text-xs">
                 <div className="flex items-center gap-2 text-slate-200 font-bold">
                   <Shield className="w-4 h-4 text-emerald-400" />
@@ -221,7 +343,121 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               </div>
             </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-slate-200 text-xs font-bold">
+                    <FileAudio className="w-4 h-4 text-emerald-400" />
+                    <span>B-3 10초 분할 녹음 파일 (Cloud Storage & IndexedDB)</span>
+                  </div>
+                  <span className="text-[11px] text-slate-400 font-mono">
+                    최근 {sessionsList.length}개 세션 보존됨
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  통화 중 마이크 소리가 10초 단위로 나뉘어 IndexedDB에 임시 기록된 후, 즉시 Cloud Storage로 업로드됩니다.
+                </p>
+                {pendingLocalChunks.length > 0 && (
+                  <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+                    <span>업로드 대기 중인 로컬 조각: {pendingLocalChunks.length}개</span>
+                  </div>
+                )}
+              </div>
+
+              {loadingRecordings ? (
+                <div className="text-center py-8 text-xs text-slate-400">녹음 기록을 불러오는 중...</div>
+              ) : sessionsList.length === 0 ? (
+                <div className="text-center py-8 text-xs text-slate-500 bg-slate-900/30 rounded-xl border border-slate-800">
+                  아직 기록된 통화 세션이 없습니다. 홈에서 통화를 시작하면 10초 조각들이 이곳에 보존됩니다.
+                </div>
+              ) : (
+                <div className="space-y-3 max-h-[45vh] overflow-y-auto pr-1">
+                  {sessionsList.map((sess) => (
+                    <div key={sess.id} className="p-3.5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-bold text-amber-300 font-mono">
+                          {sess.goalId?.toUpperCase()} · {sess.lessonIndex}과
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                            sess.status === "done"
+                              ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                              : sess.status === "pending_review"
+                              ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                              : "bg-sky-500/20 text-sky-300 border border-sky-500/30"
+                          }`}>
+                            {sess.status === "done" ? "완료됨" : sess.status === "pending_review" ? "복기 대기" : "진행 중"}
+                          </span>
+                          <span className="text-slate-400 text-[10px] font-mono">
+                            {sess.startedAt ? new Date(sess.startedAt).toLocaleTimeString() : ""}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Chunks summary */}
+                      <div className="text-[11px] text-slate-300 flex items-center justify-between">
+                        <span>10초 녹음 조각: <strong>{sess.recordingChunks?.length || 0}개</strong></span>
+                        <span>1분 전사: <strong>{sess.sttPartial?.length || 0}건</strong></span>
+                        <span className="text-slate-400 font-mono text-[10px]">{sess.connectionPath || "direct"}</span>
+                      </div>
+
+                      {/* Chunks list details */}
+                      {sess.recordingChunks && sess.recordingChunks.length > 0 && (
+                        <div className="pt-1.5 border-t border-slate-800 space-y-1">
+                          <span className="text-[10px] text-slate-400 block font-semibold">최근 녹음 조각 목록:</span>
+                          <div className="space-y-1 max-h-28 overflow-y-auto">
+                            {sess.recordingChunks.map((chunk, cIdx) => (
+                              <div key={cIdx} className="flex items-center justify-between text-[10px] bg-slate-800/40 px-2 py-1 rounded">
+                                <span className="font-mono text-slate-300">
+                                  #{chunk.index} ({chunk.durationSeconds || 10}초)
+                                </span>
+                                <span className="truncate max-w-[180px] text-slate-400 font-mono">
+                                  {chunk.path}
+                                </span>
+                                <span className="text-emerald-400 font-bold">
+                                  {chunk.uploaded ? "업로드 완료" : "로컬 대기"}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* sttPartial preview */}
+                      {sess.sttPartial && sess.sttPartial.length > 0 && (
+                        <div className="pt-1.5 border-t border-slate-800 text-[10px] text-purple-300">
+                          <span className="font-bold text-purple-400 block mb-0.5">1분 단위 받아쓰기:</span>
+                          {sess.sttPartial.map((stt, sIdx) => (
+                            <div key={sIdx} className="bg-purple-950/20 border border-purple-800/30 p-1.5 rounded mb-1">
+                              <span className="font-mono text-[9px] text-purple-400 mr-1.5">[{stt.timeRange}]</span>
+                              <span>{stt.transcript}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
+        </div>
+
+        {/* 개발자 메뉴 (기본 꺼짐) */}
+        <div className="px-5 py-2.5 border-t border-slate-800 flex items-center justify-end">
+          <button
+            type="button"
+            onClick={() => {
+              const next = !devMode;
+              setDevMode(next);
+              if (!next && activeTab === "models") setActiveTab("prompts");
+            }}
+            className="text-[11px] text-slate-500 hover:text-slate-300 cursor-pointer"
+          >
+            {devMode ? "개발자 메뉴 끄기" : "개발자 메뉴"}
+          </button>
         </div>
       </div>
     </div>

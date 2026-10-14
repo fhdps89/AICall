@@ -7,6 +7,10 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { GoogleGenAI, Modality, Type } from '@google/genai';
+import { requireAuth } from './server/auth.ts';
+import { startLectureJob, readLectureState, lectureAudioPath, kstToday } from './server/lecture.ts';
+import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive } from './server/sttBench.ts';
+import { isValidFeedSecret, writeFeedSync, feedForSecret, buildFeedToday, feedAudioFile, renderFeedHtml } from './server/feed.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,9 +22,11 @@ const isProd = process.env.NODE_ENV === 'production';
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Target Native Audio Dialog Model and standard Gemini models
-const LIVE_MODELS = ['gemini-3.8-live', 'gemini-2.5-flash-native-audio-latest'];
+// Target Native Audio Dialog Model (Part B-1: gemini-3.8-live)
+const LIVE_MODELS = ['gemini-3.8-live'];
 const NATIVE_AUDIO_MODEL = 'gemini-3.8-live';
+// Server-side Live connect timeout; shorter than the client's proxy ready timeout.
+const LIVE_CONNECT_TIMEOUT_MS = 10000;
 const FALLBACK_CHAT_MODEL = 'gemini-3.8-flash';
 const FALLBACK_TTS_MODEL = 'gemini-3.8-flash-lite-tts';
 const TRANSCRIBE_MODEL = 'gemini-3.5-transcribe';
@@ -37,102 +43,115 @@ export function getBuildVersion(): string {
     const m = String(mtime.getUTCMinutes()).padStart(2, '0');
     return `${Y}${M}${D}-multilingual-${h}${m}`;
   } catch {
-    return '20261013-multilingual-1410';
+    return '20261013-multilingual-1633';
   }
 }
 
 // Resolve real Gemini API key from environment, file, or parent container
+// Names AI Studio / Cloud Run / SDK conventions may use for the Gemini key.
+const GEMINI_KEY_NAMES = ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'API_KEY', 'GOOGLE_GENAI_API_KEY', 'VITE_GEMINI_API_KEY'];
+let lastKeySource: string = 'none';
+let loggedKeySource = '';
+
+function isUsableKey(v: string | undefined | null): v is string {
+  if (!v) return false;
+  const t = v.trim().replace(/^["']|["']$/g, '');
+  return t.length >= 10 && !t.startsWith('MY_') && !/^(undefined|null|your_|placeholder)/i.test(t);
+}
+
+function pickFromEnvPairs(pairs: Array<[string, string]>, origin: string): string | undefined {
+  for (const name of GEMINI_KEY_NAMES) {
+    const hit = pairs.find(([k]) => k === name);
+    if (hit && isUsableKey(hit[1])) {
+      lastKeySource = `${origin}:${name}`;
+      return hit[1].trim().replace(/^["']|["']$/g, '');
+    }
+  }
+  return undefined;
+}
+
+function parseDotenv(content: string): Array<[string, string]> {
+  return content.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#') && l.includes('='))
+    .map((l) => { const i = l.indexOf('='); return [l.slice(0, i).replace(/^export\s+/, '').trim(), l.slice(i + 1).trim()] as [string, string]; });
+}
+
+/**
+ * Resolve the Gemini key at call time (secrets can be injected after boot).
+ * Order: process.env (all known names) -> key/.env files -> ancestor /proc environ.
+ * Never writes the key to disk.
+ */
 function resolveGeminiApiKey(): string | undefined {
-  const current = process.env.GEMINI_API_KEY;
-  if (current && !current.startsWith('MY_') && current.trim().length > 20) {
-    return current.trim();
+  const found = resolveGeminiApiKeyInner();
+  if (found && !process.env.GEMINI_API_KEY) process.env.GEMINI_API_KEY = found;
+  if (!found) lastKeySource = 'none';
+  if (loggedKeySource !== lastKeySource) {
+    loggedKeySource = lastKeySource;
+    console.log(`[Gemini key] source=${lastKeySource}` + (found ? ` len=${found.length}` : ` (checked env names: ${GEMINI_KEY_NAMES.join(', ')})`));
   }
+  return found;
+}
 
-  // 1. Check .gemini_api_key in root directory
-  try {
-    const keyFile = path.resolve(__dirname, '.gemini_api_key');
-    if (fs.existsSync(keyFile)) {
-      const fileKey = fs.readFileSync(keyFile, 'utf-8').trim();
-      if (fileKey && !fileKey.startsWith('MY_') && fileKey.length > 20) {
-        process.env.GEMINI_API_KEY = fileKey;
-        return fileKey;
-      }
-    }
-  } catch {
-    // ignore
-  }
+function resolveGeminiApiKeyInner(): string | undefined {
+  const fromEnv = pickFromEnvPairs(Object.entries(process.env).map(([k, v]) => [k, v ?? '']), 'env');
+  if (fromEnv) return fromEnv;
 
-  // 2. Check .env in root directory
-  try {
-    const envFile = path.resolve(__dirname, '.env');
-    if (fs.existsSync(envFile)) {
-      const envContent = fs.readFileSync(envFile, 'utf-8');
-      const lines = envContent.split('\n');
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith('GEMINI_API_KEY=')) {
-          const val = trimmed.replace('GEMINI_API_KEY=', '').replace(/^["']|["']$/g, '').trim();
-          if (val && !val.startsWith('MY_') && val.length > 20) {
-            process.env.GEMINI_API_KEY = val;
-            return val;
-          }
-        }
-      }
-    }
-  } catch {
-    // ignore
-  }
-
-  // 3. Inspect ancestor processes (including PID 1)
-  let pid = process.pid;
-  for (let i = 0; i < 8; i++) {
+  const dirs = Array.from(new Set([__dirname, process.cwd(), path.resolve(__dirname, '..'), '/app']));
+  for (const dir of dirs) {
+    // Check .dev.env.json written by container/environment
     try {
-      const stat = fs.readFileSync(`/proc/${pid}/status`, 'utf-8');
-      const ppidLine = stat.split('\n').find((l) => l.startsWith('PPid:'));
-      if (!ppidLine) break;
-      const ppid = parseInt(ppidLine.split(':')[1].trim(), 10);
-      if (!ppid || ppid < 1) break;
-      const env = fs.readFileSync(`/proc/${ppid}/environ`, 'utf-8');
-      const match = env.split('\0').find((x) => x.startsWith('GEMINI_API_KEY='));
-      if (match) {
-        const val = match.replace('GEMINI_API_KEY=', '').trim();
-        if (val && !val.startsWith('MY_') && val.length > 20) {
-          process.env.GEMINI_API_KEY = val;
-          try {
-            fs.writeFileSync(path.resolve(__dirname, '.gemini_api_key'), val, 'utf-8');
-          } catch {
-            // ignore
+      const devEnvFile = path.resolve(dir, '.dev.env.json');
+      if (fs.existsSync(devEnvFile)) {
+        const json = JSON.parse(fs.readFileSync(devEnvFile, 'utf-8'));
+        for (const name of GEMINI_KEY_NAMES) {
+          if (isUsableKey(json[name])) {
+            lastKeySource = `json:${devEnvFile}:${name}`;
+            return json[name].trim().replace(/^["']|["']$/g, '');
           }
-          return val;
         }
       }
-      pid = ppid;
-    } catch {
-      break;
+    } catch { /* ignore */ }
+
+    try {
+      const keyFile = path.resolve(dir, '.gemini_api_key');
+      if (fs.existsSync(keyFile)) {
+        const v = fs.readFileSync(keyFile, 'utf-8').trim();
+        if (isUsableKey(v)) { lastKeySource = `file:${keyFile}`; return v; }
+      }
+    } catch { /* ignore */ }
+
+    for (const f of ['.env.local', '.env']) {
+      try {
+        const envFile = path.resolve(dir, f);
+        if (fs.existsSync(envFile)) {
+          const v = pickFromEnvPairs(parseDotenv(fs.readFileSync(envFile, 'utf-8')), `file:${envFile}`);
+          if (v) return v;
+        }
+      } catch { /* ignore */ }
     }
   }
 
-  // 4. Directly check /proc/1/environ
+  // Check /etc/environment
   try {
-    const env = fs.readFileSync('/proc/1/environ', 'utf-8');
-    const match = env.split('\0').find((x) => x.startsWith('GEMINI_API_KEY='));
-    if (match) {
-      const val = match.replace('GEMINI_API_KEY=', '').trim();
-      if (val && !val.startsWith('MY_') && val.length > 20) {
-        process.env.GEMINI_API_KEY = val;
-        try {
-          fs.writeFileSync(path.resolve(__dirname, '.gemini_api_key'), val, 'utf-8');
-        } catch {
-          // ignore
-        }
-        return val;
-      }
+    if (fs.existsSync('/etc/environment')) {
+      const v = pickFromEnvPairs(parseDotenv(fs.readFileSync('/etc/environment', 'utf-8')), 'file:/etc/environment');
+      if (v) return v;
     }
-  } catch {
-    // ignore
-  }
+  } catch { /* ignore */ }
 
-  return current && !current.startsWith('MY_') ? current : undefined;
+  // Scan all running processes in /proc/*/environ
+  try {
+    const pids = fs.readdirSync('/proc').filter((p) => /^\d+$/.test(p));
+    for (const p of pids) {
+      try {
+        const pairs = fs.readFileSync(`/proc/${p}/environ`, 'utf-8').split('\0').filter((x) => x.includes('='))
+          .map((x) => { const i = x.indexOf('='); return [x.slice(0, i), x.slice(i + 1)] as [string, string]; });
+        const v = pickFromEnvPairs(pairs, `proc:${p}`);
+        if (v) return v;
+      } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+
+  return undefined;
 }
 
 // Initialize GoogleGenAI client with official header
@@ -142,7 +161,7 @@ function createGenAI(apiKeyOverride?: string) {
     ? apiKeyOverride.trim()
     : resolved;
 
-  if (!apiKey || apiKey.startsWith('MY_')) return null;
+  if (!isUsableKey(apiKey)) return null;
 
   return new GoogleGenAI({
     apiKey,
@@ -157,7 +176,7 @@ function createGenAI(apiKeyOverride?: string) {
 // 1. Check Gemini server connectivity and GDP credit status
 app.get('/api/gemini/status', async (req: Request, res: Response) => {
   const key = resolveGeminiApiKey();
-  const hasServerKey = Boolean(key && !key.startsWith('MY_') && key.trim().length > 20);
+  const hasServerKey = isUsableKey(key);
   res.json({
     available: hasServerKey,
     buildVersion: getBuildVersion(),
@@ -169,7 +188,53 @@ app.get('/api/gemini/status', async (req: Request, res: Response) => {
     liveSupported: true,
     gdpConnected: hasServerKey,
     hasServerKey,
+    keySource: lastKeySource, // name/location only, never the value
   });
+});
+
+// Ephemeral token endpoint for browser-direct Gemini Live connection (B-2 requirement 3 & 2-1)
+app.post('/api/gemini/token', async (req: Request, res: Response) => {
+  try {
+    const key = resolveGeminiApiKey();
+    if (!key || key.startsWith('MY_')) {
+      res.status(500).json({ ok: false, error: 'GEMINI_API_KEY가 서버 환경에 설정되지 않았습니다.', fallback: true });
+      return;
+    }
+
+    // GoogleGenAI with apiVersion v1alpha for authTokens support
+    const ai = new GoogleGenAI({
+      apiKey: key,
+      apiVersion: 'v1alpha',
+      httpOptions: {
+        apiVersion: 'v1alpha',
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
+
+    if (typeof (ai as any).authTokens?.create === 'function') {
+      const now = Date.now();
+      const token = await (ai as any).authTokens.create({
+        config: {
+          uses: 1,
+          expireTime: new Date(now + 30 * 60 * 1000).toISOString(),
+          newSessionExpireTime: new Date(now + 60 * 1000).toISOString(),
+        },
+      });
+
+      const tokenName = typeof token?.name === 'string' ? token.name : (typeof token === 'string' ? token : null);
+      if (tokenName) {
+        res.json({ ok: true, token: tokenName });
+        return;
+      }
+    }
+
+    res.json({ ok: false, fallback: true, message: 'Direct ephemeral token not supported in this environment, using server proxy' });
+  } catch (err: any) {
+    console.warn('[Gemini Token] Ephemeral token creation failed, falling back to server proxy:', err?.message || err);
+    res.json({ ok: false, fallback: true, error: err?.message });
+  }
 });
 
 // 2. Test Gemini connection endpoint
@@ -393,47 +458,295 @@ app.post('/api/gemini/transcribe', async (req: Request, res: Response) => {
   }
 });
 
-// 6. Post-Call Review & Mistake Log Generation (Gemini 3.8 Flash structured JSON)
-app.post('/api/review', async (req: Request, res: Response) => {
+// Directory for server-stored chunk fallback
+const RECORDINGS_DIR = path.resolve(__dirname, 'public', 'recordings');
+if (!fs.existsSync(RECORDINGS_DIR)) {
+  fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
+}
+
+// B-3 Requirement 2: 1-minute asynchronous partial transcription via gemini-3.5-transcribe VERBATIM
+app.post('/api/gemini/transcribe-partial', async (req: Request, res: Response) => {
   const start = performance.now();
-  const { trackId, lessonNum, lessonTitle, turns, customApiKey } = req.body || {};
+  const { sessionId, userId, minuteIndex, timeRange, audioBase64, mimeType = 'audio/webm', customApiKey } = req.body || {};
+
+  if (!audioBase64 || typeof audioBase64 !== 'string') {
+    res.status(400).json({ ok: false, error: '변환할 오디오 데이터가 없습니다.' });
+    return;
+  }
 
   const ai = createGenAI(customApiKey);
   if (!ai) {
-    res.status(500).json({ ok: false, error: 'Gemini API 연동이 준비되지 않았습니다.' });
+    res.status(500).json({ ok: false, error: 'Gemini 서버 연동이 준비되지 않았습니다.' });
     return;
   }
 
   try {
-    const formattedTranscript = Array.isArray(turns) && turns.length > 0
-      ? turns.map((t: any) => `${t.role === 'model' ? 'AI Coach' : 'Learner'}: ${t.text}`).join('\n')
-      : '(No conversation recorded)';
+    const response = await ai.models.generateContent({
+      model: TRANSCRIBE_MODEL, // gemini-3.5-transcribe
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              data: audioBase64,
+              mimeType,
+            },
+          },
+          {
+            text: '언어: 영어 및 한국어 혼합 대화. 모드: VERBATIM(있는 그대로 음성 전사). 생략, 요약, 문법 교정 없이 화자가 실제로 말한 단어, 감탄사, 망설임, 추임새를 있는 그대로 빠짐없이 정확하게 텍스트로 옮겨 적으시오. 부가 설명이나 서두/결말 문구 없이 전사 결과만 출력하시오.',
+          },
+        ],
+      },
+    });
 
-    const systemInstruction = `You are an expert English speaking coach.
-The voice session is over for Room: ${trackId || 'General'}, Lesson: ${lessonNum || 1} (${lessonTitle || 'Lesson'}).
-Review everything the learner said in this conversation transcript.
+    const elapsed = Math.round(performance.now() - start);
+    const transcript = response.text?.trim() || '';
 
-Respond strictly in valid JSON matching this schema:
-- overallEvaluation: 1-line overall evaluation in Korean of the learner's spoken English performance + biggest priority area for improvement according to the lesson goal.
-- estimatedLevel: String, one of "IM2", "IH", "AL", "Native".
-- mistakes: Array of up to 8 objects containing:
-  - myPhrase: What the learner said (or an awkward phrase they used). If recognition had minor flaws, clean it up reasonably.
-  - naturalPhrase: How a native speaker / American coworker / OPIc AL candidate would naturally say it.
-  - reason: 1-2 sentence concise explanation in Korean why this is more natural (grammar, nuance, preposition, or collocation).
-- keyExpressions: Array of 5 useful expressions to memorize from this lesson:
-  - expression: The English phrase/idiom.
-  - situation: When to use this in Korean.
-  - exampleSentence: Natural example sentence.
-- keepSyncText: Clean text block formatted for Google Keep:
-  "[${trackId || 'Room'}] my phrase -> natural phrase" for each mistake, followed by:
-  "PROGRESS: Lesson ${lessonNum || 1} done - ${new Date().toISOString().slice(0, 10)} - [estimatedLevel]"
-- progressTag: "PROGRESS: Lesson ${lessonNum || 1} done"`;
+    console.log(`[TranscribePartial] 1-min partial transcribe complete for ${timeRange} (${elapsed}ms): "${transcript.slice(0, 50)}..."`);
+    res.json({
+      ok: true,
+      sessionId,
+      minuteIndex,
+      timeRange,
+      transcript,
+      elapsedMs: elapsed,
+    });
+  } catch (error: any) {
+    console.warn('[TranscribePartial] gemini-3.5-transcribe error:', error?.message || error);
+    res.status(500).json({
+      ok: false,
+      error: error?.message || '부분 전사 실패',
+    });
+  }
+});
+
+// In-memory active session tracker for detecting interrupted calls (last chunk > 2 min)
+interface ActiveSessionTracker {
+  sessionId: string;
+  userId: string;
+  lastChunkAt: number;
+  status: 'in-progress' | 'pending_review' | 'done';
+}
+const activeSessionsMap = new Map<string, ActiveSessionTracker>();
+
+// Heartbeat / Chunk registration to track active call sessions
+app.post('/api/sessions/heartbeat', (req: Request, res: Response) => {
+  const { sessionId, userId, status = 'in-progress' } = req.body || {};
+  if (sessionId && userId) {
+    activeSessionsMap.set(sessionId, {
+      sessionId,
+      userId,
+      lastChunkAt: Date.now(),
+      status,
+    });
+  }
+  res.json({ ok: true });
+});
+
+// Periodic watchdog (every 30s): marks active sessions without new chunks for > 2 min as pending_review
+setInterval(() => {
+  const now = Date.now();
+  const TWO_MINUTES_MS = 2 * 60 * 1000;
+
+  for (const [sId, sess] of activeSessionsMap.entries()) {
+    if (sess.status === 'in-progress' && now - sess.lastChunkAt > TWO_MINUTES_MS) {
+      console.warn(`[Watchdog] Session ${sId} timed out (>2min since last chunk). Marking as pending_review.`);
+      sess.status = 'pending_review';
+    }
+  }
+}, 30000);
+
+// Check interrupted sessions status
+app.get('/api/sessions/interrupted-check', (req: Request, res: Response) => {
+  const { userId } = req.query;
+  const interrupted: string[] = [];
+  const now = Date.now();
+  const TWO_MINUTES_MS = 2 * 60 * 1000;
+
+  for (const [sId, sess] of activeSessionsMap.entries()) {
+    if ((!userId || sess.userId === userId) && sess.status === 'in-progress' && now - sess.lastChunkAt > TWO_MINUTES_MS) {
+      sess.status = 'pending_review';
+      interrupted.push(sId);
+    } else if ((!userId || sess.userId === userId) && sess.status === 'pending_review') {
+      interrupted.push(sId);
+    }
+  }
+
+  res.json({ ok: true, interruptedSessionIds: interrupted });
+});
+
+// Resilient chunk upload endpoint (fallback when client Firebase Storage direct upload is restricted)
+app.post('/api/recordings/upload-chunk', express.raw({ type: ['audio/*', 'application/octet-stream'], limit: '20mb' }), (req: Request, res: Response) => {
+  try {
+    const rawBuffer = Buffer.isBuffer(req.body) ? req.body : null;
+    const relPath = String(req.query.path || req.headers['x-chunk-path'] || `chunk_${Date.now()}.webm`);
+    const safePath = path.resolve(RECORDINGS_DIR, relPath.replace(/[^a-zA-Z0-9_\-\.\/]/g, '_'));
+    const safeDir = path.dirname(safePath);
+
+    if (!fs.existsSync(safeDir)) {
+      fs.mkdirSync(safeDir, { recursive: true });
+    }
+
+    if (rawBuffer && rawBuffer.length > 0) {
+      fs.writeFileSync(safePath, rawBuffer);
+    }
+
+    const fileUrl = `/api/recordings/file?path=${encodeURIComponent(relPath)}`;
+    res.json({
+      ok: true,
+      url: fileUrl,
+      path: relPath,
+      sizeBytes: rawBuffer?.length || 0,
+    });
+  } catch (err: any) {
+    console.error('[UploadChunk] Server chunk upload error:', err);
+    res.status(500).json({ ok: false, error: err?.message || 'Upload failed' });
+  }
+});
+
+app.get('/api/recordings/file', (req: Request, res: Response) => {
+  const relPath = String(req.query.path || '');
+  if (!relPath) {
+    res.status(400).send('Path parameter is required');
+    return;
+  }
+  const safePath = path.resolve(RECORDINGS_DIR, relPath.replace(/[^a-zA-Z0-9_\-\.\/]/g, '_'));
+  if (fs.existsSync(safePath)) {
+    res.sendFile(safePath);
+  } else {
+    res.status(404).send('Audio file not found');
+  }
+});
+
+// B-4 Final Full-Audio Transcription endpoint via gemini-3.5-transcribe (VERBATIM)
+app.post('/api/gemini/transcribe-final', requireAuth, async (req: Request, res: Response) => {
+  const start = performance.now();
+  const { audioBase64, mimeType = 'audio/webm', customApiKey } = req.body || {};
+
+  if (!audioBase64 || typeof audioBase64 !== 'string') {
+    res.status(400).json({ ok: false, error: '변환할 오디오 데이터가 없습니다.' });
+    return;
+  }
+
+  const ai = createGenAI(customApiKey);
+  if (!ai) {
+    res.status(500).json({ ok: false, error: 'Gemini 서버 연동이 준비되지 않았습니다.' });
+    return;
+  }
+
+  try {
+    const response = await ai.models.generateContent({
+      model: TRANSCRIBE_MODEL, // gemini-3.5-transcribe
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              data: audioBase64,
+              mimeType,
+            },
+          },
+          {
+            text: '언어: 영어 및 한국어 대화. 모드: VERBATIM(있는 그대로 음성 전사). 생략, 요약, 문법 교정 없이 화자가 실제로 말한 단어, 문법적 실수, 감탄사, 망설임을 있는 그대로 토씨 하나 틀리지 않고 텍스트로 옮겨 적으시오. 부가 설명이나 인사말 없이 전사 텍스트만 단독 출력하시오.',
+          },
+        ],
+      },
+    });
+
+    const elapsed = Math.round(performance.now() - start);
+    const transcript = response.text?.trim() || '';
+
+    res.json({
+      ok: true,
+      transcript,
+      elapsedMs: elapsed,
+    });
+  } catch (err: any) {
+    console.warn('[TranscribeFinal] gemini-3.5-transcribe error:', err?.message || err);
+    res.status(500).json({
+      ok: false,
+      error: err?.message || '최종 음성 전사 실패',
+    });
+  }
+});
+
+// 6. Post-Call Review & Mistake Log Generation (Gemini 3.8 Flash structured JSON) - B-4 Specification
+app.post('/api/review', requireAuth, async (req: Request, res: Response) => {
+  const start = performance.now();
+  const {
+    trackId,
+    goalId,
+    lessonNum,
+    lessonTitle,
+    sttFinal, // Verbatim recording transcript (기록용 받아쓰기)
+    sourceStt = 'sttFinal',
+    liveTranscript = [],
+    todayLessonPrompt = '',
+    reviewingMistakes = [], // Existing reviewing mistakes for detecting usedCorrectly
+    graduatedMistakes = [], // Existing graduated mistakes for detecting repeatedMistakes
+    customApiKey,
+  } = req.body || {};
+
+  const ai = createGenAI(customApiKey);
+  if (!ai) {
+    res.status(503).json({ ok: false, code: 'NO_SERVER_KEY', error: '서버에 Gemini 키가 없어요. AI Studio Secrets에 GEMINI_API_KEY를 넣어 주세요.' });
+    return;
+  }
+
+  try {
+    const formattedLiveTranscript = Array.isArray(liveTranscript) && liveTranscript.length > 0
+      ? liveTranscript.map((t: any) => `${t.role === 'model' ? 'AI Tutor' : 'Learner'}: ${t.text}`).join('\n')
+      : '(No live turns recorded)';
+
+    const formattedReviewingMistakes = Array.isArray(reviewingMistakes) && reviewingMistakes.length > 0
+      ? reviewingMistakes.map((m: any) => `ID: ${m.id} | Awkward: "${m.myPhrase}" -> Natural: "${m.naturalPhrase}" (${m.reason})`).join('\n')
+      : '(None)';
+
+    const formattedGraduatedMistakes = Array.isArray(graduatedMistakes) && graduatedMistakes.length > 0
+      ? graduatedMistakes.map((m: any) => `ID: ${m.id} | Awkward: "${m.myPhrase}" -> Natural: "${m.naturalPhrase}"`).join('\n')
+      : '(None)';
+
+    const systemInstruction = `You are an expert 1:1 English speaking coach and post-call review analyst.
+Analyze this completed call session to produce a structured review report.
+
+Input Materials:
+1. [기록용 받아쓰기 (VERBATIM sttFinal)]:
+${sttFinal || '(No audio transcription available)'}
+
+2. [Live 대화 로그 (Live transcript)]:
+${formattedLiveTranscript}
+
+3. [오늘 수업 지시서 (Lesson Prompt Directive)]:
+${todayLessonPrompt || `Goal: ${trackId || goalId}, Lesson: ${lessonNum} (${lessonTitle})`}
+
+4. [현재 복습 중인 실수 목록 (Reviewing Mistakes)]:
+${formattedReviewingMistakes}
+
+5. [이미 졸업한 실수 목록 (Graduated Mistakes)]:
+${formattedGraduatedMistakes}
+
+STRICT ANALYSIS RULES (Part B-4):
+1. mistakes[]: Identify grammatical errors, awkward collocations, word choice blunders, or unnatural patterns made by the learner.
+   CRITICAL REQUIREMENT FOR "myPhrase":
+   - "myPhrase" MUST be copied WORD-FOR-WORD, EXACTLY VERBATIM from the learner's sentences in [기록용 받아쓰기 (VERBATIM sttFinal)].
+   - NEVER edit, correct, sanitize, or rephrase "myPhrase". Keep all grammar mistakes, missing prepositions, or broken phrasing exactly as the learner spoke.
+   - "naturalPhrase": How an American native speaker / OPIc AL speaker would naturally express this thought.
+   - "reason": 1-2 concise Korean sentences explaining why naturalPhrase is better (grammar, preposition, nuance, collocation).
+   - "sourceStt": Set to "${sourceStt}".
+2. keyExpressions[]: EXACTLY 5 high-impact English expressions to memorize from this lesson:
+   - "expression": English phrase/idiom.
+   - "situation": When to use this in Korean.
+   - "exampleSentence": Natural example sentence.
+3. estimatedLevel: One of "IM2", "IH", "AL", "Native" (Note: AI estimate only, not official).
+4. usedCorrectly[]: Array of string IDs from [현재 복습 중인 실수 목록] that the learner used correctly and naturally during this call.
+5. repeatedMistakes[]: Array of string IDs from [이미 졸업한 실수 목록] that the learner made a mistake on again during this call.
+6. overallEvaluation: 1-2 sentence overall evaluation in Korean of the learner's spoken English performance + priority improvement area.
+7. keepSyncText: Text block formatted for Google Keep:
+   For each mistake, one per line: "[myPhrase] -> [naturalPhrase]".`;
 
     const response = await ai.models.generateContent({
-      model: FALLBACK_CHAT_MODEL,
+      model: FALLBACK_CHAT_MODEL, // gemini-3.8-flash
       contents: [{
         role: 'user',
-        parts: [{ text: `Here is the conversation transcript between the Learner and AI Coach:\n\n${formattedTranscript}\n\nPlease generate the structured review report now.` }],
+        parts: [{ text: `Generate the B-4 post-call review report now.` }],
       }],
       config: {
         systemInstruction,
@@ -451,8 +764,9 @@ Respond strictly in valid JSON matching this schema:
                   myPhrase: { type: Type.STRING },
                   naturalPhrase: { type: Type.STRING },
                   reason: { type: Type.STRING },
+                  sourceStt: { type: Type.STRING },
                 },
-                required: ['myPhrase', 'naturalPhrase', 'reason'],
+                required: ['myPhrase', 'naturalPhrase', 'reason', 'sourceStt'],
               },
             },
             keyExpressions: {
@@ -467,10 +781,25 @@ Respond strictly in valid JSON matching this schema:
                 required: ['expression', 'situation', 'exampleSentence'],
               },
             },
+            usedCorrectly: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+            repeatedMistakes: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
             keepSyncText: { type: Type.STRING },
-            progressTag: { type: Type.STRING },
           },
-          required: ['overallEvaluation', 'estimatedLevel', 'mistakes', 'keyExpressions', 'keepSyncText', 'progressTag'],
+          required: [
+            'overallEvaluation',
+            'estimatedLevel',
+            'mistakes',
+            'keyExpressions',
+            'usedCorrectly',
+            'repeatedMistakes',
+            'keepSyncText',
+          ],
         },
       },
     });
@@ -482,15 +811,149 @@ Respond strictly in valid JSON matching this schema:
       ok: true,
       review: {
         ...parsed,
-        trackId: trackId || 'opic',
+        trackId: trackId || goalId || 'opic',
         lessonNum: lessonNum || 1,
         lessonTitle: lessonTitle || '',
+        generatedAt: new Date().toISOString(),
+      },
+      usage: {
+        inputTokens: response.usageMetadata?.promptTokenCount || 0,
+        outputTokens: response.usageMetadata?.candidatesTokenCount || 0,
       },
       elapsedMs: elapsed,
     });
   } catch (err: any) {
     console.error('Review generation error:', err);
-    res.status(500).json({ ok: false, error: '복기 리포트 생성에 실패했습니다.' });
+    res.status(500).json({ ok: false, error: err?.message || '복기 리포트 생성에 실패했습니다.' });
+  }
+});
+
+// B-6 Requirement 3: Quiz Grading endpoint (TEXT_MODEL = gemini-3.8-flash)
+app.post('/api/quiz/grade', async (req: Request, res: Response) => {
+  const { mistakeId, myPhrase, naturalPhrase, reason, answer, customApiKey } = req.body || {};
+
+  if (!naturalPhrase || answer === undefined) {
+    res.status(400).json({ ok: false, error: 'naturalPhrase and answer are required' });
+    return;
+  }
+
+  const ai = createGenAI(customApiKey);
+  if (!ai) {
+    res.status(500).json({ ok: false, error: 'Gemini API 연동이 준비되지 않았습니다.' });
+    return;
+  }
+
+  try {
+    const prompt = `당신은 공정하고 격려하는 영어 학습 튜터입니다.
+사용자가 영어 표현 퀴즈에 응답했습니다.
+
+[목표 자연스러운 표현 (naturalPhrase)]:
+"${naturalPhrase}"
+
+[핵심 교정 포인트 및 이유 (reason)]:
+"${reason || ''}"
+
+[사용자가 과거에 했던 오답 (myPhrase)]:
+"${myPhrase || ''}"
+
+[사용자가 이번 퀴즈에 제출한 답변 (answer)]:
+"${answer}"
+
+[채점 규칙 - 엄격 준수]:
+1. "핵심 교정 포인트(reason이 고친 부분)가 맞으면 통과(passed: true)" 처리합니다.
+2. 사소한 철자(minor typo), 관사(a/an/the 누락 또는 교체), 구두점, 대소문자 차이는 통과(passed: true)로 너그럽게 허용합니다.
+3. 반면 핵심 교정 포인트를 여전히 틀렸거나 과거 오답("${myPhrase || ''}") 패턴을 반복한 경우, 또는 문장의 핵심 의미가 통하지 않는 경우에는 불통과(passed: false)로 처리합니다.
+4. feedback: 사용자가 잘한 부분이나 고칠 핵심을 다정하게 격려하는 한국어 1~2문장으로 작성하십시오.
+5. correctAnswer: "${naturalPhrase}"를 정확히 전달하십시오.`;
+
+    const response = await ai.models.generateContent({
+      model: FALLBACK_CHAT_MODEL, // gemini-3.8-flash
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            passed: { type: Type.BOOLEAN },
+            feedback: { type: Type.STRING },
+            correctAnswer: { type: Type.STRING },
+          },
+          required: ['passed', 'feedback', 'correctAnswer'],
+        },
+      },
+    });
+
+    const parsed = JSON.parse(response.text?.trim() || '{}');
+    res.json({
+      ok: true,
+      mistakeId,
+      passed: Boolean(parsed.passed),
+      feedback: parsed.feedback || '',
+      correctAnswer: parsed.correctAnswer || naturalPhrase,
+    });
+  } catch (err: any) {
+    console.error('Quiz grading error:', err);
+    res.status(500).json({ ok: false, error: err?.message || '퀴즈 채점에 실패했습니다.' });
+  }
+});
+
+// B-6 Requirement 2: Quiz Flashcard Korean Meaning generator (gemini-3.8-flash)
+app.post('/api/quiz/meaning-ko', async (req: Request, res: Response) => {
+  const { items, customApiKey } = req.body || {};
+
+  if (!Array.isArray(items) || items.length === 0) {
+    res.status(400).json({ ok: false, error: 'items array is required' });
+    return;
+  }
+
+  const ai = createGenAI(customApiKey);
+  if (!ai) {
+    res.status(500).json({ ok: false, error: 'Gemini API 연동이 준비되지 않았습니다.' });
+    return;
+  }
+
+  try {
+    const listStr = items.map((it: any, idx: number) => `${idx + 1}. [ID: ${it.id}] "${it.naturalPhrase}" (참고 이유: ${it.reason || ''})`).join('\n');
+    const prompt = `각 영어 표현을 학습용 플래시카드 앞면에 들어갈 자연스럽고 간결한 한국어 뜻(1문장 또는 짧은 구)으로 번역해 주세요.
+
+목록:
+${listStr}
+
+각 항목의 id와 간결한 한국어 뜻(meaningKo)을 반환하세요.`;
+
+    const response = await ai.models.generateContent({
+      model: FALLBACK_CHAT_MODEL, // gemini-3.8-flash
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            meanings: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  id: { type: Type.STRING },
+                  meaningKo: { type: Type.STRING },
+                },
+                required: ['id', 'meaningKo'],
+              },
+            },
+          },
+          required: ['meanings'],
+        },
+      },
+    });
+
+    const parsed = JSON.parse(response.text?.trim() || '{"meanings":[]}');
+    res.json({
+      ok: true,
+      meanings: parsed.meanings || [],
+    });
+  } catch (err: any) {
+    console.error('Quiz meaning generation error:', err);
+    res.status(500).json({ ok: false, error: err?.message || '한국어 뜻 생성에 실패했습니다.' });
   }
 });
 
@@ -634,6 +1097,216 @@ app.post('/api/telegram/send', async (req: Request, res: Response) => {
 });
 
 // Health check endpoints for Cloud Run container probes
+// B-7 Morning Lecture (auth required: Firebase ID token of the single allowed user)
+app.post('/api/lecture/generate', requireAuth, (req: Request, res: Response) => {
+  const uid = res.locals.user.uid as string;
+  const { date, newMistakes, reviewMistakes, force } = req.body || {};
+  const ai = createGenAI();
+  if (!ai) {
+    res.status(500).json({ ok: false, error: 'Gemini 서버 연동이 준비되지 않았습니다.' });
+    return;
+  }
+  try {
+    const state = startLectureJob(ai, uid, typeof date === 'string' ? date : kstToday(), newMistakes || [], reviewMistakes || [], { force: Boolean(force) });
+    res.json({ ok: true, lecture: state });
+  } catch (err: any) {
+    res.status(400).json({ ok: false, error: err?.message || '강의 생성 시작 실패' });
+  }
+});
+
+app.get('/api/lecture/status', requireAuth, (req: Request, res: Response) => {
+  const uid = res.locals.user.uid as string;
+  try {
+    const date = typeof req.query.date === 'string' ? req.query.date : kstToday();
+    res.json({ ok: true, lecture: readLectureState(uid, date) });
+  } catch (err: any) {
+    res.status(400).json({ ok: false, error: err?.message });
+  }
+});
+
+app.get('/api/lecture/audio', requireAuth, (req: Request, res: Response) => {
+  const uid = res.locals.user.uid as string;
+  try {
+    const date = typeof req.query.date === 'string' ? req.query.date : kstToday();
+    const file = lectureAudioPath(uid, date);
+    if (!file) {
+      res.status(404).json({ ok: false, error: '강의 오디오가 없습니다.' });
+      return;
+    }
+    res.type('audio/wav').sendFile(file);
+  } catch (err: any) {
+    res.status(400).json({ ok: false, error: err?.message });
+  }
+});
+
+// B-8 Grok Bot feed: app syncs secret + candidates (auth), feed URLs need only the secret
+app.post('/api/feed/sync', requireAuth, (req: Request, res: Response) => {
+  const uid = res.locals.user.uid as string;
+  const { secret, quizCount, newMistakes, reviewMistakes } = req.body || {};
+  if (!isValidFeedSecret(secret)) {
+    res.status(400).json({ ok: false, error: 'feed secret 형식 오류' });
+    return;
+  }
+  const pick = (list: any, max: number) =>
+    (Array.isArray(list) ? list : []).slice(0, max).map((m: any) => ({
+      id: String(m?.id || ''),
+      myPhrase: String(m?.myPhrase || '').slice(0, 400),
+      naturalPhrase: String(m?.naturalPhrase || '').slice(0, 400),
+      reason: String(m?.reason || '').slice(0, 600),
+    })).filter((m: any) => m.id && m.myPhrase && m.naturalPhrase);
+  writeFeedSync({
+    uid,
+    secret,
+    quizCount: Math.max(0, Math.min(100, Number(quizCount) || 0)),
+    newMistakes: pick(newMistakes, 6),
+    reviewMistakes: pick(reviewMistakes, 3),
+    syncedAt: new Date().toISOString(),
+  });
+  res.json({ ok: true });
+});
+
+function feedBaseUrl(req: Request): string {
+  const proto = String(req.headers['x-forwarded-proto'] || req.protocol).split(',')[0].trim();
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '');
+  return `${proto}://${host}`;
+}
+
+app.get(['/feed/:secret/today', '/feed/:secret/today.json'], (req: Request, res: Response) => {
+  res.set('Cache-Control', 'no-store');
+  res.set('X-Robots-Tag', 'noindex');
+  const st = feedForSecret(String(req.params.secret));
+  if (!st) {
+    res.status(404).send('Not found');
+    return;
+  }
+  const today = buildFeedToday(createGenAI(), st, feedBaseUrl(req));
+  if (req.path.endsWith('.json')) res.json(today);
+  else res.type('html').send(renderFeedHtml(today));
+});
+
+app.get('/feed/:secret/audio/:file', (req: Request, res: Response) => {
+  const st = feedForSecret(String(req.params.secret));
+  const m = /^(\d{4}-\d{2}-\d{2})\.wav$/.exec(String(req.params.file));
+  const file = st && m ? feedAudioFile(st, m[1]) : null;
+  if (!file) {
+    res.status(404).send('Not found');
+    return;
+  }
+  res.set('X-Robots-Tag', 'noindex');
+  res.type('audio/wav').sendFile(file);
+});
+
+// B-10 Keep import: split pasted Keep "English mistake log" text into [내가 한 말 / 자연스러운 표현 / 이유]
+app.post('/api/keep/parse', requireAuth, async (req: Request, res: Response) => {
+  const { text } = req.body || {};
+  if (typeof text !== 'string' || !text.trim()) {
+    res.status(400).json({ ok: false, error: '붙여넣은 Keep 텍스트가 없습니다.' });
+    return;
+  }
+  if (text.length > 60000) {
+    res.status(400).json({ ok: false, error: '텍스트가 너무 깁니다(6만 자 이하로 나눠 주세요).' });
+    return;
+  }
+  const ai = createGenAI();
+  if (!ai) {
+    res.status(500).json({ ok: false, error: 'Gemini 서버 연동이 준비되지 않았습니다.' });
+    return;
+  }
+  try {
+    const prompt = `아래는 사용자가 Google Keep "English mistake log" 목록에서 복사한 텍스트입니다.
+각 실수 항목을 [내가 한 말 / 자연스러운 표현 / 이유]로 나누세요.
+
+규칙:
+1. myPhrase(내가 한 말)는 텍스트에 적힌 틀린 문장을 글자 그대로 옮기세요. 절대 고치거나 다듬지 마세요.
+2. naturalPhrase(자연스러운 표현)가 텍스트에 있으면 그대로, 없으면 자연스러운 영어로 제안하세요.
+3. reason(이유)은 텍스트에 있으면 그대로, 없으면 한국어 1문장으로 쓰세요.
+4. 실수가 아닌 줄(제목, 날짜, 빈 줄, 메모)은 버리세요. 항목 수를 임의로 합치거나 나누지 마세요.
+5. 원래 순서를 지키세요.
+
+[Keep 텍스트]
+${text}`;
+    const response = await ai.models.generateContent({
+      model: FALLBACK_CHAT_MODEL, // gemini-3.8-flash
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            items: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  myPhrase: { type: Type.STRING },
+                  naturalPhrase: { type: Type.STRING },
+                  reason: { type: Type.STRING },
+                },
+                required: ['myPhrase', 'naturalPhrase', 'reason'],
+              },
+            },
+          },
+          required: ['items'],
+        },
+      },
+    });
+    const parsed = JSON.parse(response.text?.trim() || '{}');
+    const items = (Array.isArray(parsed.items) ? parsed.items : [])
+      .filter((it: any) => it && typeof it.myPhrase === 'string' && it.myPhrase.trim())
+      .map((it: any) => ({
+        myPhrase: String(it.myPhrase).trim(),
+        naturalPhrase: String(it.naturalPhrase || '').trim(),
+        reason: String(it.reason || '').trim(),
+      }));
+    res.json({
+      ok: true,
+      items,
+      usage: {
+        inputTokens: response.usageMetadata?.promptTokenCount || 0,
+        outputTokens: response.usageMetadata?.candidatesTokenCount || 0,
+      },
+    });
+  } catch (err: any) {
+    console.error('[KeepParse] error:', err);
+    res.status(500).json({ ok: false, error: err?.message || 'Keep 텍스트 분석 실패' });
+  }
+});
+
+// 1-F STT quality benchmark (auth required)
+app.get('/api/stt-bench/engines', requireAuth, (_req: Request, res: Response) => {
+  res.json({ ok: true, engines: { live: true, gemini_transcribe: true, assemblyai: assemblyAvailable() } });
+});
+
+app.post('/api/stt-bench/transcribe', requireAuth, async (req: Request, res: Response) => {
+  const { engine, audioBase64, mimeType = 'audio/webm', pcm16kBase64 } = req.body || {};
+  const ai = createGenAI();
+  const start = performance.now();
+  try {
+    let output = '';
+    if (engine === 'gemini_transcribe') {
+      if (!ai || typeof audioBase64 !== 'string') throw new Error('Gemini 또는 오디오 없음');
+      output = await transcribeGemini(ai, TRANSCRIBE_MODEL, audioBase64, String(mimeType));
+    } else if (engine === 'assemblyai') {
+      if (!assemblyAvailable()) {
+        res.json({ ok: false, skipped: true, error: 'ASSEMBLYAI_API_KEY 없음' });
+        return;
+      }
+      if (typeof audioBase64 !== 'string') throw new Error('오디오 없음');
+      output = await transcribeAssembly(Buffer.from(audioBase64, 'base64'));
+    } else if (engine === 'live') {
+      if (!ai || typeof pcm16kBase64 !== 'string') throw new Error('Gemini 또는 PCM 오디오 없음');
+      output = await transcribeLive(ai, NATIVE_AUDIO_MODEL, pcm16kBase64);
+    } else {
+      res.status(400).json({ ok: false, error: 'unknown engine' });
+      return;
+    }
+    res.json({ ok: true, engine, output, elapsedMs: Math.round(performance.now() - start) });
+  } catch (err: any) {
+    console.warn(`[SttBench] ${engine} error:`, err?.message || err);
+    res.status(500).json({ ok: false, engine, error: err?.message || '받아쓰기 실패' });
+  }
+});
+
 app.get(['/healthz', '/api/health', '/health'], (_req: Request, res: Response) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
@@ -646,12 +1319,16 @@ async function startServer() {
   const wss = new WebSocketServer({ noServer: true });
 
   server.on('upgrade', (request, socket, head) => {
-    const url = new URL(request.url || '', `http://${request.headers.host}`);
-    if (url.pathname === '/live' || url.pathname === '/api/gemini/live') {
-      wss.handleUpgrade(request, socket, head, (ws) => {
-        wss.emit('connection', ws, request);
-      });
-    } else {
+    try {
+      const pathname = new URL(request.url || '/', 'http://localhost').pathname;
+      if (pathname === '/live' || pathname === '/api/gemini/live') {
+        wss.handleUpgrade(request, socket, head, (ws) => {
+          wss.emit('connection', ws, request);
+        });
+      } else {
+        socket.destroy();
+      }
+    } catch {
       socket.destroy();
     }
   });
@@ -688,9 +1365,16 @@ async function startServer() {
           }
           const systemInstruction = msg.systemInstruction || '너는 다정하고 따뜻하게 통화하는 한국어 친구야. 자연스럽고 짧게 구어체로 답해줘.';
 
+          console.log('[Gemini Live] stage=init_received');
           const ai = createGenAI(customApiKey);
           if (!ai) {
-            clientWs.send(JSON.stringify({ type: 'error', error: 'API Key not configured' }));
+            console.warn('[Gemini Live] stage=no_api_key -> fallback_required');
+            clientWs.send(JSON.stringify({
+              type: 'fallback_required',
+              error: 'API Key not configured',
+              userMessage: '서버가 Gemini 키를 찾지 못했어요. AI Studio Secrets의 GEMINI_API_KEY를 확인하고 다시 Publish해 주세요.',
+            }));
+            setTimeout(() => { try { clientWs.close(1011, 'no api key'); } catch { /* ignore */ } }, 100);
             return;
           }
 
@@ -738,6 +1422,23 @@ async function startServer() {
               if (serverMsg.serverContent?.interrupted) {
                 clientWs.send(JSON.stringify({ type: 'interrupted' }));
               }
+
+              // Forward session resumption update
+              if (serverMsg.sessionResumptionUpdate) {
+                clientWs.send(JSON.stringify({
+                  type: 'session_resumption_update',
+                  handle: serverMsg.sessionResumptionUpdate.newHandle,
+                  resumable: serverMsg.sessionResumptionUpdate.resumable,
+                }));
+              }
+
+              // Forward GoAway event
+              if (serverMsg.goAway) {
+                clientWs.send(JSON.stringify({
+                  type: 'go_away',
+                  timeLimit: serverMsg.goAway.timeLimit,
+                }));
+              }
             },
             onerror: (err: any) => {
               console.error('Gemini Live session error:', err);
@@ -761,11 +1462,17 @@ async function startServer() {
             lock: string;
           }> = [
             {
-              desc: `Bilingual lock (${targetLang} + ko-KR)`,
+              desc: `gemini-3.8-live with session resumption & context compression`,
               config: {
                 responseModalities: [Modality.AUDIO],
-                inputAudioTranscription: { languageCodes: [targetLang, 'ko-KR'] },
-                outputAudioTranscription: { languageCodes: [targetLang] },
+                inputAudioTranscription: {},
+                outputAudioTranscription: {},
+                sessionResumption: {
+                  handle: msg.resumeHandle || undefined,
+                },
+                contextWindowCompression: {
+                  slidingWindow: {},
+                },
                 speechConfig: {
                   voiceConfig: { prebuiltVoiceConfig: { voiceName } },
                   languageCode: targetLang,
@@ -775,31 +1482,17 @@ async function startServer() {
               lock: targetLang,
             },
             {
-              desc: `${targetLang} speechConfig with auto transcription`,
+              desc: 'gemini-3.8-live standard audio session',
               config: {
                 responseModalities: [Modality.AUDIO],
                 inputAudioTranscription: {},
                 outputAudioTranscription: {},
                 speechConfig: {
                   voiceConfig: { prebuiltVoiceConfig: { voiceName } },
-                  languageCode: targetLang,
                 },
                 systemInstruction,
               },
               lock: targetLang,
-            },
-            {
-              desc: 'voice-only fallback without languageCode',
-              config: {
-                responseModalities: [Modality.AUDIO],
-                inputAudioTranscription: {},
-                outputAudioTranscription: {},
-                speechConfig: {
-                  voiceConfig: { prebuiltVoiceConfig: { voiceName } },
-                },
-                systemInstruction,
-              },
-              lock: 'voice-only',
             },
           ];
 
@@ -809,12 +1502,29 @@ async function startServer() {
 
           for (const modelToTry of LIVE_MODELS) {
             for (const attempt of configsToTry) {
+              if (!isConnected) break;
               try {
-                liveSession = await ai.live.connect({
+                console.log(`[Gemini Live] stage=live_connect model=${modelToTry} (${attempt.desc})`);
+                const connectPromise = ai.live.connect({
                   model: modelToTry,
                   config: attempt.config,
                   callbacks: createLiveCallbacks(),
                 });
+                let timedOut = false;
+                let timeoutHandle: NodeJS.Timeout | undefined;
+                const timeoutPromise = new Promise<never>((_, rej) => {
+                  timeoutHandle = setTimeout(() => {
+                    timedOut = true;
+                    rej(new Error(`Live connect timeout after ${LIVE_CONNECT_TIMEOUT_MS}ms`));
+                  }, LIVE_CONNECT_TIMEOUT_MS);
+                });
+                // If the connect resolves after we gave up, close that orphan session.
+                connectPromise.then((late: any) => { if (timedOut) { try { late?.close?.(); } catch { /* ignore */ } } }).catch(() => {});
+                try {
+                  liveSession = await Promise.race([connectPromise, timeoutPromise]);
+                } finally {
+                  if (timeoutHandle) clearTimeout(timeoutHandle);
+                }
                 activeLock = attempt.lock;
                 activeModel = modelToTry;
                 console.log(`[Gemini Live] Successfully connected with ${modelToTry}: ${attempt.desc} (languageLock: ${activeLock})`);
@@ -827,18 +1537,25 @@ async function startServer() {
             if (liveSession) break;
           }
 
-          if (liveSession) {
+          if (liveSession && !isConnected) {
+            try { liveSession.close?.(); } catch { /* ignore */ }
+            liveSession = null;
+          } else if (liveSession) {
+            console.log('[Gemini Live] stage=ready_sent');
             clientWs.send(JSON.stringify({
               type: 'ready',
               model: activeModel,
-              modelName: activeModel === 'gemini-3.8-live' ? 'Gemini 3.8 Live Native Audio' : 'Gemini 2.5 Flash Native Audio Dialog',
+              modelName: 'Gemini 3.8 Live Native Audio',
               languageLock: activeLock,
             }));
           } else {
-            console.error('Failed to establish Gemini Live session across all language configurations:', connectError);
+            console.error('Failed to establish Gemini Live session across all configurations:', connectError);
             clientWs.send(JSON.stringify({
               type: 'fallback_required',
-              error: connectError?.message || 'Live connect failed, falling back to HTTP dialog',
+              error: connectError?.message || 'Live connect failed',
+              userMessage: /timeout/i.test(String(connectError?.message))
+                ? '튜터 연결이 너무 오래 걸려요. 잠시 후 다시 시도해 주세요.'
+                : '튜터 서버에 연결하지 못했어요. 잠시 후 다시 시도해 주세요.',
             }));
           }
         } else if (msg.type === 'realtime_audio' && liveSession) {
@@ -861,6 +1578,20 @@ async function startServer() {
           } catch (sendErr) {
             console.error('Error forwarding text to Live session:', sendErr);
           }
+        } else if (msg.type === 'control_command' && liveSession) {
+          const commandPrompts: Record<string, string> = {
+            Done: "Done. (I have finished my answer. Please provide concise feedback, estimated level, and AL upgrade expression under 40 seconds.)",
+            Feedback: "Feedback. (Please provide quick feedback on what I just said.)",
+            "Model answer": "Model answer. (Please give a 60-second AL model answer to this question using my details.)",
+            Pause: "Pause. (Let's pause here. How did I sound in this scene?)",
+            Slow: "Please speak a bit slower and enunciate clearly.",
+          };
+          const prompt = commandPrompts[msg.command] || msg.command;
+          try {
+            liveSession.sendRealtimeInput({ text: prompt });
+          } catch (cmdErr) {
+            console.error('Error forwarding control command to Live session:', cmdErr);
+          }
         } else if (msg.type === 'interrupt' && liveSession) {
           try {
             // Signal liveSession client interrupt via official SDK method
@@ -873,8 +1604,12 @@ async function startServer() {
             console.error('Error forwarding interrupt to Live session:', intErr);
           }
         }
-      } catch (parseErr) {
+      } catch (parseErr: any) {
         console.error('WS message parse error:', parseErr);
+        // Never leave the client waiting for 'ready' on an unexpected failure.
+        if (!liveSession && clientWs.readyState === WebSocket.OPEN) {
+          clientWs.send(JSON.stringify({ type: 'fallback_required', error: parseErr?.message || 'init failed' }));
+        }
       }
     });
   });
