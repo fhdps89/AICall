@@ -4,6 +4,18 @@
 
 ---
 
+### [2026-10-14 KST] v2.7.7 — 블루이 첫 통화 피드백 반영 (GitHub PR, Claude)
+- **문제 원인 (Root Cause)**:
+  - 아침 강의 실패: `gemini-3.8-flash-tts` 2인 음성 요청이 400 "Multi-speaker generation requests must specify speech_metadata.speaker for each text part". 대본 전체를 한 덩어리 글로 보냈기 때문.
+  - 통화 지시문에 Gemini 앱(채팅)용 원문이 그대로 들어가 "Next lesson" 안내, Keep 확인, 호주 억양 흉내 등이 통화에서도 나옴. 말 길이 제한도 없었음.
+  - 복기 화면의 "Keep 붙여넣기용 복사"가 필수 단계처럼 보였음. 실제로는 실수가 앱 복습 목록에 자동 저장되고 있었음.
+- **적용된 수정 내역 (Changes)**:
+  - `server/lecture.ts`: 2인 음성은 말하는 사람마다 한 조각씩 `speechMetadata.speaker`(+style)를 붙여 보냄. 1인 음성에서는 "Coach:" 꼬리표를 읽지 않게 뺌.
+  - `src/data/lessonPromptBuilder.ts`: "앱 통화 규칙"을 추가해 원문보다 우선 적용. 채팅용 안내 무시, 오늘 과만 진행, 한 번에 1~2문장과 질문 하나(학습자 70% 이상 말하기), 같은 목소리 유지·억양 흉내 금지·영어 위주, 끝나면 "That's it for today. See you next time."으로 마무리.
+  - `ReviewModal.tsx`: "통화 후 할 일" 안내(실수 N개 자동 저장됨, 내일 아침 강의·퀴즈). Keep 복사는 접힌 선택 항목으로 옮김(Google 개인 계정은 Keep API를 쓸 수 없음). `reviewPipeline.ts`: 저장 성공 여부(`mistakesSaved`)를 기록.
+
+---
+
 ### [2026-10-14 KST] v2.7.6 — 휴대폰 볼륨 버튼·이어폰으로 튜터 목소리 듣기 (GitHub PR, Claude)
 - **문제 원인 (Root Cause)**: 튜터 목소리를 AudioContext에서 바로 스피커(`ctx.destination`)로 재생했음. 마이크가 켜지면 휴대폰은 "통화" 모드가 되는데, 이 소리는 "미디어" 채널로 나가서 볼륨 버튼은 통화 음량만 바꾸고 튜터 음량은 그대로였음. 이어폰을 껴도 통화 경로를 따르지 않고 휴대폰 스피커로 나올 수 있음 [추정, 실기기 확인 필요].
 - **적용된 수정 내역 (Changes)**: `geminiLiveProvider.ts` 튜터 목소리를 AudioContext → MediaStream → 숨은 `<audio>` 요소로 재생(마이크와 같은 통화 경로). 실패하면 예전 방식으로 자동 전환. iOS Safari는 `navigator.audioSession.type = "play-and-record"` 지정.

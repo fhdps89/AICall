@@ -1,7 +1,7 @@
 # 📖 프로젝트 컨텍스트 및 히스토리 (Project Context)
 
 > **프로젝트**: One Call English (옛 이름: 「오늘도 한 통」) — AI 1:1 전화영어  
-> **현재 버전**: `v2.7.6` | **최종 갱신**: 2026-10-14 (KST)  
+> **현재 버전**: `v2.7.7` | **최종 갱신**: 2026-10-14 (KST)  
 > **기준 기획**: [`docs/plan/implementation_plan_v4.md`](./docs/plan/implementation_plan_v4.md) Part B · 진행 가이드 [`docs/plan/ai-studio-build-guide.md`](./docs/plan/ai-studio-build-guide.md) · 현재 앱과의 차이 [`docs/plan/gap-v2.1.0-vs-plan-v4.md`](./docs/plan/gap-v2.1.0-vs-plan-v4.md)  
 > **관리 규칙**: `README.md` 변경 시 본 문서의 아키텍처 및 히스토리를 함께 최신화하며, 모든 일시는 한국 표준시(KST)를 기준으로 합니다.
 
@@ -123,6 +123,7 @@
 ---
 
 ## 5. 버전 히스토리
+- **v2.7.7 (2026-10-14 KST)**: [블루이 피드백] 아침 강의 2인 음성 요청 형식 수정(speechMetadata.speaker), 통화 지시문에 앱 통화 규칙(짧게 말하기·같은 목소리·오늘 과만·마무리 인사) 추가, 복기 화면에 "통화 후 할 일"과 자동 저장 안내, Keep 복사는 선택 항목.
 - **v2.7.6 (2026-10-14 KST)**: [통화 소리] 튜터 목소리를 `<audio>` 요소(MediaStream)로 재생해 휴대폰 볼륨 버튼·이어폰 경로를 따르게 함. iOS는 audioSession을 play-and-record로. 통화 중 이어폰 연결 시 마이크 자동 전환(녹음은 끊기지 않음).
 - **v2.7.5 (2026-10-14 KST)**: [버그] 설정 버튼을 눌러도 화면이 안 뜨던 문제(`SettingsModal`의 훅 순서) 수정.
 - **v2.7.4 (2026-10-14 KST)**: [키 우회] AI Studio Publish 서버에 Secrets 키가 전달되지 않는 문제 우회. 설정 → Gemini 키에서 저장한 키(내 Firestore `users/{uid}/private/gemini`)를 서버가 사용자 토큰으로 읽어 메모리에만 보관. 배포 환경 키가 있으면 그쪽 우선.

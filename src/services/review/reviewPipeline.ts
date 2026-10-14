@@ -280,7 +280,9 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
       await saveCallMistakes(userId, mistakeDocs);
       console.log(`[ReviewPipeline] Saved ${mistakeDocs.length} new mistakes to mistakes collection.`);
     }
+    review.mistakesSaved = true;
   } catch (mistakeErr) {
+    review.mistakesSaved = false;
     console.error("[ReviewPipeline] Failed to save mistakes collection:", mistakeErr);
   }
 

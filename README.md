@@ -1,6 +1,6 @@
 # One Call English — AI 1:1 전화영어 (옛 이름: 오늘도 한 통)
 
-> **버전**: `v2.7.6` | **최종 갱신**: 2026-10-14 (KST)
+> **버전**: `v2.7.7` | **최종 갱신**: 2026-10-14 (KST)
 > **기준 기획**: [`docs/plan/implementation_plan_v4.md`](./docs/plan/implementation_plan_v4.md) Part B · 진행 가이드 [`docs/plan/ai-studio-build-guide.md`](./docs/plan/ai-studio-build-guide.md)
 > 아키텍처와 버전 기록: [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) · 상세 변경 기록: [`docs/history/changelog.md`](./docs/history/changelog.md)
 
