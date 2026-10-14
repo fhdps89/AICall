@@ -45,6 +45,13 @@ export class GeminiLiveProvider implements LiveProvider {
   private outputAudioCtx: AudioContext | null = null;
   private mediaStream: MediaStream | null = null;
   private processorNode: ScriptProcessorNode | null = null;
+  // Mic graph: micSource -> processorNode (to Gemini) and -> recordDest (stable stream for the
+  // chunk recorder), so the mic can be swapped mid-call (earphones plugged in) without
+  // restarting the recording.
+  private micSource: MediaStreamAudioSourceNode | null = null;
+  private recordDest: MediaStreamAudioDestinationNode | null = null;
+  private deviceChangeTimer: ReturnType<typeof setTimeout> | null = null;
+  private swappingMic = false;
   private nextPlaybackTime = 0;
   private activeSources: AudioBufferSourceNode[] = [];
   // Tutor voice goes AudioContext -> MediaStream -> <audio>, so phones treat it as call audio
@@ -695,15 +702,7 @@ export class GeminiLiveProvider implements LiveProvider {
       // ignore
     }
     try {
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          sampleRate: 16000,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
+      this.mediaStream = await navigator.mediaDevices.getUserMedia(GeminiLiveProvider.MIC_CONSTRAINTS);
     } catch (err: any) {
       const name = err?.name || "";
       const e: any = new Error(
@@ -716,12 +715,18 @@ export class GeminiLiveProvider implements LiveProvider {
       throw e;
     }
 
-    this.options?.onMediaStreamReady?.(this.mediaStream);
-
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
     this.inputAudioCtx = new AudioContextClass({ sampleRate: 16000 });
+    if (this.inputAudioCtx.state === "suspended") {
+      await this.inputAudioCtx.resume().catch(() => {});
+    }
 
     const source = this.inputAudioCtx.createMediaStreamSource(this.mediaStream);
+    this.micSource = source;
+    this.recordDest = this.inputAudioCtx.createMediaStreamDestination();
+    source.connect(this.recordDest);
+    this.options?.onMediaStreamReady?.(this.recordDest.stream);
+    navigator.mediaDevices.addEventListener?.("devicechange", this.handleDeviceChange);
     // Buffer size 2048 gives ~128ms chunks at 16kHz
     this.processorNode = this.inputAudioCtx.createScriptProcessor(2048, 1, 1);
 
@@ -740,6 +745,51 @@ export class GeminiLiveProvider implements LiveProvider {
 
     source.connect(this.processorNode);
     this.processorNode.connect(this.inputAudioCtx.destination);
+  }
+
+  private static readonly MIC_CONSTRAINTS: MediaStreamConstraints = {
+    audio: {
+      channelCount: 1,
+      sampleRate: 16000,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+  };
+
+  // Earphones plugged in or unplugged mid-call: reopen the mic so the new default device is used.
+  private handleDeviceChange = (): void => {
+    if (this.deviceChangeTimer) clearTimeout(this.deviceChangeTimer);
+    this.deviceChangeTimer = setTimeout(() => {
+      this.deviceChangeTimer = null;
+      this.swapMic().catch((err) => console.warn("[Live] stage=mic_swap_failed", err));
+    }, 700);
+  };
+
+  private async swapMic(): Promise<void> {
+    if (this.swappingMic || !this.inputAudioCtx || !this.processorNode || !this.recordDest) return;
+    this.swappingMic = true;
+    try {
+      const next = await navigator.mediaDevices.getUserMedia(GeminiLiveProvider.MIC_CONSTRAINTS);
+      if (!this.inputAudioCtx || !this.processorNode || !this.recordDest) {
+        next.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      const nextSource = this.inputAudioCtx.createMediaStreamSource(next);
+      nextSource.connect(this.processorNode);
+      nextSource.connect(this.recordDest);
+      try {
+        this.micSource?.disconnect();
+      } catch {
+        // ignore
+      }
+      this.mediaStream?.getTracks().forEach((t) => t.stop());
+      this.micSource = nextSource;
+      this.mediaStream = next;
+      console.log("[Live] stage=mic_swapped label=" + (next.getAudioTracks()[0]?.label || "?"));
+    } finally {
+      this.swappingMic = false;
+    }
   }
 
   // Audio Playback Setup (24kHz standard for Gemini Live output)
@@ -832,6 +882,14 @@ export class GeminiLiveProvider implements LiveProvider {
     }
 
     this.stopAudioPlayback();
+
+    navigator.mediaDevices?.removeEventListener?.("devicechange", this.handleDeviceChange);
+    if (this.deviceChangeTimer) {
+      clearTimeout(this.deviceChangeTimer);
+      this.deviceChangeTimer = null;
+    }
+    this.micSource = null;
+    this.recordDest = null;
 
     if (this.processorNode) {
       this.processorNode.disconnect();
