@@ -21,11 +21,12 @@ export async function ensureFeedSecret(uid: string): Promise<string> {
   return secret;
 }
 
-export async function syncFeed(uid: string, secretOverride?: string): Promise<string> {
+export async function syncFeed(uid: string, secretOverride?: string, previousSecret?: string): Promise<string> {
   const secret = secretOverride || (await ensureFeedSecret(uid));
   const [picked, due] = await Promise.all([pickLectureMistakes(uid), getDueMistakes(uid)]);
   await authJson("/api/feed/sync", {
     secret,
+    previousSecret,
     quizCount: Math.min(due.length, 10),
     ...picked,
   });
@@ -34,9 +35,10 @@ export async function syncFeed(uid: string, secretOverride?: string): Promise<st
 
 /** 설정에서 비밀키 새로 바꾸기: old URL stops working immediately after sync. */
 export async function rotateFeedSecret(uid: string): Promise<string> {
+  const previous = (await getUserProfile(uid))?.feedSecret;
   const secret = generateFeedSecret();
   await saveUserProfile(uid, { feedSecret: secret });
-  await syncFeed(uid, secret);
+  await syncFeed(uid, secret, previous);
   return secret;
 }
 

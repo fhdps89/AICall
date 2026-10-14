@@ -34,9 +34,16 @@ export function getUserSuppliedKey(): string | undefined {
   return cached?.key || undefined;
 }
 
-async function fetchKey(idToken: string, uid: string): Promise<string | null> {
+/** Firestore REST URL for a document path like `users/{uid}/private/gemini` (null when the project is unknown). */
+export function firestoreDocUrl(docPath: string): string | null {
   if (!projectId) return null;
-  const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents/users/${encodeURIComponent(uid)}/private/gemini`;
+  const segs = docPath.split('/').map(encodeURIComponent).join('/');
+  return `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents/${segs}`;
+}
+
+async function fetchKey(idToken: string, uid: string): Promise<string | null> {
+  const url = firestoreDocUrl(`users/${uid}/private/gemini`);
+  if (!url) return null;
   const res = await fetch(url, { headers: { Authorization: `Bearer ${idToken}` } });
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`Firestore ${res.status}`);

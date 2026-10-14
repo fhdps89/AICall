@@ -10,6 +10,7 @@ import type { GoogleGenAI } from '@google/genai';
 import { DATA_DIR, kstToday, readLectureState, startLectureJob, lectureAudioPath } from './lecture.ts';
 import type { LectureMistakeInput } from './lecture.ts';
 import { safeEqual } from './auth.ts';
+import { loadFeedBackup } from './feedStore.ts';
 
 const FEED_FILE = path.join(DATA_DIR, 'feed.json');
 const FAILED_RETRY_COOLDOWN_MS = 30 * 60 * 1000;
@@ -45,6 +46,22 @@ export function feedForSecret(secret: string): FeedSyncState | null {
   const st = readFeed();
   if (!st || !isValidFeedSecret(secret) || !safeEqual(st.secret, secret)) return null;
   return st;
+}
+
+/** Like feedForSecret, but a fresh server (empty .data/) restores the state from the Firestore backup first. */
+export async function loadFeedForSecret(secret: string): Promise<FeedSyncState | null> {
+  const local = feedForSecret(secret);
+  if (local || !isValidFeedSecret(secret)) return local;
+  try {
+    const backup = await loadFeedBackup(secret);
+    if (!backup) return null;
+    writeFeedSync(backup.state);
+    console.log('[feed] restored feed state from Firestore backup');
+    return backup.state;
+  } catch (err: any) {
+    console.warn('[feed] could not read Firestore backup:', err?.message || err);
+    return null;
+  }
 }
 
 export interface FeedToday {
