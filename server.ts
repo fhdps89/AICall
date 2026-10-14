@@ -500,6 +500,10 @@ app.post('/api/recordings/upload-chunk', requireAuth, express.raw({ type: ['audi
   }
 });
 
+// Files under .data/ must be sent with dotfiles allowed: Express's sendFile refuses any path
+// with a segment starting with "." by default and answers 404 "Not Found".
+const SEND_DATA_FILE = { dotfiles: 'allow' as const };
+
 app.get('/api/recordings/file', requireAuth, (req: Request, res: Response) => {
   const relPath = String(req.query.path || '');
   if (!relPath) {
@@ -508,7 +512,7 @@ app.get('/api/recordings/file', requireAuth, (req: Request, res: Response) => {
   }
   const safePath = userRecordingPath(res.locals.user.uid, relPath);
   if (safePath && fs.existsSync(safePath)) {
-    res.sendFile(safePath);
+    res.sendFile(safePath, SEND_DATA_FILE);
   } else {
     res.status(404).send('Audio file not found');
   }
@@ -1049,7 +1053,7 @@ app.get('/api/lecture/audio', requireAuth, (req: Request, res: Response) => {
       res.status(404).json({ ok: false, error: '강의 오디오가 없습니다.' });
       return;
     }
-    res.type('audio/wav').sendFile(file);
+    res.type('audio/wav').sendFile(file, SEND_DATA_FILE);
   } catch (err: any) {
     res.status(400).json({ ok: false, error: err?.message });
   }
@@ -1120,7 +1124,7 @@ app.get('/feed/:secret/audio/:file', async (req: Request, res: Response) => {
     return;
   }
   res.set('X-Robots-Tag', 'noindex');
-  res.type('audio/wav').sendFile(file);
+  res.type('audio/wav').sendFile(file, SEND_DATA_FILE);
 });
 
 // B-10 Keep import: split pasted Keep "English mistake log" text into [내가 한 말 / 자연스러운 표현 / 이유]
