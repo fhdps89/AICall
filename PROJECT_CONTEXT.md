@@ -1,8 +1,17 @@
 # 📖 프로젝트 컨텍스트 및 히스토리 (Project Context)
 
 > **프로젝트**: 「오늘도 한 통」 (One Call English) — AI 1:1 전화영어 올인원 랩  
-> **현재 버전**: `v2.6.0` | **공식 빌드 버전**: `20261013-multilingual-1652` | **최종 갱신**: 2026-10-13 (KST)  
+> **현재 버전**: `v2.6.1` | **공식 빌드 버전**: `20261014-multilingual-1330` | **최종 갱신**: 2026-10-14 (KST)  
 > **관리 규칙**: `README.md` 변경 시 본 문서의 아키텍처 및 히스토리를 함께 최신화하며, 모든 일시는 한국 표준시(KST)를 기준으로 합니다.
+
+---
+
+## 0. 최근 핫픽스 (Gemini Live 연결 준비 중 무한 대기 수정 - 2026-10-14 KST)
+- **원인 1**: AI Studio 컨테이너 보안 환경에서 주입된 실제 Gemini 키(`/app/.dev.env.json`)가 서버 부팅 시의 기본 프로세스 환경변수에 누락되어 `fallback_required` 발생.
+- **해결 1**: `server.ts`의 `resolveGeminiApiKeyInner()`를 확장하여 `/app/.dev.env.json`, `/etc/environment` 및 전체 `/proc` 프로세스 환경을 스캔해 실제 유효 키를 동적 추출하도록 강화.
+- **원인 2**: 클라이언트 `geminiLiveProvider.ts`의 `connectDirect()`에서 웹소켓 오픈 즉시 `wireWebSocketEvents(true)`를 호출하여 `socket.onerror`/`onclose`가 덮어씌워져, 연결 거부 시 즉시 실패하지 않고 8초 타임아웃까지 대기하는 문제.
+- **해결 2**: `setupComplete` 수신 전까지는 에러/종료 시 즉시 `reject()`를 호출하여 대기 없이 즉시 서버 프록시로 넘어가도록 개선하고 타임아웃을 5초로 단축.
+- **원인 3**: `geminiLiveProvider.ts`의 `connect()` 메서드 말미에 `await micPromise;`가 블로킹되어 마이크 권한 승인 전까지 연결 완료로 전환되지 않던 구조 수정. 세션 수립과 마이크 스트림 획득을 비동기 분리.
 
 ---
 

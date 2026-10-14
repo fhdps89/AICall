@@ -30,9 +30,72 @@
         "tutorPrompt": { "type": "string" },
         "nextLessonIndex": { "type": "number" },
         "status": { "type": "string", "enum": ["active", "paused", "done"] },
+        "deadline": { "type": "string" },
         "updatedAt": { "type": "string" }
       },
       "required": ["title", "type", "tutorPrompt", "nextLessonIndex", "status"]
+    },
+    "UserPlan": {
+      "title": "UserPlan",
+      "description": "User weekly learning pattern and daily target minutes",
+      "type": "object",
+      "properties": {
+        "weeklyPattern": {
+          "type": "object",
+          "properties": {
+            "mon": { "type": "array", "items": { "type": "string" } },
+            "tue": { "type": "array", "items": { "type": "string" } },
+            "wed": { "type": "array", "items": { "type": "string" } },
+            "thu": { "type": "array", "items": { "type": "string" } },
+            "fri": { "type": "array", "items": { "type": "string" } },
+            "sat": { "type": "array", "items": { "type": "string" } },
+            "sun": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+        },
+        "minutesPerDay": { "type": "number" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["weeklyPattern", "minutesPerDay"]
+    },
+    "PlanChange": {
+      "title": "PlanChange",
+      "description": "Proposed or approved change record with before/after snapshots for plan and goals",
+      "type": "object",
+      "properties": {
+        "requestedText": { "type": "string" },
+        "summary": { "type": "string" },
+        "before": { "type": "object" },
+        "after": { "type": "object" },
+        "status": { "type": "string", "enum": ["proposed", "approved", "rejected", "reverted"] },
+        "at": { "type": "string" },
+        "appliedAt": { "type": "string" }
+      },
+      "required": ["requestedText", "summary", "before", "after", "status", "at"]
+    },
+    "CoachMemory": {
+      "title": "CoachMemory",
+      "description": "Persistent memory of user constraints, preferences, and weak points",
+      "type": "object",
+      "properties": {
+        "constraints": { "type": "array", "items": { "type": "string" } },
+        "preferences": { "type": "array", "items": { "type": "string" } },
+        "weakPoints": { "type": "array", "items": { "type": "string" } },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["constraints", "preferences", "weakPoints"]
+    },
+    "CoachMessage": {
+      "title": "CoachMessage",
+      "description": "Chat log between user and the coach",
+      "type": "object",
+      "properties": {
+        "role": { "type": "string", "enum": ["user", "coach", "system"] },
+        "text": { "type": "string" },
+        "at": { "type": "string" },
+        "planChangeId": { "type": "string" }
+      },
+      "required": ["role", "text", "at"]
     },
     "Mistake": {
       "title": "Mistake",
@@ -122,6 +185,22 @@
     "/users/{userId}": {
       "schema": "UserProfile",
       "description": "Root document for user settings and preferences"
+    },
+    "/users/{userId}/plan": {
+      "schema": "UserPlan",
+      "description": "User weekly routine pattern and daily target"
+    },
+    "/users/{userId}/planChanges/{planChangeId}": {
+      "schema": "PlanChange",
+      "description": "Plan change history and proposed changes"
+    },
+    "/users/{userId}/coachMemory": {
+      "schema": "CoachMemory",
+      "description": "Coach memory items"
+    },
+    "/users/{userId}/coachMessages/{messageId}": {
+      "schema": "CoachMessage",
+      "description": "Coach chat conversation log"
     },
     "/users/{userId}/goals/{goalId}": {
       "schema": "Goal",

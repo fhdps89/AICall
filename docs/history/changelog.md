@@ -4,6 +4,31 @@
 
 ---
 
+### [2026-10-14 KST] v2.6.1 — Gemini Live "연결 준비 중" 무한 대기 버그 수정 및 세션 연결 안정화
+- **문제 원인 및 기획 의도 (Context & Motivation)**:
+  - 전화걸기 실행 시 Gemini Live 통화 화면에서 "연결 중..." 또는 "튜터 연결 준비 중..." 상태에서 멈추고 대화 화면으로 진입하지 못하는 현상 발생.
+  - 근본 원인 분석:
+    1. **서버 프로세스 환경변수 불일치**: AI Studio 컨테이너 구동 시 컨테이너의 기본 프로세스(PID 1, 53)에는 더미 키(`MY_GEMINI_API_KEY`)가 있었고, 실제 발급된 유효 키는 `/app/.dev.env.json`에 기록되어 있었음. 기존 `server.ts`의 `resolveGeminiApiKeyInner()`가 해당 파일을 조회하지 않아, 클라이언트의 `/api/gemini/token` 요청 및 서버 중계 웹소켓(`/api/gemini/live`) 연결 시 `fallback_required` 에러를 반환.
+    2. **클라이언트 이벤트 리스너 덮어쓰기 버그**: `geminiLiveProvider.ts`의 `connectDirect()`에서 웹소켓 오픈 즉시 `wireWebSocketEvents(true)`를 호출하여 `socket.onerror`와 `socket.onclose`를 덮어씀. 이로 인해 직접 연결 실패 시 `reject()`가 실행되지 않고 8초 풀 타임아웃까지 무의미하게 대기.
+    3. **마이크 권한 획득 블로킹 결함**: `connect()` 메서드 맨 끝에 `await micPromise;`가 포함되어 있어, 마이크 승인이 지연되거나 완료되기 전까지 세션 연결 수립(`connected`)이 반환되지 못하고 대기 상태에 갇힘.
+- **적용된 수정 내역 (Applied Changes)**:
+  1. **서버 키 탐색 고도화 (`server.ts`)**:
+     - `resolveGeminiApiKeyInner()`에 `/app/.dev.env.json`, `/etc/environment` 파싱 및 전체 `/proc` 프로세스 환경변수 스캔을 추가하여 실제 유효 키를 즉시 동적으로 인식하도록 보강.
+     - `LIVE_CONNECT_TIMEOUT_MS`를 6,000ms에서 10,000ms로 조정하여 네트워크 지연 시의 조기 중단 방지.
+     - 웹소켓 upgrade 시 URL pathname 파싱 예외 처리 방어 로직 강화.
+  2. **클라이언트 직접 연결 생명주기 분리 (`geminiLiveProvider.ts`)**:
+     - `connectDirect()`에서 `setupComplete` 수신 전까지는 에러 발생 시 즉시 `reject()`하여 타임아웃 대기 없이 즉시 서버 중계(Proxy)로 폴백하도록 수정.
+     - 직접 연결 타임아웃을 8초에서 5초로 최적화.
+  3. **마이크 스트림 완전 비동기화 (`geminiLiveProvider.ts`)**:
+     - `connect()` 메서드 말미의 `await micPromise;` 블로킹을 해제하고 백그라운드 비동기 처리로 전환.
+     - 세션 연결이 성공하면 마이크 승인 여부와 무관하게 즉시 `connected` 상태로 진입하고, 마이크는 준비되는 즉시 오디오 청크를 스트리밍하도록 개선.
+- **방어 조치 및 호환성 (Safety & Guardrails)**:
+  - 모델명(`gemini-3.8-live`, `gemini-3.8-flash`) 및 화이트리스트 계정(`episode.kim@gmail.com`) 100% 보존.
+  - 직접 연결 및 서버 중계 웹소켓 연결 테스트 정상 완료 확인 (`ready`, `session_resumption_update` 수신 검증).
+  - 공식 빌드 버전 `20261014-multilingual-1330` 동기화.
+
+---
+
 ### [2026-10-13 KST] v2.6.0 — [작업 지시서 6] 2-B 퀴즈 — 가이드 B-6 완료
 - **문제 원인 및 기획 의도 (Context & Motivation)**:
   - B-5 간격 반복(1→3→7→14일) 단계에서 누적된 복습 대상 실수를 플래시카드 퀴즈로 능동 인출(Active Recall)하고 졸업(Graduation)시킬 수 있는 카드형 퀴즈 엔진 구현.

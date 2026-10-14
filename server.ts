@@ -957,6 +957,163 @@ ${listStr}
   }
 });
 
+// B-9 Requirement 4: Coach LLM chat endpoint (gemini-3.8-flash + function calling)
+app.post('/api/coach/chat', requireAuth, async (req: Request, res: Response) => {
+  const { text, plan, goals, mistakeStats, recentSessions, memory, history = [], customApiKey } = req.body || {};
+
+  if (!text || typeof text !== 'string' || !text.trim()) {
+    res.status(400).json({ ok: false, error: '메시지를 입력해 주세요.' });
+    return;
+  }
+
+  const ai = createGenAI(customApiKey);
+  if (!ai) {
+    res.status(500).json({ ok: false, error: 'Gemini API 연동이 준비되지 않았습니다.' });
+    return;
+  }
+
+  try {
+    const systemInstruction = `당신은 '찬식'님(episode.kim@gmail.com)의 전담 1:1 영어 학습 스케줄/목표 코치입니다.
+[코칭 원칙 - 절대 규칙]:
+1. 오직 학습 계획, 요일별 루틴, 목표(OPIc AL, 필리조선소 주재원, Bluey 듣기, 미국·호주 여행), 진도 및 실수 패턴만 다룹니다.
+2. 답변은 친절하고 격려하는 한국어 구어체로 2~4문장으로 간결하게 작성합니다.
+3. 사용자가 일정 변경, 출장, 야근, 휴식, 요일 변경, 시험일 접수 등을 언급하면 반드시 'propose_plan_change' 도구를 호출해 변경 제안 카드를 생성하세요.
+4. 중요: 사용자 승인(클라이언트의 승인 버튼) 없이 실제 계획이나 목표를 절대 직접 바꾸거나 완료하지 마세요. 'apply_plan_change'는 모델이 직접 호출할 수 없습니다.
+5. '시험이 11/29로 잡혔어'와 같이 OPIc 시험 날짜(deadline)를 언급하면:
+   - goalPatches에 { opic: { deadline: "2026-11-29" } }를 넣고,
+   - 시험 1~2주 전 구간에 OPIc 실전 모의고사(14과)를 월·토 OPIc 슬롯에 집중 배치하는 제안을 만드세요.
+6. 사용자가 학습 제약(출장, 시간 부족 등), 선호도(선호 시간대, 선호 과목 등), 본인의 취약점(문법, 발음 등)을 언급하면 memoryPatch({ constraints?, preferences?, weakPoints? })에 포함시켜 기록하도록 제안하세요.
+
+[현재 사용자 상태]:
+- 현재 주간 계획(plan.weeklyPattern): ${JSON.stringify(plan?.weeklyPattern || { mon:['opic'], tue:['philly'], wed:['bluey'], thu:['philly'], fri:['travel'], sat:['opic'], sun:[] })}
+- 목표별 진도: ${JSON.stringify((goals || []).map((g: any) => ({ id: g.id, title: g.title, nextLessonIndex: g.nextLessonIndex, status: g.status, deadline: g.deadline || null })))}
+- 복습 통계: ${JSON.stringify(mistakeStats || { reviewing: 0, graduated: 0, dueToday: 0 })}
+- 최근 7일 세션: ${JSON.stringify(recentSessions || [])}
+- 코치 메모리: ${JSON.stringify(memory || { constraints: [], preferences: [], weakPoints: [] })}`;
+
+    const proposePlanChangeDeclaration: any = {
+      name: 'propose_plan_change',
+      description: '학습 계획, 루틴, 목표 설정 변경 제안을 생성합니다. 사용자 승인 전에는 실제 데이터가 변경되지 않습니다.',
+      parameters: {
+        type: Type.OBJECT,
+        properties: {
+          summary: {
+            type: Type.STRING,
+            description: '변경 제안에 대한 요약 설명 (한국어 1문장)',
+          },
+          afterPlan: {
+            type: Type.OBJECT,
+            description: '변경될 주간 계획 ({ weeklyPattern?: { mon: string[], tue: string[], wed: string[], thu: string[], fri: string[], sat: string[], sun: string[] }, minutesPerDay?: number })',
+          },
+          goalPatches: {
+            type: Type.OBJECT,
+            description: '목표별 변경 사항 (예: { opic: { deadline: "2026-11-29" } }, { philly: { status: "paused" } }, { travel: { nextLessonIndex: 4 } })',
+          },
+          memoryPatch: {
+            type: Type.OBJECT,
+            description: '새로 기억할 제약/선호/취약점 ({ constraints?: string[], preferences?: string[], weakPoints?: string[] })',
+          },
+        },
+        required: ['summary'],
+      },
+    };
+
+    const getProgressDeclaration: any = {
+      name: 'get_progress',
+      description: '목표별 nextLessonIndex, status, deadline 및 최근 7일 세션 요약을 확인합니다.',
+      parameters: { type: Type.OBJECT, properties: {} },
+    };
+
+    const getMistakeStatsDeclaration: any = {
+      name: 'get_mistake_stats',
+      description: '복습 중, 보류, 졸업 실수 수 및 오늘 due 수를 확인합니다.',
+      parameters: { type: Type.OBJECT, properties: {} },
+    };
+
+    // Prepare message turns from history
+    const contents: any[] = [];
+    if (Array.isArray(history)) {
+      for (const h of history.slice(-6)) {
+        if (!h.text) continue;
+        contents.push({
+          role: h.role === 'user' ? 'user' : 'model',
+          parts: [{ text: h.text }],
+        });
+      }
+    }
+    contents.push({
+      role: 'user',
+      parts: [{ text: text.trim() }],
+    });
+
+    const response = await ai.models.generateContent({
+      model: FALLBACK_CHAT_MODEL, // gemini-3.8-flash
+      contents,
+      config: {
+        systemInstruction,
+        tools: [{ functionDeclarations: [proposePlanChangeDeclaration, getProgressDeclaration, getMistakeStatsDeclaration] }],
+      },
+    });
+
+    let reply = response.text || '';
+    let proposal: any = null;
+
+    const functionCalls = response.functionCalls;
+    if (Array.isArray(functionCalls) && functionCalls.length > 0) {
+      for (const call of functionCalls) {
+        if (call.name === 'propose_plan_change') {
+          const args: any = call.args || {};
+          const currentGoalsMap: Record<string, any> = {};
+          if (Array.isArray(goals)) {
+            for (const g of goals) {
+              currentGoalsMap[g.id] = {
+                nextLessonIndex: g.nextLessonIndex,
+                deadline: g.deadline,
+                status: g.status,
+              };
+            }
+          }
+          proposal = {
+            summary: args.summary || '학습 일정 변경 제안',
+            before: {
+              plan: plan ? { weeklyPattern: plan.weeklyPattern, minutesPerDay: plan.minutesPerDay } : undefined,
+              goals: currentGoalsMap,
+            },
+            after: {
+              plan: args.afterPlan ? args.afterPlan : undefined,
+              goals: args.goalPatches ? args.goalPatches : undefined,
+            },
+            memoryPatch: args.memoryPatch,
+            status: 'proposed',
+          };
+          if (!reply) {
+            reply = `요청하신 내용을 바탕으로 계획 변경 제안 카드를 준비했어요. 아래 카드를 확인하시고 [승인]해 주세요.`;
+          }
+        } else if (call.name === 'apply_plan_change') {
+          res.status(400).json({
+            ok: false,
+            error: 'AI 코치가 직접 변경을 적용할 수 없습니다. 사용자의 승인이 필요합니다.',
+          });
+          return;
+        }
+      }
+    }
+
+    if (!reply && !proposal) {
+      reply = '네, 말씀해 주신 내용 잘 확인했습니다. 학습 계획이나 목표에 대해 언제든 편하게 말씀해 주세요!';
+    }
+
+    res.json({
+      ok: true,
+      reply,
+      proposal,
+    });
+  } catch (err: any) {
+    console.error('[CoachChat] error:', err);
+    res.status(500).json({ ok: false, error: err?.message || '코치 응답 생성에 실패했습니다.' });
+  }
+});
+
 // 7. Morning Review Podcast Generator (Script + Gemini TTS Audio)
 app.post('/api/podcast', async (req: Request, res: Response) => {
   const start = performance.now();
