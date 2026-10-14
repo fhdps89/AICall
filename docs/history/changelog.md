@@ -12,6 +12,9 @@
   - 설정에서 비밀값을 바꾸면 예전 백업을 지워서 옛 주소가 계속 열리지 않게 함(`feedService.ts` → `previousSecret`).
   - `firestore.rules`: `feeds/{feedId}` 정확한 id로 읽기만 공개(목록 불가), 쓰기·삭제는 허용 계정 본인만. **AI Studio에서 규칙 배포가 필요함.**
 - **남은 한계**: 새로 뜬 서버는 Gemini 키를 모름(키는 로그인 요청이 와야 불러옴). 키를 백업에 넣을지는 찬식 님 결정 대기.
+
+---
+
 ### [2026-10-15 KST] v2.7.8 — 아침 강의·녹음 오디오가 재생되지 않던 문제 (GitHub PR, Claude)
 - **문제 원인 (Root Cause)**: 강의 오디오와 녹음 파일은 `.data/` 폴더에 저장되는데, Express `res.sendFile`은 기본값으로 "."으로 시작하는 폴더가 들어간 경로를 거부하고 404 "Not Found"를 돌려줌. 강의는 만들어졌지만 앱 플레이어("강의 오디오를 불러오지 못했어요")와 피드 재생 링크가 모두 실패.
 - **적용된 수정 내역 (Changes)**: `server.ts` 강의 오디오(`/api/lecture/audio`), 피드 오디오(`/feed/:secret/audio/:file`), 녹음 파일(`/api/recordings/file`)의 `sendFile`에 `dotfiles: 'allow'` 지정.
