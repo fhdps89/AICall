@@ -17,11 +17,12 @@ import { PromptPlaceholders } from "../../data/promptCustomizer";
 import { CURRENT_MODEL_CONFIG } from "../../config/models";
 import { collection, getDocs, query, orderBy, limit } from "firebase/firestore";
 import { db } from "../../services/firebase/config";
-import { SessionData } from "../../services/firebase/db";
+import { SessionData, getUserSettings, saveUserSettings } from "../../services/firebase/db";
 import { getAllPendingChunks, LocalRecordingChunk } from "../../services/recording/chunkIndexedDb";
 import { ALLOWED_USER_EMAIL } from "../../services/firebase/auth";
 import { FeedSettingsPanel } from "./FeedSettingsPanel";
 import { UsagePanel } from "./UsagePanel";
+import { Sparkles, Bell } from "lucide-react";
 
 interface SettingsModalProps {
   userId?: string;
@@ -43,13 +44,36 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [formData, setFormData] = useState<PromptPlaceholders>(placeholders);
   const [saving, setSaving] = useState(false);
   const devMode = useDevMode();
-  const [activeTab, setActiveTab] = useState<"prompts" | "models" | "recordings" | "feed" | "usage">("prompts");
+  const [activeTab, setActiveTab] = useState<"prompts" | "models" | "recordings" | "feed" | "usage" | "coach">("prompts");
+  const [coachNudges, setCoachNudges] = useState<string[]>(["weekly", "absence2d"]);
   const [enablePartialStt, setEnablePartialStt] = useState<boolean>(() => {
     return localStorage.getItem("onecall_enable_partial_transcribe") !== "false";
   });
   const [sessionsList, setSessionsList] = useState<SessionData[]>([]);
   const [pendingLocalChunks, setPendingLocalChunks] = useState<LocalRecordingChunk[]>([]);
   const [loadingRecordings, setLoadingRecordings] = useState(false);
+
+  useEffect(() => {
+    if (userId) {
+      getUserSettings(userId).then((s) => {
+        if (Array.isArray(s.coachNudges)) {
+          setCoachNudges(s.coachNudges);
+        }
+      });
+    }
+  }, [userId]);
+
+  const handleToggleNudge = async (nudgeKey: string) => {
+    const updated = coachNudges.includes(nudgeKey)
+      ? coachNudges.filter((k) => k !== nudgeKey)
+      : [...coachNudges, nudgeKey];
+    setCoachNudges(updated);
+    if (userId) {
+      await saveUserSettings(userId, { coachNudges: updated }).catch((e) =>
+        console.warn("[Settings] Save coachNudges error:", e)
+      );
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -174,11 +198,88 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           >
             사용량·예상 비용
           </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("coach")}
+            className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
+              activeTab === "coach"
+                ? "border-amber-400 text-amber-300"
+                : "border-transparent text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            코치 알림 (넛지)
+          </button>
         </div>
 
         {/* Body */}
         <div className="p-6 overflow-y-auto flex-1">
-          {activeTab === "models" && !devMode ? null : activeTab === "usage" ? (
+          {activeTab === "coach" ? (
+            <div className="space-y-4">
+              <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs">
+                <span className="font-bold flex items-center gap-1.5 mb-1">
+                  <Sparkles className="w-4 h-4 text-amber-400" />
+                  B-9 AI 코치 먼저 말 걸기 설정:
+                </span>
+                <p className="text-[11px] text-amber-300/80 leading-relaxed">
+                  학습자가 꾸준히 통화를 이어갈 수 있도록 상황에 맞춰 홈 화면 배너나 주간 리뷰로 부드럽게 넛지를 제공합니다.
+                </p>
+              </div>
+
+              <div className="space-y-3">
+                <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex items-center justify-between">
+                  <div className="pr-4">
+                    <h4 className="text-xs font-bold text-white">일요일 주간 리뷰 알림 (`weekly`)</h4>
+                    <p className="text-[11px] text-slate-400 mt-0.5">일요일 아침 강의 coachNote를 한 주 성과와 격려 중심의 주간 리뷰 톤으로 생성합니다.</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={coachNudges.includes("weekly")}
+                    onChange={() => handleToggleNudge("weekly")}
+                    className="w-4 h-4 accent-amber-500 rounded cursor-pointer shrink-0"
+                  />
+                </div>
+
+                <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex items-center justify-between">
+                  <div className="pr-4">
+                    <h4 className="text-xs font-bold text-white">2일 연속 결석 알림 (`absence2d`)</h4>
+                    <p className="text-[11px] text-slate-400 mt-0.5">한국시간 기준 어제와 그제 통화가 없으면 홈 상단에 가벼운 복귀 응원 배너를 노출합니다.</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={coachNudges.includes("absence2d")}
+                    onChange={() => handleToggleNudge("absence2d")}
+                    className="w-4 h-4 accent-amber-500 rounded cursor-pointer shrink-0"
+                  />
+                </div>
+
+                <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex items-center justify-between">
+                  <div className="pr-4">
+                    <h4 className="text-xs font-bold text-white">시험/목표 마감 4주 전 알림 (`deadline4w`)</h4>
+                    <p className="text-[11px] text-slate-400 mt-0.5">OPIc 등 설정된 시험일 4주 전부터 홈 상단에 D-day 배너를 표시합니다. (기본 OFF)</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={coachNudges.includes("deadline4w")}
+                    onChange={() => handleToggleNudge("deadline4w")}
+                    className="w-4 h-4 accent-amber-500 rounded cursor-pointer shrink-0"
+                  />
+                </div>
+
+                <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex items-center justify-between">
+                  <div className="pr-4">
+                    <h4 className="text-xs font-bold text-white">시험/목표 마감 2주 전 알림 (`deadline2w`)</h4>
+                    <p className="text-[11px] text-slate-400 mt-0.5">시험일 2주 전부터 실전 모의고사 집중 배치를 제안하는 배너를 표시합니다. (기본 OFF)</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={coachNudges.includes("deadline2w")}
+                    onChange={() => handleToggleNudge("deadline2w")}
+                    className="w-4 h-4 accent-amber-500 rounded cursor-pointer shrink-0"
+                  />
+                </div>
+              </div>
+            </div>
+          ) : activeTab === "models" && !devMode ? null : activeTab === "usage" ? (
             <UsagePanel userId={userId} />
           ) : activeTab === "feed" ? (
             <FeedSettingsPanel userId={userId} />

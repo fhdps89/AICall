@@ -8,6 +8,16 @@ import {
   getUserMistakes,
   advanceMistakeAfterLesson,
   getKSTToday,
+  UserPlanData,
+  WeeklyPattern,
+  UserSettingsData,
+  initUserPlanIfMissing,
+  getUserPlan,
+  checkTwoDayAbsence,
+  getUserSettings,
+  getPlanChanges,
+  createPlanChange,
+  DEFAULT_WEEKLY_PATTERN,
 } from "../../services/firebase/db";
 import { WEEKLY_ROUTINE, getTodayRoutine } from "../../data/defaultGoals";
 import { PromptPlaceholders, hydrateTutorPrompt } from "../../data/promptCustomizer";
@@ -31,12 +41,15 @@ import {
   AlertCircle,
   Loader2,
   Play,
+  MessageSquare,
+  Flame,
 } from "lucide-react";
 import { QuizModal } from "../quiz/QuizModal";
 import { MorningLectureCard } from "../lecture/MorningLectureCard";
 import { syncFeed } from "../../services/feed/feedService";
 import { KeepImportModal } from "../keep/KeepImportModal";
 import { SttBenchmarkModal } from "../sttBench/SttBenchmarkModal";
+import { CoachModal } from "../coach/CoachModal";
 
 interface HomeScreenProps {
   user: User;
@@ -72,6 +85,12 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const [showQuizModal, setShowQuizModal] = useState<boolean>(false);
   const [showKeepImport, setShowKeepImport] = useState<boolean>(false);
   const [showSttBench, setShowSttBench] = useState<boolean>(false);
+  const [showCoachModal, setShowCoachModal] = useState<boolean>(false);
+
+  // B-9 Plan & Coach States
+  const [userPlan, setUserPlan] = useState<UserPlanData | null>(null);
+  const [userSettings, setUserSettings] = useState<UserSettingsData | null>(null);
+  const [isTwoDayAbsent, setIsTwoDayAbsent] = useState<boolean>(false);
 
   const loadMistakes = async () => {
     try {
@@ -91,9 +110,31 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
     }
   };
 
+  const loadPlanAndSettings = async () => {
+    if (!user?.uid) return;
+    try {
+      const p = await initUserPlanIfMissing(user.uid);
+      setUserPlan(p);
+      const s = await getUserSettings(user.uid);
+      setUserSettings(s);
+
+      // B-9 Requirement 5: 이틀 연속 결석 체크 (어제·그제 통화 done 세션 없음)
+      if (s.coachNudges.includes("absence2d")) {
+        const absent = await checkTwoDayAbsence(user.uid);
+        setIsTwoDayAbsent(absent);
+      }
+
+      // B-9 Requirement 2: OPIc 시험 날짜(deadline) 1~2주 전 모의고사 배치 자동 제안 (승인 전엔 plan/goals 미반영)
+      checkOpicDeadlineMockProposal(user.uid, goals, p);
+    } catch (err) {
+      console.warn("[HomeScreen] Plan load error:", err);
+    }
+  };
+
   useEffect(() => {
     if (user?.uid) {
       loadMistakes();
+      loadPlanAndSettings();
     }
   }, [user?.uid]);
 
@@ -115,14 +156,24 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
     }
   };
 
+  // B-9 Requirement 2: 홈 「오늘 수업」은 plan.weeklyPattern + goals.nextLessonIndex로 계산.
+  // 하드코드 WEEKLY_ROUTINE만 보지 말고 plan이 있으면 plan 우선.
   const todayRoutine = getTodayRoutine();
-  const currentDayIndex = new Date().getDay();
+  const kstDayIndex = new Date(Date.now() + 9 * 3600000).getUTCDay(); // 0 = sun, 1 = mon, ..., 6 = sat
+  const DAY_KEYS: Array<keyof WeeklyPattern> = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+  const currentDayKey = DAY_KEYS[kstDayIndex];
 
-  // Find goal for today
-  // Track cards can switch today's lesson to another track (single call button on top).
   const [showMore, setShowMore] = useState<boolean>(false);
   const [overrideGoalId, setOverrideGoalId] = useState<string | null>(null);
-  const todayGoal = goals.find((g) => g.id === (overrideGoalId || todayRoutine.goalId));
+
+  // Compute goal for today based on plan.weeklyPattern
+  const currentPattern = userPlan?.weeklyPattern || DEFAULT_WEEKLY_PATTERN;
+  const dayAssignedGoals = currentPattern[currentDayKey] || [];
+  const isPlanReviewDay = dayAssignedGoals.length === 0;
+
+  // Resolved today goal ID (manual override > plan assigned goal > fallback to default routine)
+  const resolvedGoalId = overrideGoalId || (dayAssignedGoals.length > 0 ? dayAssignedGoals[0] : (isPlanReviewDay ? null : todayRoutine.goalId));
+  const todayGoal = resolvedGoalId ? goals.find((g) => g.id === resolvedGoalId) : null;
   const currentLesson = todayGoal?.lessons.find(
     (l) => l.index === (todayGoal.nextLessonIndex || 1)
   );
@@ -130,6 +181,57 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const handleLessonChange = async (goalId: string, newLessonIndex: number) => {
     await onUpdateGoalProgress(goalId, newLessonIndex);
   };
+
+// B-9 Requirement 2: OPIc 시험 날짜(deadline) 1~2주 전 모의고사 배치 자동 제안 (승인 전엔 plan/goals 미반영)
+async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalData[], plan: UserPlanData) {
+  const opicGoal = currentGoals.find((g) => g.id === "opic" || g.type === "opic");
+  if (!opicGoal?.deadline) return;
+
+  const examTime = new Date(opicGoal.deadline).getTime();
+  const nowKst = Date.now() + 9 * 3600000;
+  const diffDays = Math.round((examTime - nowKst) / (24 * 3600000));
+
+  // 시험 1~2주 전 구간 (7일 ~ 14일 전)
+  if (diffDays >= 7 && diffDays <= 14) {
+    try {
+      const existingChanges = await getPlanChanges(userId);
+      const alreadyProposed = existingChanges.some(
+        (c) => c.requestedText.includes("OPIc 시험") || c.summary.includes("모의고사")
+      );
+      if (!alreadyProposed) {
+        // Propose placing mock exam (14과) into Mon & Sat OPIc slots
+        await createPlanChange(userId, {
+          requestedText: `OPIc 시험일(${opicGoal.deadline}) D-${diffDays} 대비 1~2주 전 실전 모의고사 집중 배치 제안`,
+          summary: `OPIc 시험(${opicGoal.deadline}) 대비 실전 모의고사(14과) 집중 배치`,
+          before: {
+            plan: { weeklyPattern: plan.weeklyPattern, minutesPerDay: plan.minutesPerDay },
+            goals: { opic: { nextLessonIndex: opicGoal.nextLessonIndex, deadline: opicGoal.deadline, status: opicGoal.status } },
+          },
+          after: {
+            plan: {
+              weeklyPattern: {
+                ...plan.weeklyPattern,
+                mon: ["opic"],
+                sat: ["opic"],
+              },
+            },
+            goals: {
+              opic: {
+                nextLessonIndex: 14, // 14과: 실전 모의고사
+                deadline: opicGoal.deadline,
+                status: "active",
+              },
+            },
+          },
+          status: "proposed", // MUST be proposed, NOT applied until approved
+          at: new Date().toISOString(),
+        });
+      }
+    } catch (e) {
+      console.warn("[HomeScreen] checkOpicDeadlineMockProposal error:", e);
+    }
+  }
+}
 
   return (
     <div className="min-h-screen bg-[#0F141C] text-slate-100 flex flex-col">
@@ -156,6 +258,15 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
+            {/* B-9 AI Coach Entry Point in Header */}
+            <button
+              onClick={() => setShowCoachModal(true)}
+              className="p-2 px-3 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-amber-300 font-bold transition-all cursor-pointer flex items-center gap-1.5 text-xs shadow-sm shadow-amber-500/10 active:scale-95"
+              title="3단계 AI 전담 학습 코치"
+            >
+              <Sparkles className="w-4 h-4 text-amber-400" />
+              <span>AI 코치</span>
+            </button>
             <button
               onClick={onOpenSettings}
               className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 text-slate-300 hover:text-white transition-colors cursor-pointer flex items-center gap-1.5 text-xs"
@@ -177,6 +288,29 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
 
       {/* Main Content */}
       <main className="max-w-5xl mx-auto px-4 py-6 w-full flex-1 space-y-6">
+        {/* B-9 Requirement 5: 이틀 연속 결석 배너 (어제·그제 통화 done 세션 없음) */}
+        {isTwoDayAbsent && userSettings?.coachNudges?.includes("absence2d") && (
+          <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-amber-500/20 via-[#1F2737] to-[#161D2A] border border-amber-500/40 text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xl">
+            <div className="flex items-center gap-3.5">
+              <div className="w-10 h-10 rounded-2xl bg-amber-500/20 border border-amber-500/40 text-amber-400 flex items-center justify-center shrink-0">
+                <Flame className="w-6 h-6 text-amber-400" />
+              </div>
+              <div>
+                <p className="text-sm font-extrabold text-white">이틀째 쉬었어요. 오늘 수업만 해도 좋아요</p>
+                <p className="text-xs text-amber-300/80 mt-0.5">부담 없이 5분만 대화해도 학습 리듬이 자연스럽게 회복돼요.</p>
+              </div>
+            </div>
+            {todayGoal && currentLesson && (
+              <button
+                onClick={() => onStartCall(todayGoal, currentLesson.index)}
+                className="px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 shadow-md shadow-amber-500/20 cursor-pointer active:scale-95 shrink-0"
+              >
+                <PhoneCall className="w-4 h-4" />
+                <span>오늘 수업 시작</span>
+              </button>
+            )}
+          </div>
+        )}
         {/* 오늘 할 것: ① 오늘 수업 통화 → ② 복습 퀴즈 */}
         <h2 className="text-sm font-bold text-white">오늘 할 것</h2>
         {/* Today's Class Card (오늘 수업 카드) */}
@@ -189,18 +323,18 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               <span>오늘의 추천 수업 카드</span>
             </div>
             <div className="text-xs text-slate-400 font-mono">
-              {todayRoutine.dayName} 루틴
+              {todayRoutine.dayName} {userPlan ? "맞춤 계획 루틴" : "루틴"}
             </div>
           </div>
 
-          {todayRoutine.isReviewDay && !overrideGoalId ? (
+          {isPlanReviewDay && !overrideGoalId ? (
             <div className="relative z-10 py-6 text-center space-y-3">
               <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center mx-auto">
                 <Calendar className="w-6 h-6" />
               </div>
-              <h2 className="text-xl font-bold text-white">일요일: 한 주 복기 및 실수 점검일</h2>
+              <h2 className="text-xl font-bold text-white">한 주 복기 및 실수 점검일 (주간 복기)</h2>
               <p className="text-xs text-slate-400 max-w-md mx-auto">
-                새로운 진도 대신 이번 주에 기록된 실수와 주요 핵심 표현 5선을 복습하고 다음 주 계획을 준비합니다.
+                새로운 진도 대신 이번 주에 기록된 실수와 주요 핵심 표현들을 복습하고 다음 주 학습을 준비합니다.
               </p>
             </div>
           ) : todayGoal && currentLesson ? (
@@ -487,26 +621,60 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           onLectureCompleted={() => loadMistakes()}
         />
 
+        {/* B-9 AI Coach Card */}
+        <section className="bg-gradient-to-r from-amber-500/10 via-[#161D2A] to-[#161D2A] border border-amber-500/30 rounded-2xl p-4 sm:p-5 shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-3.5">
+            <div className="w-11 h-11 rounded-2xl bg-amber-500/20 border border-amber-500/40 text-amber-400 flex items-center justify-center shrink-0">
+              <Sparkles className="w-6 h-6 text-amber-400" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-amber-400 uppercase tracking-wider">3단계 AI 전담 코치</span>
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">스케줄 & 목표 자동화</span>
+              </div>
+              <h4 className="text-sm font-bold text-white mt-0.5">"다음 주 출장이야", "시험일 잡혔어"</h4>
+              <p className="text-xs text-slate-400 mt-0.5">자연스럽게 말하면 코치가 계획 변경 카드를 제안하고, 승인 시에만 안전하게 반영합니다.</p>
+            </div>
+          </div>
+          <button
+            onClick={() => setShowCoachModal(true)}
+            className="px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold flex items-center justify-center gap-1.5 shadow-md shadow-amber-500/20 transition-all cursor-pointer active:scale-95 shrink-0"
+          >
+            <MessageSquare className="w-4 h-4" />
+            <span>코치와 대화하기</span>
+          </button>
+        </section>
+
         {/* Weekly Routine Bar (B-9) */}
         <section className="bg-[#161D2A] border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-lg">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
               <Calendar className="w-4 h-4 text-amber-400" />
-              <span>요일별 집중 루틴</span>
+              <span>요일별 집중 루틴 {userPlan ? "(맞춤 Plan 반영)" : ""}</span>
             </div>
             <span className="text-[11px] text-slate-400">
-              오늘: <strong className="text-amber-400">{todayRoutine.dayName}</strong> ({todayRoutine.title})
+              오늘: <strong className="text-amber-400">{todayRoutine.dayName}</strong> ({isPlanReviewDay ? "주간 복기" : (todayGoal?.title || todayRoutine.title)})
             </span>
           </div>
 
           <div className="grid grid-cols-7 gap-1.5 sm:gap-2">
-            {Object.entries(WEEKLY_ROUTINE).map(([dayKey, item]) => {
-              const dayNum = Number(dayKey);
-              const isToday = dayNum === currentDayIndex;
+            {[
+              { key: "mon" as const, short: "월" },
+              { key: "tue" as const, short: "화" },
+              { key: "wed" as const, short: "수" },
+              { key: "thu" as const, short: "목" },
+              { key: "fri" as const, short: "금" },
+              { key: "sat" as const, short: "토" },
+              { key: "sun" as const, short: "일" },
+            ].map(({ key, short }) => {
+              const isToday = key === currentDayKey;
+              const gIds = currentPattern[key] || [];
+              const isRev = gIds.length === 0;
+              const matched = gIds[0] ? goals.find((item) => item.id === gIds[0]) : null;
 
               return (
                 <div
-                  key={dayKey}
+                  key={key}
                   className={`p-2 sm:p-2.5 rounded-xl border text-center transition-all ${
                     isToday
                       ? "bg-amber-500/15 border-amber-500/40 text-white ring-1 ring-amber-500/30"
@@ -514,10 +682,10 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                   }`}
                 >
                   <div className={`text-[10px] font-bold uppercase mb-1 ${isToday ? "text-amber-400" : "text-slate-500"}`}>
-                    {item.dayShort}
+                    {short}
                   </div>
                   <div className="text-[11px] font-semibold truncate leading-tight">
-                    {item.isReviewDay ? "주간 복기" : item.title.split(" ")[0]}
+                    {isRev ? "주간 복기" : (matched ? matched.title.split(" ")[0] : gIds[0] || "-")}
                   </div>
                 </div>
               );
@@ -689,6 +857,19 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           onClose={() => setShowQuizModal(false)}
           onFinished={() => {
             loadMistakes();
+          }}
+        />
+      )}
+
+      {/* B-9 AI Coach Modal */}
+      {showCoachModal && (
+        <CoachModal
+          userId={user.uid}
+          isOpen={showCoachModal}
+          onClose={() => setShowCoachModal(false)}
+          goals={goals}
+          onPlanUpdated={async () => {
+            await loadPlanAndSettings();
           }}
         />
       )}

@@ -5,7 +5,7 @@
 # Documentation archive (isolated from Cloud Run deployment packaging)
 docs/
 *.MD
-!Project_context.MD
+!PROJECT_CONTEXT.md
 
 # Local build artifacts and logs
 node_modules/

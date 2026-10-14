@@ -1,17 +1,29 @@
 # 📖 프로젝트 컨텍스트 및 히스토리 (Project Context)
 
 > **프로젝트**: 「오늘도 한 통」 (One Call English) — AI 1:1 전화영어 올인원 랩  
-> **현재 버전**: `v2.6.1` | **공식 빌드 버전**: `20261014-multilingual-1330` | **최종 갱신**: 2026-10-14 (KST)  
+> **현재 버전**: `v2.7.0` | **공식 빌드 버전**: `20261014-multilingual-1330` | **최종 갱신**: 2026-10-14 (KST)  
 > **관리 규칙**: `README.md` 변경 시 본 문서의 아키텍처 및 히스토리를 함께 최신화하며, 모든 일시는 한국 표준시(KST)를 기준으로 합니다.
 
 ---
 
-## 0. 최근 핫픽스 (Gemini Live 연결 준비 중 무한 대기 수정 - 2026-10-14 KST)
-- **원인 1**: AI Studio 컨테이너 보안 환경에서 주입된 실제 Gemini 키(`/app/.dev.env.json`)가 서버 부팅 시의 기본 프로세스 환경변수에 누락되어 `fallback_required` 발생.
-- **해결 1**: `server.ts`의 `resolveGeminiApiKeyInner()`를 확장하여 `/app/.dev.env.json`, `/etc/environment` 및 전체 `/proc` 프로세스 환경을 스캔해 실제 유효 키를 동적 추출하도록 강화.
-- **원인 2**: 클라이언트 `geminiLiveProvider.ts`의 `connectDirect()`에서 웹소켓 오픈 즉시 `wireWebSocketEvents(true)`를 호출하여 `socket.onerror`/`onclose`가 덮어씌워져, 연결 거부 시 즉시 실패하지 않고 8초 타임아웃까지 대기하는 문제.
-- **해결 2**: `setupComplete` 수신 전까지는 에러/종료 시 즉시 `reject()`를 호출하여 대기 없이 즉시 서버 프록시로 넘어가도록 개선하고 타임아웃을 5초로 단축.
-- **원인 3**: `geminiLiveProvider.ts`의 `connect()` 메서드 말미에 `await micPromise;`가 블로킹되어 마이크 권한 승인 전까지 연결 완료로 전환되지 않던 구조 수정. 세션 수립과 마이크 스트림 획득을 비동기 분리.
+## 0. Phase 3: B-9 3단계 코치 & 스케줄 자동화 아키텍처 (2026-10-14 KST)
+- **데이터 모델**:
+  - `users/{uid}/plan`: `{ weeklyPattern: { mon:[goalId], tue:..., ..., sun:[] }, minutesPerDay, updatedAt }`. 초기 진입 시 기존 4대 목표 루틴으로 자동 1회 초기화.
+  - `users/{uid}/planChanges/{id}`: `{ requestedText, summary, before, after, status: proposed|approved|rejected|reverted, at, appliedAt? }`. before/after 스냅샷 격리.
+  - `users/{uid}/coachMemory`: `{ constraints[], preferences[], weakPoints[], updatedAt }`. 항목별 삭제 지원.
+  - `users/{uid}/coachMessages/{id}`: 대화 로그 및 제안 카드 ID 연동.
+  - `goals/{goalId}.deadline`: OPIc 시험일 등 D-day 목표 기한 연동.
+  - `settings.coachNudges`: `["weekly", "absence2d"]` 기본값.
+- **스케줄 불변 안전망**:
+  - **하루 빠짐 보존**: 통화 세션이 `status=done`이 아니면 다음 배정 요일에도 같은 `nextLessonIndex` 유지(건너뛰지 않음). 오직 통화 완료 및 복기 저장 시에만 `nextLessonIndex += 1`.
+  - **OPIc 시험 1~2주 전 모의고사 자동 제안**: deadline 7~14일 전 구간에 실전 모의고사(14과)를 월·토 OPIc 슬롯에 배치하는 제안 카드 생성 (**승인 전 절대 반영 금지**).
+  - **홈 「오늘 수업」**: `plan.weeklyPattern + goals.nextLessonIndex` 우선 계산.
+- **코치 UI 및 LLM 통제**:
+  - `CoachModal.tsx`: 채팅, 변경 카드 승인/거절, 변경 이력 되돌리기(`reverted`), 코치 메모리 개별 삭제.
+  - `POST /api/coach/chat`: `gemini-3.8-flash` 기반 함수 호출(`propose_plan_change`, `get_progress`, `get_mistake_stats`). 모델이 `apply`를 직접 호출하면 400 반환 차단.
+- **먼저 말 걸기 (2일 결석 배너 & 일요일 주간 리뷰)**:
+  - 2일 연속 결석 시 홈 상단에 "이틀째 쉬었어요. 오늘 수업만 해도 좋아요" 배너 노출.
+  - 일요일 아침 강의 coachNote를 주간 리뷰 톤으로 자동 편성.
 
 ---
 
