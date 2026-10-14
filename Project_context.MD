@@ -5,7 +5,7 @@
 > **관리 규칙**: `README.md` 변경 시 본 문서의 아키텍처 및 히스토리를 함께 최신화하며, 모든 일시는 한국 표준시(KST)를 기준으로 합니다.
 >
 > **기준 기획 (2026-10-13~)**: [`docs/plan/implementation_plan_v4.md`](./docs/plan/implementation_plan_v4.md) Part B · 진행 가이드 [`docs/plan/ai-studio-build-guide.md`](./docs/plan/ai-studio-build-guide.md) · 현재 앱과의 차이 [`docs/plan/gap-v2.1.0-vs-plan-v4.md`](./docs/plan/gap-v2.1.0-vs-plan-v4.md)  
-> 아래 기능 중 텔레그램 발송, 3분 팟캐스트, 수동 "복습 완료"는 v2.0.0 때 예전 기획으로 만든 것이며 v4 기준으로 바뀔 예정입니다(차이표 참고).
+> 아래 기능 중 텔레그램 발송과 예전 아침 팟캐스트는 v2.0.0 때 예전 기획으로 만든 것이며 정리될 예정입니다(차이표 참고).
 
 ---
 
