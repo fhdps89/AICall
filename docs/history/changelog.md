@@ -4,6 +4,13 @@
 
 ---
 
+### [2026-10-14 KST] v2.7.6 — 휴대폰 볼륨 버튼·이어폰으로 튜터 목소리 듣기 (GitHub PR, Claude)
+- **문제 원인 (Root Cause)**: 튜터 목소리를 AudioContext에서 바로 스피커(`ctx.destination`)로 재생했음. 마이크가 켜지면 휴대폰은 "통화" 모드가 되는데, 이 소리는 "미디어" 채널로 나가서 볼륨 버튼은 통화 음량만 바꾸고 튜터 음량은 그대로였음. 이어폰을 껴도 통화 경로를 따르지 않고 휴대폰 스피커로 나올 수 있음 [추정, 실기기 확인 필요].
+- **적용된 수정 내역 (Changes)**: `geminiLiveProvider.ts` 튜터 목소리를 AudioContext → MediaStream → 숨은 `<audio>` 요소로 재생(마이크와 같은 통화 경로). 실패하면 예전 방식으로 자동 전환. iOS Safari는 `navigator.audioSession.type = "play-and-record"` 지정.
+  - 통화 중 이어폰을 끼거나 빼면(`devicechange`) 마이크를 다시 열어 새 기기로 바꿈. 녹음기는 마이크 대신 Web Audio 출력 스트림을 녹음해서, 마이크가 바뀌어도 녹음이 끊기지 않음.
+
+---
+
 ### [2026-10-14 KST] v2.7.5 — 설정 화면이 열리지 않던 문제 (GitHub PR, Claude)
 - **문제 원인 (Root Cause)**: `SettingsModal.tsx`에서 `if (!isOpen) return null;`이 `useEffect`보다 위에 있었음. 설정을 여는 순간 React 훅 개수가 바뀌어 오류가 나고 화면이 뜨지 않음(2026-10-13 커밋 0c42085부터).
 - **적용된 수정 내역 (Changes)**: 닫혀 있을 때 숨기는 줄을 모든 훅 아래로 옮김.
