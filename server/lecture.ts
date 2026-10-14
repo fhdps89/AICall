@@ -9,13 +9,14 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
+import { TEXT_MODEL, GEMINI_TTS_MODEL } from '../src/config/models.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const DATA_DIR = path.resolve(__dirname, '..', '.data');
 const LECTURE_DIR = path.join(DATA_DIR, 'lectures');
 
-const SCRIPT_MODEL = 'gemini-3.8-flash';
-const LECTURE_TTS_MODEL = 'gemini-3.8-flash-tts';
+const SCRIPT_MODEL = TEXT_MODEL;
+const LECTURE_TTS_MODEL = GEMINI_TTS_MODEL;
 const VOICE_COACH = 'Kore';
 const VOICE_PARTNER = 'Puck';
 const SILENCE_SEC = 3;

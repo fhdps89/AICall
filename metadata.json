@@ -1,6 +1,6 @@
 {
-  "name": "오늘도 한 통 (One Call Today)",
-  "description": "OPIc AL, 한화 필리 조선소 비즈니스, 미국·호주 여행, Bluey 리스닝 4대 특화 AI 1:1 전화영어 및 자동 복기 랩",
+  "name": "One Call English",
+  "description": "AI 튜터와 영어로 통화하고, 틀린 말을 그대로 기록해 아침 강의·퀴즈로 복습하는 AI 1:1 전화영어 (OPIc AL, 필리조선소 업무, 미국·호주 여행, Bluey 듣기)",
   "permissions": [],
   "capabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

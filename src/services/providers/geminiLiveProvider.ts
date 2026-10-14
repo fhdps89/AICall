@@ -30,6 +30,9 @@ export class GeminiLiveProvider implements LiveProvider {
   private options: LiveSessionOptions | null = null;
   private isConnected = false;
   private isReconnecting = false;
+  /** Failed reconnect rounds since the last successful connection. */
+  private reconnectFailures = 0;
+  private static readonly MAX_RECONNECT_FAILURES = 5;
   private resumeHandle: string | null = null;
 
   // Connection path tracking (2-1 requirement 5)
@@ -176,6 +179,7 @@ export class GeminiLiveProvider implements LiveProvider {
               clearTimeout(setupTimer);
               this.isConnected = true;
               this.isReconnecting = false;
+              this.reconnectFailures = 0;
               this.connectionPath = "direct";
               console.log("[Live] path=direct (setupComplete received)");
               this.options?.onStatusChange("connected", "Gemini Live 직접 연결 완료");
@@ -330,6 +334,7 @@ export class GeminiLiveProvider implements LiveProvider {
           this.wireWebSocketEvents(false);
           this.isConnected = true;
           this.isReconnecting = false;
+          this.reconnectFailures = 0;
           this.connectionPath = "proxy";
           console.log("[Live] path=proxy model=" + (data.model || "?"));
           this.options?.onStatusChange("connected", "Gemini 3.8 Live 연결됨 (서버 중계)");
@@ -518,9 +523,22 @@ export class GeminiLiveProvider implements LiveProvider {
             return;
           } catch (retryErr) {
             console.error("[Live] Fallback session creation also failed:", retryErr);
+            err = retryErr;
           }
         }
         this.isReconnecting = false;
+        this.reconnectFailures++;
+        // Stop after a few rounds: each attempt costs a token request and a Live session start
+        // (daily limit), and a persistent failure (e.g. no server key) will not fix itself.
+        if (this.reconnectFailures >= GeminiLiveProvider.MAX_RECONNECT_FAILURES) {
+          console.error(`[Live] Giving up after ${this.reconnectFailures} failed reconnect rounds`);
+          this.isConnected = false;
+          this.options?.onStatusChange(
+            "error",
+            (err as any)?.userMessage || "연결이 계속 끊겨요. 인터넷을 확인하고 다시 걸어 주세요."
+          );
+          return;
+        }
         this.reconnectTimer = setTimeout(() => this.triggerReconnection(), 3000);
       }
     }, 1000);
@@ -768,6 +786,7 @@ export class GeminiLiveProvider implements LiveProvider {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.isConnected = false;
     this.isReconnecting = false;
+    this.reconnectFailures = 0;
     this.onDirectSetupComplete = null;
 
     if (this.ws) {

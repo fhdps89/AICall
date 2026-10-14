@@ -12,6 +12,7 @@ import type { LectureMistakeInput } from './lecture.ts';
 import { safeEqual } from './auth.ts';
 
 const FEED_FILE = path.join(DATA_DIR, 'feed.json');
+const FAILED_RETRY_COOLDOWN_MS = 30 * 60 * 1000;
 
 export interface FeedSyncState {
   uid: string;
@@ -61,7 +62,11 @@ export function buildFeedToday(ai: GoogleGenAI | null, st: FeedSyncState, baseUr
   const date = kstToday();
   let lecture = readLectureState(st.uid, date);
   const hasCandidates = st.newMistakes.length + st.reviewMistakes.length > 0;
-  if ((!lecture || (lecture.status === 'failed' && lecture.error !== 'NOTHING_TO_TEACH')) && hasCandidates && ai) {
+  // Retry a failed lecture at most once per FAILED_RETRY_COOLDOWN_MS, so a feed that is
+  // polled repeatedly does not restart a costly, failing generation on every request.
+  const failedLongAgo = lecture?.status === 'failed' && lecture.error !== 'NOTHING_TO_TEACH'
+    && Date.now() - Date.parse(lecture.updatedAt || lecture.createdAt) > FAILED_RETRY_COOLDOWN_MS;
+  if ((!lecture || failedLongAgo) && hasCandidates && ai) {
     lecture = startLectureJob(ai, st.uid, date, st.newMistakes, st.reviewMistakes);
   }
   const base: FeedToday = {

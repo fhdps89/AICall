@@ -1,0 +1,4 @@
+[One Call English 작업 지시서 2] 앱 이름 정리 (새 기능 없음)
+
+metadata.json의 name을 "One Call English", description을 "AI 코치와 실수 루프로 영어를 키우는 AI 전화영어"로 바꿔 줘. 다른 파일은 손대지 마.
+끝나면 README.md의 버전 히스토리에 한 줄로 기록해 줘.

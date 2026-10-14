@@ -4,6 +4,23 @@
 
 ---
 
+### [2026-10-14 KST] v2.7.3 — 저장소 검수 반영 (GitHub PR, Claude)
+- **문제 원인 (Root Cause)**:
+  - 녹음 10초 조각은 각각 완결된 WebM 파일인데, 받아쓰기 전에 바이트로 이어 붙였음. 이렇게 만든 파일은 앞부분만 읽혀서(시험: 3초×3개 → 5.9초만 해독) 기록용 받아쓰기에서 말이 빠질 수 있었음.
+  - Live 재연결이 실패하면 약 4초마다 끝없이 다시 시도 → 시도마다 토큰 요청과 통화 시작(하루 60회 한도)이 쌓임.
+  - 그록봇 피드가 실패한 강의를 요청 때마다 다시 생성 시작.
+  - 서버가 모델 이름을 `models.ts`가 아닌 자기 상수로 따로 관리(기획 v4 B-1 위반), Live 기본 지시문이 v1의 "한국어 친구".
+  - `/api/sessions/heartbeat`·`interrupted-check`가 로그인 사용자 대신 요청에 적힌 `userId`를 사용.
+- **적용된 수정 내역 (Changes)**:
+  - `src/services/recording/audioMerge.ts`(신규): 조각을 Web Audio로 풀어 16kHz 모노 WAV로 합침. `chunkRecorder.ts`(1분 임시 받아쓰기), `reviewPipeline.ts`(최종 받아쓰기를 1분씩 요청 후 순서대로 이어 붙임)에 적용.
+  - `geminiLiveProvider.ts`: 재연결 5번 연속 실패 시 중단하고 오류 안내.
+  - `server/feed.ts`: 실패한 강의는 30분에 한 번만 다시 시도.
+  - `server.ts`, `server/lecture.ts`: 모델 이름을 `src/config/models.ts`에서 가져옴(동작 동일, 발음 듣기용 `GEMINI_TTS_LITE_MODEL` 추가). 기본 지시문 영어 튜터로. 시작 로그의 "Gemini 2.5" 문구 정리. 세션 상태 API는 로그인 사용자 기준.
+  - 앱 이름 One Call English(`metadata.json`, `index.html`, `public/manifest.json`). `README.md` 현재 기능 기준으로 새로 씀, `PROJECT_CONTEXT.md` 번호·버전 기록 정리, `docs/README.md`에 v1 문서 안내.
+- **바로잡음**: 아래 v2.7.2 다음 항목의 "`.env.example` 신규 추가"는 실제 저장소에 반영되지 않았음.
+
+---
+
 ### [2026-10-14 KST] Gemini API 키 유효성 검증 및 런타임 모델 명칭 동기화 (v2.7.2)
 - **문제 원인 (Root Cause)**:
   - 사용자 질문: "제대로 들어가있는데 왜 계속 오류가 나는가?"
@@ -31,7 +48,7 @@
   - `server.ts`:
     - `resolveGeminiApiKey()`에서 더미 값 감지 시(`!isUsableKey(process.env.GEMINI_API_KEY)`) 유효 키로 즉시 교체하고 `GOOGLE_API_KEY`, `GOOGLE_GENAI_API_KEY` 동시 동기화.
     - Secret Volume 마운트 경로(`/secrets`, `/etc/secrets`, `/var/run/secrets`, `/var/secrets`) 및 다양한 시크릿 파일명 탐색 확장.
-  - `.env.example`: 필수 환경변수 템플릿 신규 추가.
+  - `.env.example`: 필수 환경변수 템플릿 신규 추가. *(2026-10-14 확인: 이 파일은 저장소에 없음)*
 - **방어 조치 (Prevention)**:
   - `isUsableKey`를 통한 더미 키 차단, Zero-Quota 디스크 캐시 및 Rate Limit 로직 100% 보존.
   - 사용자 화면 및 API 오류 응답에 키/스택 트레이스 비노출 정책 철저 유지.
