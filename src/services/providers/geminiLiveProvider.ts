@@ -47,6 +47,10 @@ export class GeminiLiveProvider implements LiveProvider {
   private processorNode: ScriptProcessorNode | null = null;
   private nextPlaybackTime = 0;
   private activeSources: AudioBufferSourceNode[] = [];
+  // Tutor voice goes AudioContext -> MediaStream -> <audio>, so phones treat it as call audio
+  // (volume keys change it, earphones/Bluetooth get it). Null when we fell back to ctx.destination.
+  private playbackOut: AudioNode | null = null;
+  private playbackEl: HTMLAudioElement | null = null;
 
   // Transcript memory
   private transcriptItems: LiveTranscriptItem[] = [];
@@ -683,6 +687,13 @@ export class GeminiLiveProvider implements LiveProvider {
       e.code = "MIC_UNAVAILABLE";
       throw e;
     }
+    // iOS Safari 16.4+: a call-style session lets earphones carry both voice and mic.
+    try {
+      const session = (navigator as any).audioSession;
+      if (session && session.type !== "play-and-record") session.type = "play-and-record";
+    } catch {
+      // ignore
+    }
     try {
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -738,6 +749,28 @@ export class GeminiLiveProvider implements LiveProvider {
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
     this.outputAudioCtx = new AudioContextClass({ sampleRate: 24000 });
     this.nextPlaybackTime = this.outputAudioCtx.currentTime;
+    this.playbackOut = this.outputAudioCtx.destination;
+
+    // Played straight to ctx.destination, mobile browsers use the media channel while the mic
+    // puts the phone in call mode: volume keys then change call volume (not the tutor) and the
+    // voice can stay on the loudspeaker with earphones in. Playing through an <audio> element
+    // fed by a MediaStream keeps the voice on the same call route as the mic.
+    try {
+      const dest = this.outputAudioCtx.createMediaStreamDestination();
+      const el = new Audio();
+      el.autoplay = true;
+      el.setAttribute("playsinline", "");
+      el.srcObject = dest.stream;
+      await el.play();
+      this.playbackEl = el;
+      this.playbackOut = dest;
+      console.log("[Live] stage=playback_route media_element");
+    } catch (err) {
+      console.warn("[Live] stage=playback_route destination (media element failed)", err);
+    }
+    if (this.outputAudioCtx.state === "suspended") {
+      await this.outputAudioCtx.resume().catch(() => {});
+    }
   }
 
   private playAudioChunk(pcmBuffer: ArrayBuffer): void {
@@ -754,7 +787,7 @@ export class GeminiLiveProvider implements LiveProvider {
 
     const source = this.outputAudioCtx.createBufferSource();
     source.buffer = audioBuffer;
-    source.connect(this.outputAudioCtx.destination);
+    source.connect(this.playbackOut || this.outputAudioCtx.destination);
 
     const now = this.outputAudioCtx.currentTime;
     const startTime = Math.max(now, this.nextPlaybackTime);
@@ -813,6 +846,17 @@ export class GeminiLiveProvider implements LiveProvider {
       }
       this.inputAudioCtx = null;
     }
+
+    if (this.playbackEl) {
+      try {
+        this.playbackEl.pause();
+        this.playbackEl.srcObject = null;
+      } catch {
+        // ignore
+      }
+      this.playbackEl = null;
+    }
+    this.playbackOut = null;
 
     if (this.outputAudioCtx) {
       try {
