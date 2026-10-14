@@ -21,6 +21,7 @@ import {
   SttPartialItem,
 } from "../firebase/db";
 import { authFetch } from "../api/authFetch";
+import { mergeChunksToWav } from "./audioMerge";
 
 export interface ChunkRecorderOptions {
   userId: string;
@@ -277,8 +278,9 @@ export class ChunkRecorder {
     const timeRange = `${String(startMin).padStart(2, "0")}:00 - ${String(endMin).padStart(2, "0")}:00`;
 
     try {
-      // Combine 6 chunks into a 1-minute audio blob
-      const combinedBlob = new Blob(blobs, { type: this.mimeType });
+      // Combine 6 standalone chunks into one 1-minute WAV (byte-joining WebM files loses audio)
+      const merged = await mergeChunksToWav(blobs);
+      const combinedBlob = merged ? merged.wav : new Blob(blobs, { type: this.mimeType });
       const base64Audio = await this.blobToBase64(combinedBlob);
 
       console.log(`[ChunkRecorder] Requesting 1-min partial transcribe for ${timeRange} (${blobs.length} chunks)`);
@@ -292,7 +294,7 @@ export class ChunkRecorder {
           minuteIndex,
           timeRange,
           audioBase64: base64Audio,
-          mimeType: this.mimeType,
+          mimeType: combinedBlob.type || this.mimeType,
         }),
       });
 

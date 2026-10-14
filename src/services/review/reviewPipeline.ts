@@ -3,8 +3,9 @@ import { authFetch } from "../api/authFetch";
  * B-4 Post-Call Review Pipeline
  * 
  * 1. Final Audio Transcription (기록용 받아쓰기):
- *    - Concatenates 10-second recording chunks in chronological order.
- *    - Calls gemini-3.5-transcribe VERBATIM (word-for-word, no corrections).
+ *    - Decodes the 10-second recording chunks in order and merges them into 1-minute WAV files
+ *      (standalone WebM chunks cannot be byte-joined; decoders would read only the first one).
+ *    - Calls gemini-3.5-transcribe VERBATIM per minute (word-for-word, no corrections) and joins the text.
  *    - Saves to sessions.sttFinal.
  *    - Fallback: If final transcribe fails, stitches sttPartial together and marks sourceStt: 'sttPartial_fallback'.
  * 
@@ -37,6 +38,7 @@ import {
 } from "../firebase/db";
 import { PromptPlaceholders } from "../../data/promptCustomizer";
 import { buildTodayLessonSystemPrompt } from "../../data/lessonPromptBuilder";
+import { mergeChunksToWav, groupChunks } from "../recording/audioMerge";
 
 export interface RunReviewParams {
   userId: string;
@@ -85,13 +87,10 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
 
   onProgress?.("1/3 녹음 조각 병합 및 최종 받아쓰기(gemini-3.5-transcribe) 진행 중...");
 
-  // Step 1: Obtain or merge recording audio
-  let finalAudioBlob: Blob | null = null;
+  // Step 1: Obtain recording chunks in chronological order
+  let chunkBlobs: Blob[] = audioBlobs.filter((b) => b && b.size > 0);
 
-  if (audioBlobs.length > 0) {
-    const mime = audioBlobs[0].type || "audio/webm";
-    finalAudioBlob = new Blob(audioBlobs, { type: mime });
-  } else {
+  if (chunkBlobs.length === 0) {
     // Attempt to download chunks from Cloud Storage / server endpoint
     try {
       const sessionDoc = await getSessionById(userId, sessionId);
@@ -113,46 +112,63 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
           }
         }
 
-        if (downloaded.length > 0) {
-          finalAudioBlob = new Blob(downloaded, { type: downloaded[0].type || "audio/webm" });
-        }
+        chunkBlobs = downloaded;
       }
     } catch (fetchErr) {
       console.warn("[ReviewPipeline] Failed to fetch session chunks:", fetchErr);
     }
   }
 
-  // Step 2: Final Transcription (VERBATIM) via /api/gemini/transcribe-final
+  // Step 2: Final Transcription (VERBATIM) via /api/gemini/transcribe-final, one minute at a time
   let sttFinalText = "";
   let sourceStt: "sttFinal" | "sttPartial_fallback" | "liveTranscript_fallback" = "sttFinal";
 
-  if (finalAudioBlob && finalAudioBlob.size > 1000) {
-    try {
-      const base64 = await blobToBase64(finalAudioBlob);
-      const res = await authFetch("/api/gemini/transcribe-final", {
-        method: "POST",
-        body: JSON.stringify({
-          audioBase64: base64,
-          mimeType: finalAudioBlob.type || "audio/webm",
-        }),
-      });
+  if (chunkBlobs.length > 0) {
+    const groups = groupChunks(chunkBlobs);
+    const texts: string[] = [];
+    let failedMinutes = 0;
 
-      const data = await res.json();
-      if (data.ok && typeof data.transcript === "string" && data.transcript.trim()) {
-        sttFinalText = data.transcript.trim();
-        sourceStt = "sttFinal";
-        // B-10 usage: verbatim transcription minutes (from session start/end)
-        getSessionById(userId, sessionId)
-          .then((sd) => {
-            const end = sd?.endedAt || sd?.lastChunkAt;
-            const mins = sd?.startedAt && end ? Math.max(0, (Date.parse(end) - Date.parse(sd.startedAt)) / 60000) : 0;
-            if (mins > 0) return recordUsage(userId, { sttMinutes: mins, sttEngine: "gemini" });
-          })
-          .catch(() => {});
-        console.log(`[ReviewPipeline] Final verbatim transcribe successful (${sttFinalText.length} chars)`);
+    for (let i = 0; i < groups.length; i++) {
+      onProgress?.(`1/3 최종 받아쓰기 ${i + 1}/${groups.length}분 진행 중 (gemini-3.5-transcribe)...`);
+      try {
+        const merged = await mergeChunksToWav(groups[i]);
+        const audio = merged ? merged.wav : new Blob(groups[i], { type: groups[i][0].type || "audio/webm" });
+        if (audio.size <= 1000) continue;
+        const base64 = await blobToBase64(audio);
+        const res = await authFetch("/api/gemini/transcribe-final", {
+          method: "POST",
+          body: JSON.stringify({
+            audioBase64: base64,
+            mimeType: audio.type || "audio/webm",
+          }),
+        });
+        const data = await res.json();
+        if (data.ok && typeof data.transcript === "string") {
+          if (data.transcript.trim()) texts.push(data.transcript.trim());
+        } else {
+          failedMinutes++;
+        }
+      } catch (minuteErr) {
+        failedMinutes++;
+        console.warn(`[ReviewPipeline] Final transcribe for minute ${i + 1} failed:`, minuteErr);
       }
-    } catch (sttErr) {
-      console.warn("[ReviewPipeline] Final audio transcribe failed, preparing fallback:", sttErr);
+    }
+
+    // Use the per-minute result only when every minute succeeded; otherwise fall back below.
+    if (texts.length > 0 && failedMinutes === 0) {
+      sttFinalText = texts.join("\n");
+      sourceStt = "sttFinal";
+      // B-10 usage: verbatim transcription minutes (from session start/end)
+      getSessionById(userId, sessionId)
+        .then((sd) => {
+          const end = sd?.endedAt || sd?.lastChunkAt;
+          const mins = sd?.startedAt && end ? Math.max(0, (Date.parse(end) - Date.parse(sd.startedAt)) / 60000) : 0;
+          if (mins > 0) return recordUsage(userId, { sttMinutes: mins, sttEngine: "gemini" });
+        })
+        .catch(() => {});
+      console.log(`[ReviewPipeline] Final verbatim transcribe successful (${groups.length} min, ${sttFinalText.length} chars)`);
+    } else if (failedMinutes > 0) {
+      console.warn(`[ReviewPipeline] ${failedMinutes}/${groups.length} minutes failed to transcribe, preparing fallback`);
     }
   }
 
