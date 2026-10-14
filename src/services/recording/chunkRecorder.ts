@@ -20,6 +20,7 @@ import {
   RecordingChunkMeta,
   SttPartialItem,
 } from "../firebase/db";
+import { authFetch } from "../api/authFetch";
 
 export interface ChunkRecorderOptions {
   userId: string;
@@ -282,7 +283,7 @@ export class ChunkRecorder {
 
       console.log(`[ChunkRecorder] Requesting 1-min partial transcribe for ${timeRange} (${blobs.length} chunks)`);
 
-      const response = await fetch("/api/gemini/transcribe-partial", {
+      const response = await authFetch("/api/gemini/transcribe-partial", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

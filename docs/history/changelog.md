@@ -4,6 +4,81 @@
 
 ---
 
+### [2026-10-14 KST] 루트 중복 문서 정리 및 배포 설정 동기화
+- **문제 원인 (Root Cause)**:
+  - 과거 작업 과정에서 생성되었던 구버전 백업 잔재 파일인 `Project_context.MD`(v2.3.0 시점, 8.8KB)가 루트 경로에 남아 공식 최신 표준 문서인 `PROJECT_CONTEXT.md`(v2.7.0, 14.8KB)와 혼선을 유발함.
+- **적용된 수정 내역 (Changes)**:
+  - `Project_context.MD`: 불필요한 구버전 중복 파일 영구 삭제.
+  - `.dockerignore`, `.gcloudignore`: 무시 제외 목록의 대소문자 표기를 공식 정식 파일명인 `!PROJECT_CONTEXT.md`로 일치시켜 Cloud Run 배포 격리 정책 동기화.
+  - `docs/README.md`: 문서 정책 표기 내 `Project_context.MD`를 `PROJECT_CONTEXT.md`로 교정.
+- **방어 조치 (Prevention)**:
+  - 공식 프로젝트 컨텍스트 단일 진실 공급원(`PROJECT_CONTEXT.md`) 일원화 및 Cloud Run 컨테이너 빌드 정합성 확보.
+
+---
+
+### [2026-10-14 KST] v2.7.0 — [작업 지시서 8] 3단계 코치 — 가이드 B-9 완료
+- **문제 원인 및 기획 의도 (Context & Motivation)**:
+  - 4대 목표(OPIc, Philly, Travel, Bluey) 트랙을 수강생(찬식님)의 실제 생활 일정(출장, 야근, 휴식, 시험일 등)에 맞게 유연하게 조정하면서도, 데이터 손실이나 임의 조작 없이 안전하게 학습 루틴을 관리할 수 있는 3단계 텍스트 코치 및 스케줄 자동화 파이프라인 구현.
+  - LLM 모델이 독단적으로 사용자 계획을 수정하지 못하도록 엄격한 "제안(proposed) → 사용자 승인(approved)" 방어 체계를 확립하고, 언제든 직전 상태로 복구할 수 있는 "되돌리기(reverted)" 라이프사이클 구축.
+  - 사용자가 하루 수업을 건너뛰었을 때 과 진도가 낭비되지 않도록 하는 "하루 빠짐 보존" 규칙과, OPIc 시험 1~2주 전 모의고사(14과) 집중 배치 자동 제안, 그리고 2일 연속 결석 시 부드러운 복귀 넛지 배너 제공.
+- **적용된 수정 내역 (Applied Changes)**:
+  1. **B-11 데이터 모델 완성 (`src/services/firebase/db.ts`)**:
+     - `users/{uid}/plan`: `weeklyPattern`, `minutesPerDay`, `updatedAt` 저장. 문서 부재 시 기본 4대 트랙 루틴(월·토 opic, 화·목 philly, 수 bluey, 금 travel, 일 주간복기)으로 자동 초기화(`initUserPlanIfMissing`).
+     - `users/{uid}/planChanges`: `requestedText`, `summary`, `before`, `after`, `status`('proposed' | 'approved' | 'rejected' | 'reverted'), `at`, `appliedAt`.
+     - `users/{uid}/coachMemory`: `constraints`, `preferences`, `weakPoints`, `updatedAt`. 항목별 개별 삭제 지원(`removeCoachMemoryItem`).
+     - `users/{uid}/coachMessages`: 대화 로그 및 제안 카드 ID 연동.
+     - `goals/{goalId}.deadline`: OPIc 시험일 등 D-day 기한 저장 및 조회 지원.
+     - `users/{uid}/settings/general`: `coachNudges`(`["weekly", "absence2d"]` 기본값, 4주/2주 전 마감 토글 포함).
+  2. **스케줄 자동화 규칙 구현**:
+     - **하루 빠짐 보존**: 통화 세션이 `status=done`으로 완료된 경우에만 `nextLessonIndex += 1`을 가산(`advanceGoalAfterCompletedCall` in `reviewPipeline.ts`). 당일 통화가 없거나 완료되지 않은 경우 다음 배정 요일에도 동일한 과 번호를 유지하여 과를 건너뛰지 않도록 보장.
+     - **OPIc 시험 1~2주 전 모의고사 자동 제안 (`checkOpicDeadlineMockProposal`)**: OPIc deadline이 7~14일 남은 구간 감지 시 실전 모의고사(14과)를 월·토 OPIc 슬롯에 집중 배치하는 `planChange` 제안 카드를 자동 생성. **승인 전에는 MASTER/오늘 카드에 절대 미반영**.
+     - **홈 「오늘 수업」 계산 고도화 (`HomeScreen.tsx`)**: 하드코드 `WEEKLY_ROUTINE` 대신 `plan.weeklyPattern + goals.nextLessonIndex`를 최우선으로 반영하여 오늘 추천 수업 및 요일별 집중 루틴 표출.
+  3. **코치 탭 UI 구현 (`src/ui/coach/CoachModal.tsx`)**:
+     - 홈 상단 헤더의 [AI 코치] 버튼 및 "더 보기" 내 AI 코치 전용 카드 진입점 제공.
+     - 채팅 인터페이스: 한국어로 편하게 입력 ➔ 코치 답변 + 변경 제안 카드(before/after 요약 diff) 생성.
+     - [승인] 버튼 클릭 시에만 `applyPlanChange` 실행 (plan 및 goals 동시 반영).
+     - [거절] 버튼 클릭 시 `rejectPlanChange` 실행 (status=rejected).
+     - [변경 이력] 탭: 과거 제안 목록 조회 및 승인된 항목에 대해 [되돌리기] 지원 (`revertPlanChange`, 직전 before 스냅샷 복구, status=reverted).
+     - [코치가 기억하는 것] 탭: 제약/선호도/취약점 목록 확인 및 항목별 X 버튼으로 즉시 삭제.
+  4. **코치 LLM 엔드포인트 (`server.ts`, `POST /api/coach/chat`)**:
+     - `gemini-3.8-flash` 기반 함수 호출 지원: `propose_plan_change`, `get_progress`, `get_mistake_stats`.
+     - 모델이 `apply_plan_change`를 직접 호출하려 시도할 경우 400 에러를 반환하여 임의 적용 원천 차단.
+  5. **먼저 말 걸기 (넛지)**:
+     - **2일 연속 결석 배너 (`checkTwoDayAbsence`)**: 한국시간 기준 어제와 그제 모두 통화 done 세션이 없으면 홈 상단에 "이틀째 쉬었어요. 오늘 수업만 해도 좋아요" 배너 및 [오늘 수업 시작] 바로가기 제공.
+     - **일요일 주간 리뷰 아침 강의 (`server/lecture.ts`)**: 일요일 강의 생성 시 coachNote를 한 주간 완수한 진도 및 누적 졸업 표현 성과를 짚어주는 주간 리뷰 톤으로 자동 고도화.
+     - **환경설정 탭 확장 (`SettingsModal.tsx`)**: 코치 알림(넛지) 전용 탭을 추가하여 주간 리뷰, 2일 연속 결석, 마감 4주/2주 전 알림 개별 토글 지원.
+- **방어 조치 및 호환성 (Safety & Guardrails)**:
+  - 모델명(`gemini-3.8-live`, `gemini-3.8-flash`) 및 단일 허용 계정(`episode.kim@gmail.com`) 100% 보존.
+  - Live 음성 통화, 퀴즈 채점, 아침 강의, 피드, Keep 가져오기 등 기존 핵심 파이프라인 회귀 없음.
+  - 공식 빌드 버전 `20261014-multilingual-1330` 동기화.
+
+---
+
+### [2026-10-14 KST] v2.6.1 — Gemini Live "연결 준비 중" 무한 대기 버그 수정 및 세션 연결 안정화
+- **문제 원인 및 기획 의도 (Context & Motivation)**:
+  - 전화걸기 실행 시 Gemini Live 통화 화면에서 "연결 중..." 또는 "튜터 연결 준비 중..." 상태에서 멈추고 대화 화면으로 진입하지 못하는 현상 발생.
+  - 근본 원인 분석:
+    1. **서버 프로세스 환경변수 불일치**: AI Studio 컨테이너 구동 시 컨테이너의 기본 프로세스(PID 1, 53)에는 더미 키(`MY_GEMINI_API_KEY`)가 있었고, 실제 발급된 유효 키는 `/app/.dev.env.json`에 기록되어 있었음. 기존 `server.ts`의 `resolveGeminiApiKeyInner()`가 해당 파일을 조회하지 않아, 클라이언트의 `/api/gemini/token` 요청 및 서버 중계 웹소켓(`/api/gemini/live`) 연결 시 `fallback_required` 에러를 반환.
+    2. **클라이언트 이벤트 리스너 덮어쓰기 버그**: `geminiLiveProvider.ts`의 `connectDirect()`에서 웹소켓 오픈 즉시 `wireWebSocketEvents(true)`를 호출하여 `socket.onerror`와 `socket.onclose`를 덮어씀. 이로 인해 직접 연결 실패 시 `reject()`가 실행되지 않고 8초 풀 타임아웃까지 무의미하게 대기.
+    3. **마이크 권한 획득 블로킹 결함**: `connect()` 메서드 맨 끝에 `await micPromise;`가 포함되어 있어, 마이크 승인이 지연되거나 완료되기 전까지 세션 연결 수립(`connected`)이 반환되지 못하고 대기 상태에 갇힘.
+- **적용된 수정 내역 (Applied Changes)**:
+  1. **서버 키 탐색 고도화 (`server.ts`)**:
+     - `resolveGeminiApiKeyInner()`에 `/app/.dev.env.json`, `/etc/environment` 파싱 및 전체 `/proc` 프로세스 환경변수 스캔을 추가하여 실제 유효 키를 즉시 동적으로 인식하도록 보강.
+     - `LIVE_CONNECT_TIMEOUT_MS`를 6,000ms에서 10,000ms로 조정하여 네트워크 지연 시의 조기 중단 방지.
+     - 웹소켓 upgrade 시 URL pathname 파싱 예외 처리 방어 로직 강화.
+  2. **클라이언트 직접 연결 생명주기 분리 (`geminiLiveProvider.ts`)**:
+     - `connectDirect()`에서 `setupComplete` 수신 전까지는 에러 발생 시 즉시 `reject()`하여 타임아웃 대기 없이 즉시 서버 중계(Proxy)로 폴백하도록 수정.
+     - 직접 연결 타임아웃을 8초에서 5초로 최적화.
+  3. **마이크 스트림 완전 비동기화 (`geminiLiveProvider.ts`)**:
+     - `connect()` 메서드 말미의 `await micPromise;` 블로킹을 해제하고 백그라운드 비동기 처리로 전환.
+     - 세션 연결이 성공하면 마이크 승인 여부와 무관하게 즉시 `connected` 상태로 진입하고, 마이크는 준비되는 즉시 오디오 청크를 스트리밍하도록 개선.
+- **방어 조치 및 호환성 (Safety & Guardrails)**:
+  - 모델명(`gemini-3.8-live`, `gemini-3.8-flash`) 및 화이트리스트 계정(`episode.kim@gmail.com`) 100% 보존.
+  - 직접 연결 및 서버 중계 웹소켓 연결 테스트 정상 완료 확인 (`ready`, `session_resumption_update` 수신 검증).
+  - 공식 빌드 버전 `20261014-multilingual-1330` 동기화.
+
+---
+
 ### [2026-10-13 KST] v2.6.0 — [작업 지시서 6] 2-B 퀴즈 — 가이드 B-6 완료
 - **문제 원인 및 기획 의도 (Context & Motivation)**:
   - B-5 간격 반복(1→3→7→14일) 단계에서 누적된 복습 대상 실수를 플래시카드 퀴즈로 능동 인출(Active Recall)하고 졸업(Graduation)시킬 수 있는 카드형 퀴즈 엔진 구현.

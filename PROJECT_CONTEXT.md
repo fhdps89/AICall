@@ -1,8 +1,32 @@
 # 📖 프로젝트 컨텍스트 및 히스토리 (Project Context)
 
 > **프로젝트**: 「오늘도 한 통」 (One Call English) — AI 1:1 전화영어 올인원 랩  
-> **현재 버전**: `v2.6.0` | **공식 빌드 버전**: `20261013-multilingual-1652` | **최종 갱신**: 2026-10-13 (KST)  
+> **현재 버전**: `v2.7.0` | **공식 빌드 버전**: `20261014-multilingual-1330` | **최종 갱신**: 2026-10-14 (KST)  
 > **관리 규칙**: `README.md` 변경 시 본 문서의 아키텍처 및 히스토리를 함께 최신화하며, 모든 일시는 한국 표준시(KST)를 기준으로 합니다.
+>
+> **기준 기획 (2026-10-13~)**: [`docs/plan/implementation_plan_v4.md`](./docs/plan/implementation_plan_v4.md) Part B · 진행 가이드 [`docs/plan/ai-studio-build-guide.md`](./docs/plan/ai-studio-build-guide.md) · 현재 앱과의 차이 [`docs/plan/gap-v2.1.0-vs-plan-v4.md`](./docs/plan/gap-v2.1.0-vs-plan-v4.md)  
+> 아래 기능 중 텔레그램 발송과 예전 아침 팟캐스트는 v2.0.0 때 예전 기획으로 만든 것이며 정리될 예정입니다(차이표 참고).
+
+---
+
+## 0. Phase 3: B-9 3단계 코치 & 스케줄 자동화 아키텍처 (2026-10-14 KST)
+- **데이터 모델**:
+  - `users/{uid}/plan`: `{ weeklyPattern: { mon:[goalId], tue:..., ..., sun:[] }, minutesPerDay, updatedAt }`. 초기 진입 시 기존 4대 목표 루틴으로 자동 1회 초기화.
+  - `users/{uid}/planChanges/{id}`: `{ requestedText, summary, before, after, status: proposed|approved|rejected|reverted, at, appliedAt? }`. before/after 스냅샷 격리.
+  - `users/{uid}/coachMemory`: `{ constraints[], preferences[], weakPoints[], updatedAt }`. 항목별 삭제 지원.
+  - `users/{uid}/coachMessages/{id}`: 대화 로그 및 제안 카드 ID 연동.
+  - `goals/{goalId}.deadline`: OPIc 시험일 등 D-day 목표 기한 연동.
+  - `settings.coachNudges`: `["weekly", "absence2d"]` 기본값.
+- **스케줄 불변 안전망**:
+  - **하루 빠짐 보존**: 통화 세션이 `status=done`이 아니면 다음 배정 요일에도 같은 `nextLessonIndex` 유지(건너뛰지 않음). 오직 통화 완료 및 복기 저장 시에만 `nextLessonIndex += 1`.
+  - **OPIc 시험 1~2주 전 모의고사 자동 제안**: deadline 7~14일 전 구간에 실전 모의고사(14과)를 월·토 OPIc 슬롯에 배치하는 제안 카드 생성 (**승인 전 절대 반영 금지**).
+  - **홈 「오늘 수업」**: `plan.weeklyPattern + goals.nextLessonIndex` 우선 계산.
+- **코치 UI 및 LLM 통제**:
+  - `CoachModal.tsx`: 채팅, 변경 카드 승인/거절, 변경 이력 되돌리기(`reverted`), 코치 메모리 개별 삭제.
+  - `POST /api/coach/chat`: `gemini-3.8-flash` 기반 함수 호출(`propose_plan_change`, `get_progress`, `get_mistake_stats`). 모델이 `apply`를 직접 호출하면 400 반환 차단.
+- **먼저 말 걸기 (2일 결석 배너 & 일요일 주간 리뷰)**:
+  - 2일 연속 결석 시 홈 상단에 "이틀째 쉬었어요. 오늘 수업만 해도 좋아요" 배너 노출.
+  - 일요일 아침 강의 coachNote를 주간 리뷰 톤으로 자동 편성.
 
 ---
 

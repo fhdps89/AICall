@@ -5,6 +5,8 @@ import {
   LiveCommand,
   LiveTranscriptItem,
 } from "./types";
+import { authFetch } from "../api/authFetch";
+import { auth } from "../firebase/config";
 
 /**
  * GeminiLiveProvider
@@ -89,7 +91,8 @@ export class GeminiLiveProvider implements LiveProvider {
       );
       throw err;
     }
-    await micPromise;
+    // Mic initialization is fully asynchronous and decoupled from session establishment.
+    micPromise.catch(() => {});
   }
 
   private async establishConnection(): Promise<void> {
@@ -100,8 +103,8 @@ export class GeminiLiveProvider implements LiveProvider {
 
     try {
       const tokenAbort = new AbortController();
-      const tokenTimer = setTimeout(() => tokenAbort.abort(), 8000);
-      const tokenRes = await fetch("/api/gemini/token", {
+      const tokenTimer = setTimeout(() => tokenAbort.abort(), 6000);
+      const tokenRes = await authFetch("/api/gemini/token", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: tokenAbort.signal,
@@ -135,7 +138,7 @@ export class GeminiLiveProvider implements LiveProvider {
   /**
    * Direct connection to Gemini Live endpoint using ephemeral token (2-1 requirement 1 & 3)
    * URL: .../BidiGenerateContentConstrained?access_token=${token}
-   * Waits for setupComplete from server (8-second timeout).
+   * Waits for setupComplete from server (5-second timeout).
    */
   private async connectDirect(token: string): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -147,11 +150,11 @@ export class GeminiLiveProvider implements LiveProvider {
       const socket = new WebSocket(directUrl);
       let setupCompleted = false;
 
-      // 3) 8-second timeout waiting for setupComplete
+      // 5-second timeout waiting for setupComplete
       const setupTimer = setTimeout(() => {
         if (!setupCompleted) {
           this.directFailCount++;
-          console.warn("[Live] Direct connection timeout (8s) waiting for setupComplete. Falling back to proxy.");
+          console.warn("[Live] Direct connection timeout (5s) waiting for setupComplete. Falling back to proxy.");
           try {
             socket.close();
           } catch {
@@ -159,25 +162,37 @@ export class GeminiLiveProvider implements LiveProvider {
           }
           reject(new Error("Direct setupComplete timeout"));
         }
-      }, 8000);
+      }, 5000);
 
       socket.onopen = () => {
         this.ws = socket;
-        this.onDirectSetupComplete = () => {
-          if (!setupCompleted) {
-            setupCompleted = true;
-            clearTimeout(setupTimer);
-            this.isConnected = true;
-            this.isReconnecting = false;
-            this.connectionPath = "direct";
-            // 5) Log path
-            console.log("[Live] path=direct");
-            this.options?.onStatusChange("connected", "Gemini Live 직접 연결 완료");
-            resolve();
+
+        // Listen for setupComplete before attaching full event listeners
+        socket.onmessage = (event) => {
+          try {
+            const raw = JSON.parse(event.data);
+            if (raw.setupComplete && !setupCompleted) {
+              setupCompleted = true;
+              clearTimeout(setupTimer);
+              this.isConnected = true;
+              this.isReconnecting = false;
+              this.connectionPath = "direct";
+              console.log("[Live] path=direct (setupComplete received)");
+              this.options?.onStatusChange("connected", "Gemini Live 직접 연결 완료");
+
+              // Switch to full message handler
+              this.wireWebSocketEvents(true);
+              resolve();
+              return;
+            }
+
+            if (setupCompleted) {
+              this.handleIncomingMessage(raw, true);
+            }
+          } catch (err) {
+            console.error("[GeminiLiveProvider] Direct parse message error:", err);
           }
         };
-
-        this.wireWebSocketEvents(true);
 
         // Send initial setup payload with session resumption & context compression
         const setupPayload = {
@@ -239,12 +254,20 @@ export class GeminiLiveProvider implements LiveProvider {
    */
   private async connectViaServerProxy(): Promise<void> {
     const PROXY_READY_TIMEOUT_MS = 20000;
+    // Server proxy requires the signed-in user's Firebase ID token (browsers can't set WS headers).
+    let idToken = "";
+    try {
+      idToken = (await auth.currentUser?.getIdToken()) || "";
+    } catch (e) {
+      console.warn("[Live] stage=id_token_failed", e);
+    }
     return new Promise((resolve, reject) => {
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const host = window.location.host;
-      const wsUrl = `${protocol}//${host}/api/gemini/live`;
-      console.log("[Live] stage=proxy_open", wsUrl);
+      const baseUrl = `${protocol}//${host}/api/gemini/live`;
+      console.log("[Live] stage=proxy_open", baseUrl);
 
+      const wsUrl = `${baseUrl}?token=${encodeURIComponent(idToken)}`;
       const socket = new WebSocket(wsUrl);
       let settled = false;
 

@@ -1,11 +1,40 @@
 # 오늘도 한 통 (One Call English) — AI 1:1 전화영어 올인원 랩
 
-> **버전**: `v2.6.0` | **빌드**: `20261013-multilingual-1652` | **최종 갱신**: 2026-10-13 (KST)
+> **버전**: `v2.7.0` | **빌드**: `20261014-multilingual-1330` | **최종 갱신**: 2026-10-14 (KST)
 >
 > **기준 기획 (2026-10-13~)**: [`docs/plan/implementation_plan_v4.md`](./docs/plan/implementation_plan_v4.md) Part B · 진행 가이드 [`docs/plan/ai-studio-build-guide.md`](./docs/plan/ai-studio-build-guide.md) · 현재 앱과의 차이 [`docs/plan/gap-v2.1.0-vs-plan-v4.md`](./docs/plan/gap-v2.1.0-vs-plan-v4.md)  
 > 아래 기능 중 텔레그램 발송과 예전 아침 팟캐스트는 v2.0.0 때 예전 기획으로 만든 것이며 정리될 예정입니다(차이표 참고).
 
 여러 도구(Claude, Gemini Live, Google Keep, Grok, ElevenLabs, Telegram)로 분산되어 있던 실전 영어회화 학습 파이프라인을 **단 하나의 통합 웹/모바일 앱에서 원클릭으로 완벽하게 자동화**한 AI 1:1 전화영어 플랫폼입니다.
+
+### 📌 [Phase 3: B-9 3단계 코치 & 스케줄 자동화 완성]
+- **데이터 모델 구축 (`users/{uid}/plan`, `planChanges`, `coachMemory`, `coachMessages`)**:
+  - `plan`: 주간 요일 패턴(`weeklyPattern`), 일일 목표 시간(`minutesPerDay`), 최초 진입 시 기존 4대 트랙 루틴(월·토 OPIc, 화·목 Philly, 수 Bluey, 금 Travel, 일 주간복기)으로 자동 초기화.
+  - `planChanges`: before/after 스냅샷 기반의 계획 및 목표 변경 제안(`proposed`), 사용자 승인(`approved`), 거절(`rejected`), 되돌리기(`reverted`) 이력 관리.
+  - `coachMemory`: 코치가 기억하는 제약(`constraints`), 선호도(`preferences`), 취약점(`weakPoints`) 항목별 개별 삭제 가능.
+  - `goals/{goalId}.deadline`: OPIc 시험일 등 D-day 목표 기한 영구 저장/연동.
+  - `settings.coachNudges`: `["weekly", "absence2d"]` 기본 활성화 및 4주/2주 전 마감 알림 토글 제공.
+- **스케줄 자동화 규칙 (코치 없이 동작하는 안전망)**:
+  - **하루 빠짐 보존**: 해당 요일에 통화 세션이 `status=done`으로 완료되지 않으면, 다음 배정 요일에도 같은 `nextLessonIndex`를 유지(과를 건너뛰지 않음). 완료한 날만 `nextLessonIndex += 1`.
+  - **OPIc 시험 1~2주 전 모의고사 자동 제안**: OPIc deadline이 7~14일 남은 시점에 실전 모의고사(14과)를 월·토 OPIc 슬롯에 집중 배치하는 `planChange` 제안 카드 자동 생성 (**승인 전에는 절대 오늘 수업 카드에 반영하지 않음**).
+  - **홈 「오늘 수업」**: `plan.weeklyPattern + goals.nextLessonIndex`를 우선 계산하여 맞춤형 추천 수업 및 요일별 집중 루틴 표출.
+- **코치 탭 UI (`CoachModal.tsx`)**:
+  - 홈 상단 헤더 및 "더 보기" 내 진입점 배치.
+  - 한국어 텍스트 채팅: 일정 변경, 출장, 시험일 등 언급 시 실시간 대화 + 변경 카드(before/after diff 요약 + [승인] [거절]) 제공.
+  - 승인 전에는 실제 데이터 변경을 원천 차단하며, [승인] 클릭 시에만 안전하게 반영.
+  - [변경 이력]: 승인된 항목에 대해 [되돌리기] 버튼 제공 (직전 before로 즉시 복구, status=reverted).
+  - [코치가 기억하는 것]: constraints, preferences, weakPoints 실시간 조회 및 개별 삭제(X) 가능.
+- **코치 LLM 엔진 (`server.ts`, `/api/coach/chat`, `gemini-3.8-flash`)**:
+  - 1인 전담 코치 시스템 프롬프트 및 함수 호출(`propose_plan_change`, `get_progress`, `get_mistake_stats`) 구현.
+  - 모델의 직접 `apply` 호출 시도 시 400 에러로 원천 차단하여 사용자 통제권 보장.
+- **먼저 말 걸기 (넛지)**:
+  - **2일 연속 결석 배너**: 어제·그제 통화 세션이 모두 없을 때 홈 상단에 "이틀째 쉬었어요. 오늘 수업만 해도 좋아요" 배너 및 [오늘 수업 시작] 버튼 노출.
+  - **일요일 주간 리뷰 아침 강의**: 일요일 강의 생성 시 coachNote를 한 주간 완수한 진도 및 누적 졸업 표현 성과를 짚어주는 주간 리뷰 톤으로 자동 고도화.
+
+### 📌 [긴급 버그 수정: Gemini Live 연결 준비 중 무한 대기 해결 (2026-10-14 KST)]
+- **서버 API 키 동적 감지 고도화 (`server.ts`)**: AI Studio 컨테이너 보안 환경(`/app/.dev.env.json`)에 주입된 실제 Gemini API 키를 실시간 인식하도록 `resolveGeminiApiKeyInner` 확장.
+- **클라이언트 직접 연결 이벤트 핸들러 분리 (`geminiLiveProvider.ts`)**: 직접 웹소켓 오픈 즉시 이벤트 리스너를 덮어쓰지 않고, `setupComplete` 수신 전 오류 발생 시 지연 없이 즉시 서버 프록시로 전환.
+- **마이크 비동기 분리**: 세션 연결 수립이 마이크 권한 획득에 블로킹되지 않도록 완전 비동기화하여 "연결 준비 중" 대기 상태 즉시 해소.
 
 ### 📌 [Phase 2: B-6 퀴즈 (2-B) 완성]
 - **퀴즈 대상 산출 (최대 10개)**:

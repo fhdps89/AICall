@@ -37,6 +37,6 @@
 ---
 
 ## 🛡 문서 관리 및 배포 격리 정책
-1. **루트 문서 경량화**: `README.md`와 `Project_context.MD`는 핵심 인덱스 및 요약본(Executive Summary)으로 10KB 미만으로 유지하여 Cloud Run 배포 에러를 영구 방지합니다.
+1. **루트 문서 경량화**: `README.md`와 `PROJECT_CONTEXT.md`는 핵심 인덱스 및 요약본(Executive Summary)으로 10KB 미만으로 유지하여 Cloud Run 배포 에러를 영구 방지합니다.
 2. **무제한 기록**: 모든 상세 내용, 코드 스니펫, 디버깅 로그는 `docs/` 하위 문서에 제한 없이 자유롭게 기록합니다.
 3. **배포 제외**: `.dockerignore` 및 `.gcloudignore`를 통해 `docs/` 디렉토리가 Cloud Run 컨테이너 메타데이터/환경 변수로 주입되지 않도록 격리합니다.

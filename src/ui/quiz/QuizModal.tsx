@@ -121,7 +121,7 @@ export const QuizModal: React.FC<QuizModalProps> = ({
   const fetchMissingMeanings = async (items: MistakeData[]) => {
     try {
       setIsTranslating(true);
-      const res = await fetch("/api/quiz/meaning-ko", {
+      const res = await authFetch("/api/quiz/meaning-ko", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -258,7 +258,7 @@ export const QuizModal: React.FC<QuizModalProps> = ({
     setSubmittedAnswer(cleanAnswer);
 
     try {
-      const res = await fetch("/api/quiz/grade", {
+      const res = await authFetch("/api/quiz/grade", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
