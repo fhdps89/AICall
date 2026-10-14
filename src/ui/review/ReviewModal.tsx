@@ -328,25 +328,51 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
           </div>
         )}
 
-        {/* Google Keep Copy Box (B-4 requirement 3: 내가 한 말 -> 자연스러운 표현, 줄마다 하나) */}
-        <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
-              <BookmarkCheck size={14} className="text-emerald-400" />
-              <span>Google Keep 붙여넣기용 복사</span>
-            </span>
+        {/* After the call: what happened automatically and what comes next */}
+        <div className="p-4 rounded-2xl bg-emerald-950/30 border border-emerald-500/30 space-y-2">
+          <div className="text-sm font-bold text-emerald-300 flex items-center gap-1.5">
+            <CheckCircle size={16} />
+            <span>통화 후 할 일</span>
+          </div>
+          {review?.mistakesSaved === false ? (
+            <p className="text-xs text-amber-300 leading-relaxed">
+              실수를 앱 복습 목록에 저장하지 못했어요. 아래 "Keep에 붙여넣기용 복사"로 따로 남겨 두세요.
+            </p>
+          ) : (
+            <p className="text-xs text-slate-200 leading-relaxed">
+              {visibleMistakes.length > 0
+                ? `오늘 실수 ${visibleMistakes.length}개는 앱 복습 목록에 자동으로 저장됐어요. 따로 옮겨 적지 않아도 돼요.`
+                : "오늘은 저장할 실수가 없어요."}
+            </p>
+          )}
+          <ul className="text-xs text-slate-300 leading-relaxed list-disc pl-4 space-y-0.5">
+            <li>내일 아침 강의에서 오늘 실수를 다시 들어요.</li>
+            <li>내일 홈의 "퀴즈 풀기"로 맞게 말할 수 있는지 확인해요. 맞히면 그 실수는 졸업이에요.</li>
+          </ul>
+        </div>
+
+        {/* Google Keep backup copy (B-4 requirement 4, optional) */}
+        <details className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800">
+          <summary className="text-xs font-semibold text-slate-300 cursor-pointer flex items-center gap-1.5">
+            <BookmarkCheck size={14} className="text-emerald-400" />
+            <span>Google Keep에도 남기고 싶다면 (선택)</span>
+          </summary>
+          <div className="mt-3 space-y-2">
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              Google 개인 계정은 앱이 Keep에 직접 쓸 수 없어서, 복사해서 붙여 넣는 방법만 있어요.
+            </p>
             <button
               onClick={handleCopyKeep}
-              className="px-3 py-1.5 text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-lg flex items-center gap-1.5 transition cursor-pointer shadow-md shadow-amber-500/10 active:scale-95"
+              className="px-3 py-1.5 text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-lg flex items-center gap-1.5 transition cursor-pointer active:scale-95"
             >
               {copied ? <Check size={14} /> : <Copy size={14} />}
               <span>{copied ? "복사 완료!" : "Keep에 붙여넣기용 복사"}</span>
             </button>
+            <pre className="text-xs font-mono text-slate-300 bg-black/50 p-3 rounded-xl overflow-x-auto whitespace-pre-wrap max-h-32 border border-slate-800/80">
+              {getKeepCopyText()}
+            </pre>
           </div>
-          <pre className="text-xs font-mono text-slate-300 bg-black/50 p-3 rounded-xl overflow-x-auto whitespace-pre-wrap max-h-32 border border-slate-800/80">
-            {getKeepCopyText()}
-          </pre>
-        </div>
+        </details>
 
         {/* Expandable: Full Verbatim STT Transcript viewer (기록용 받아쓰기 전문 확인) */}
         {sttFinal?.transcript && (

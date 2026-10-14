@@ -289,6 +289,8 @@ export interface SessionReviewData {
   repeatedMistakes: string[];
   keepSyncText: string;
   generatedAt: string;
+  /** false when saving this call's mistakes to the app's review list failed */
+  mistakesSaved?: boolean;
 }
 
 export interface SessionData {

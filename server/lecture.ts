@@ -293,6 +293,31 @@ async function synthesizeElevenLabs(_text: string, _twoSpeakers: boolean): Promi
   throw new Error('ElevenLabs 경로는 아직 미구현(비교용 예정)');
 }
 
+const TTS_STYLE = 'Read this morning English lesson warmly and clearly. Korean lines in natural Korean; English lines in natural American English (never Korean-accented transliteration).';
+
+/**
+ * Script lines look like "Coach: ..." / "Partner: ...". Multi-speaker TTS now requires one text
+ * part per turn with speechMetadata.speaker (a single text block is rejected with 400
+ * "must specify speech_metadata.speaker for each text part"). Single voice: drop the label so it
+ * is not read aloud.
+ */
+export function toSpeechParts(text: string, twoSpeakers: boolean): any[] {
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const parsed = lines.map((l) => {
+    const m = /^(Coach|Partner)\s*:\s*(.*)$/.exec(l);
+    return m ? { speaker: m[1], line: m[2] } : { speaker: 'Coach', line: l };
+  });
+  if (!twoSpeakers) return [{ text: `${TTS_STYLE}\n\n${parsed.map((p) => p.line).join('\n')}` }];
+  // Merge consecutive lines of the same speaker into one part.
+  const parts: { text: string; speechMetadata: { speaker: string; style: string } }[] = [];
+  for (const p of parsed) {
+    const last = parts[parts.length - 1];
+    if (last && last.speechMetadata.speaker === p.speaker) last.text += ' ' + p.line;
+    else parts.push({ text: p.line, speechMetadata: { speaker: p.speaker, style: TTS_STYLE } });
+  }
+  return parts;
+}
+
 async function synthesizeGemini(ai: GoogleGenAI, text: string, twoSpeakers: boolean): Promise<Pcm> {
   const speechConfig: any = twoSpeakers
     ? {
@@ -309,7 +334,7 @@ async function synthesizeGemini(ai: GoogleGenAI, text: string, twoSpeakers: bool
     try {
       const response = await ai.models.generateContent({
         model: LECTURE_TTS_MODEL,
-        contents: [{ role: 'user', parts: [{ text }] }],
+        contents: [{ role: 'user', parts: toSpeechParts(text, twoSpeakers) }],
         config: { responseModalities: ['AUDIO'], speechConfig },
       });
       const part = response.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData?.data);
@@ -365,8 +390,6 @@ function wavFromPcm(pcm: Buffer, rate: number): Buffer {
   return Buffer.concat([header, pcm]);
 }
 
-const TTS_STYLE = 'Read this morning English lesson warmly and clearly. Korean lines in natural Korean; English lines in natural American English (never Korean-accented transliteration).';
-
 async function runJob(
   ai: GoogleGenAI,
   state: LectureState,
@@ -390,7 +413,7 @@ async function runJob(
   };
   const say = async (text: string, two: boolean) => {
     chars += text.length;
-    push(resample(await synthesize(ai, state.ttsEngine, `${TTS_STYLE}\n\n${text}`, two), RATE));
+    push(resample(await synthesize(ai, state.ttsEngine, text, two), RATE));
   };
   const silence = (sec: number) => push(Buffer.alloc(Math.round(sec * RATE) * 2));
 
