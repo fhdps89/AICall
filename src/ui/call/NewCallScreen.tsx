@@ -27,6 +27,7 @@ import {
   Disc3,
   FileAudio,
 } from "lucide-react";
+import { authFetch } from "../../services/api/authFetch";
 
 const COMMAND_LABELS: Record<string, string> = {
   Done: "끝내기",
@@ -152,7 +153,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
               if (isCancelled) return;
               setChunkCount((prev) => prev + 1);
               // Send heartbeat to server watchdog (B-3 requirement 4)
-              fetch("/api/sessions/heartbeat", {
+              authFetch("/api/sessions/heartbeat", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({

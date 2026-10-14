@@ -5,6 +5,8 @@ import {
   LiveCommand,
   LiveTranscriptItem,
 } from "./types";
+import { authFetch } from "../api/authFetch";
+import { auth } from "../firebase/config";
 
 /**
  * GeminiLiveProvider
@@ -102,7 +104,7 @@ export class GeminiLiveProvider implements LiveProvider {
     try {
       const tokenAbort = new AbortController();
       const tokenTimer = setTimeout(() => tokenAbort.abort(), 6000);
-      const tokenRes = await fetch("/api/gemini/token", {
+      const tokenRes = await authFetch("/api/gemini/token", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: tokenAbort.signal,
@@ -252,12 +254,20 @@ export class GeminiLiveProvider implements LiveProvider {
    */
   private async connectViaServerProxy(): Promise<void> {
     const PROXY_READY_TIMEOUT_MS = 20000;
+    // Server proxy requires the signed-in user's Firebase ID token (browsers can't set WS headers).
+    let idToken = "";
+    try {
+      idToken = (await auth.currentUser?.getIdToken()) || "";
+    } catch (e) {
+      console.warn("[Live] stage=id_token_failed", e);
+    }
     return new Promise((resolve, reject) => {
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const host = window.location.host;
-      const wsUrl = `${protocol}//${host}/api/gemini/live`;
-      console.log("[Live] stage=proxy_open", wsUrl);
+      const baseUrl = `${protocol}//${host}/api/gemini/live`;
+      console.log("[Live] stage=proxy_open", baseUrl);
 
+      const wsUrl = `${baseUrl}?token=${encodeURIComponent(idToken)}`;
       const socket = new WebSocket(wsUrl);
       let settled = false;
 

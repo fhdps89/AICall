@@ -19,6 +19,7 @@ import {
   ShieldCheck,
   CheckCircle,
 } from "lucide-react";
+import { authFetch } from "../../services/api/authFetch";
 
 export interface ReviewModalProps {
   userId?: string;
@@ -102,7 +103,7 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
   const handlePlayTts = async (text: string, index: number) => {
     try {
       setPlayingIndex(index);
-      const res = await fetch("/api/gemini/tts", {
+      const res = await authFetch("/api/gemini/tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

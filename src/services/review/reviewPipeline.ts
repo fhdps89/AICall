@@ -102,7 +102,8 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
         for (const chunk of sortedChunks) {
           try {
             const url = chunk.storageUrl || `/api/recordings/file?path=${encodeURIComponent(chunk.path)}`;
-            const res = await fetch(url);
+            // Server-stored fallback chunks need the auth token; Firebase Storage URLs do not.
+            const res = url.startsWith("/api/") ? await authFetch(url) : await fetch(url);
             if (res.ok) {
               const b = await res.blob();
               downloaded.push(b);

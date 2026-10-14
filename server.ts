@@ -1,14 +1,13 @@
 import express from 'express';
 import type { Request, Response } from 'express';
 import http from 'http';
-import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { GoogleGenAI, Modality, Type } from '@google/genai';
-import { requireAuth } from './server/auth.ts';
-import { startLectureJob, readLectureState, lectureAudioPath, kstToday } from './server/lecture.ts';
+import { requireAuth, verifyFirebaseIdToken } from './server/auth.ts';
+import { DATA_DIR, startLectureJob, readLectureState, lectureAudioPath, kstToday } from './server/lecture.ts';
 import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive } from './server/sttBench.ts';
 import { isValidFeedSecret, writeFeedSync, feedForSecret, buildFeedToday, feedAudioFile, renderFeedHtml } from './server/feed.ts';
 
@@ -19,7 +18,7 @@ const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const isProd = process.env.NODE_ENV === 'production';
 
-app.use(cors());
+// CORS: no cross-origin access needed (SPA is same-origin; feed is fetched server-to-server).
 app.use(express.json({ limit: '10mb' }));
 
 // Target Native Audio Dialog Model (Part B-1: gemini-3.8-live)
@@ -191,7 +190,7 @@ app.get('/api/gemini/status', async (req: Request, res: Response) => {
 });
 
 // Ephemeral token endpoint for browser-direct Gemini Live connection (B-2 requirement 3 & 2-1)
-app.post('/api/gemini/token', async (req: Request, res: Response) => {
+app.post('/api/gemini/token', requireAuth, async (req: Request, res: Response) => {
   try {
     const key = resolveGeminiApiKey();
     if (!key || key.startsWith('MY_')) {
@@ -238,7 +237,7 @@ app.post('/api/gemini/token', async (req: Request, res: Response) => {
 
 
 // 4. Native Gemini Voice Speech (TTS) endpoint
-app.post('/api/gemini/tts', async (req: Request, res: Response) => {
+app.post('/api/gemini/tts', requireAuth, async (req: Request, res: Response) => {
   const start = performance.now();
   const { text, voiceName } = req.body || {};
 
@@ -301,13 +300,14 @@ app.post('/api/gemini/tts', async (req: Request, res: Response) => {
 
 
 // Directory for server-stored chunk fallback
-const RECORDINGS_DIR = path.resolve(__dirname, 'public', 'recordings');
+// Outside public/ so recordings are never served statically; per-user subfolders.
+const RECORDINGS_DIR = path.join(DATA_DIR, 'recordings');
 if (!fs.existsSync(RECORDINGS_DIR)) {
   fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
 }
 
 // B-3 Requirement 2: 1-minute asynchronous partial transcription via gemini-3.5-transcribe VERBATIM
-app.post('/api/gemini/transcribe-partial', async (req: Request, res: Response) => {
+app.post('/api/gemini/transcribe-partial', requireAuth, async (req: Request, res: Response) => {
   const start = performance.now();
   const { sessionId, userId, minuteIndex, timeRange, audioBase64, mimeType = 'audio/webm' } = req.body || {};
 
@@ -371,7 +371,7 @@ interface ActiveSessionTracker {
 const activeSessionsMap = new Map<string, ActiveSessionTracker>();
 
 // Heartbeat / Chunk registration to track active call sessions
-app.post('/api/sessions/heartbeat', (req: Request, res: Response) => {
+app.post('/api/sessions/heartbeat', requireAuth, (req: Request, res: Response) => {
   const { sessionId, userId, status = 'in-progress' } = req.body || {};
   if (sessionId && userId) {
     activeSessionsMap.set(sessionId, {
@@ -398,7 +398,7 @@ setInterval(() => {
 }, 30000);
 
 // Check interrupted sessions status
-app.get('/api/sessions/interrupted-check', (req: Request, res: Response) => {
+app.get('/api/sessions/interrupted-check', requireAuth, (req: Request, res: Response) => {
   const { userId } = req.query;
   const interrupted: string[] = [];
   const now = Date.now();
@@ -417,11 +417,21 @@ app.get('/api/sessions/interrupted-check', (req: Request, res: Response) => {
 });
 
 // Resilient chunk upload endpoint (fallback when client Firebase Storage direct upload is restricted)
-app.post('/api/recordings/upload-chunk', express.raw({ type: ['audio/*', 'application/octet-stream'], limit: '20mb' }), (req: Request, res: Response) => {
+function userRecordingPath(uid: string, relPath: string): string | null {
+  const userDir = path.join(RECORDINGS_DIR, uid.replace(/[^a-zA-Z0-9_\-]/g, '_'));
+  const resolved = path.resolve(userDir, relPath.replace(/[^a-zA-Z0-9_\-\.\/]/g, '_'));
+  return resolved.startsWith(userDir + path.sep) ? resolved : null; // blocks ../ traversal
+}
+
+app.post('/api/recordings/upload-chunk', requireAuth, express.raw({ type: ['audio/*', 'application/octet-stream'], limit: '20mb' }), (req: Request, res: Response) => {
   try {
     const rawBuffer = Buffer.isBuffer(req.body) ? req.body : null;
     const relPath = String(req.query.path || req.headers['x-chunk-path'] || `chunk_${Date.now()}.webm`);
-    const safePath = path.resolve(RECORDINGS_DIR, relPath.replace(/[^a-zA-Z0-9_\-\.\/]/g, '_'));
+    const safePath = userRecordingPath(res.locals.user.uid, relPath);
+    if (!safePath) {
+      res.status(400).json({ ok: false, error: 'invalid path' });
+      return;
+    }
     const safeDir = path.dirname(safePath);
 
     if (!fs.existsSync(safeDir)) {
@@ -445,14 +455,14 @@ app.post('/api/recordings/upload-chunk', express.raw({ type: ['audio/*', 'applic
   }
 });
 
-app.get('/api/recordings/file', (req: Request, res: Response) => {
+app.get('/api/recordings/file', requireAuth, (req: Request, res: Response) => {
   const relPath = String(req.query.path || '');
   if (!relPath) {
     res.status(400).send('Path parameter is required');
     return;
   }
-  const safePath = path.resolve(RECORDINGS_DIR, relPath.replace(/[^a-zA-Z0-9_\-\.\/]/g, '_'));
-  if (fs.existsSync(safePath)) {
+  const safePath = userRecordingPath(res.locals.user.uid, relPath);
+  if (safePath && fs.existsSync(safePath)) {
     res.sendFile(safePath);
   } else {
     res.status(404).send('Audio file not found');
@@ -670,7 +680,7 @@ STRICT ANALYSIS RULES (Part B-4):
 });
 
 // B-6 Requirement 3: Quiz Grading endpoint (TEXT_MODEL = gemini-3.8-flash)
-app.post('/api/quiz/grade', async (req: Request, res: Response) => {
+app.post('/api/quiz/grade', requireAuth, async (req: Request, res: Response) => {
   const { mistakeId, myPhrase, naturalPhrase, reason, answer } = req.body || {};
 
   if (!naturalPhrase || answer === undefined) {
@@ -739,7 +749,7 @@ app.post('/api/quiz/grade', async (req: Request, res: Response) => {
 });
 
 // B-6 Requirement 2: Quiz Flashcard Korean Meaning generator (gemini-3.8-flash)
-app.post('/api/quiz/meaning-ko', async (req: Request, res: Response) => {
+app.post('/api/quiz/meaning-ko', requireAuth, async (req: Request, res: Response) => {
   const { items } = req.body || {};
 
   if (!Array.isArray(items) || items.length === 0) {
@@ -1172,6 +1182,11 @@ app.get(['/healthz', '/api/health', '/health'], (_req: Request, res: Response) =
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Unknown /api routes: JSON 404 instead of falling through to the SPA index.html
+app.use('/api', (_req: Request, res: Response) => {
+  res.status(404).json({ ok: false, error: 'not found' });
+});
+
 // Setup Server & WebSockets for Gemini 2.5 Flash Native Audio Live Dialog
 async function startServer() {
   const server = http.createServer(app);
@@ -1183,9 +1198,19 @@ async function startServer() {
     try {
       const pathname = new URL(request.url || '/', 'http://localhost').pathname;
       if (pathname === '/live' || pathname === '/api/gemini/live') {
-        wss.handleUpgrade(request, socket, head, (ws) => {
-          wss.emit('connection', ws, request);
-        });
+        // Auth: Firebase ID token in ?token= (browsers cannot set headers on WebSocket).
+        const token = new URL(request.url || '/', 'http://localhost').searchParams.get('token') || '';
+        verifyFirebaseIdToken(token)
+          .then(() => {
+            wss.handleUpgrade(request, socket, head, (ws) => {
+              wss.emit('connection', ws, request);
+            });
+          })
+          .catch((err) => {
+            console.warn('[Gemini Live] stage=ws_auth_failed', err?.message || err);
+            socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+            socket.destroy();
+          });
       } else {
         socket.destroy();
       }

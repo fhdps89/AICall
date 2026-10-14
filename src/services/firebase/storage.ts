@@ -1,5 +1,6 @@
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { storage } from "./config";
+import { authFetch } from "../api/authFetch";
 
 /**
  * Upload an audio chunk or full recording to Cloud Storage
@@ -20,15 +21,12 @@ export async function uploadAudioFile(
 
     // Fallback: server upload route
     try {
-      const formData = new FormData();
       const blob = blobOrBuffer instanceof Blob ? blobOrBuffer : new Blob([blobOrBuffer as any]);
-      formData.append("userId", userId);
-      formData.append("path", path);
-      formData.append("audioFile", blob, "chunk.webm");
-
-      const response = await fetch("/api/recordings/upload-chunk", {
+      // Server stores raw bytes under the signed-in user's folder (auth required).
+      const response = await authFetch(`/api/recordings/upload-chunk?path=${encodeURIComponent(path)}`, {
         method: "POST",
-        body: formData,
+        headers: { "Content-Type": "application/octet-stream" },
+        body: blob,
       });
 
       if (!response.ok) {
