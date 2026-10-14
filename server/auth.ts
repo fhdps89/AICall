@@ -77,6 +77,14 @@ export async function verifyFirebaseIdToken(token: string): Promise<AuthedUser> 
   return { uid: String(payload.sub), email };
 }
 
+type AfterAuthHook = (idToken: string, user: AuthedUser) => Promise<void> | void;
+let afterAuthHook: AfterAuthHook | null = null;
+
+/** Run extra work after a successful login check (e.g. loading the user's saved Gemini key). */
+export function setAfterAuthHook(fn: AfterAuthHook): void {
+  afterAuthHook = fn;
+}
+
 /** Express middleware: requires `Authorization: Bearer <Firebase ID token>`. Sets res.locals.user. */
 export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '');
@@ -86,10 +94,18 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   }
   try {
     res.locals.user = await verifyFirebaseIdToken(m[1].trim());
-    next();
   } catch (err: any) {
     res.status(401).json({ ok: false, error: '인증 실패', detail: err?.message });
+    return;
   }
+  if (afterAuthHook) {
+    try {
+      await afterAuthHook(m[1].trim(), res.locals.user);
+    } catch (err: any) {
+      console.warn('[auth] after-auth hook failed:', err?.message || err);
+    }
+  }
+  next();
 }
 
 /** Constant-time string compare (for feed secrets). */

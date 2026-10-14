@@ -22,6 +22,7 @@ import { getAllPendingChunks, LocalRecordingChunk } from "../../services/recordi
 import { ALLOWED_USER_EMAIL } from "../../services/firebase/auth";
 import { FeedSettingsPanel } from "./FeedSettingsPanel";
 import { UsagePanel } from "./UsagePanel";
+import { GeminiKeyPanel } from "./GeminiKeyPanel";
 import { Sparkles, Bell } from "lucide-react";
 
 interface SettingsModalProps {
@@ -44,7 +45,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [formData, setFormData] = useState<PromptPlaceholders>(placeholders);
   const [saving, setSaving] = useState(false);
   const devMode = useDevMode();
-  const [activeTab, setActiveTab] = useState<"prompts" | "models" | "recordings" | "feed" | "usage" | "coach">("prompts");
+  const [activeTab, setActiveTab] = useState<"prompts" | "models" | "recordings" | "feed" | "usage" | "coach" | "geminiKey">("prompts");
   const [coachNudges, setCoachNudges] = useState<string[]>(["weekly", "absence2d"]);
   const [enablePartialStt, setEnablePartialStt] = useState<boolean>(() => {
     return localStorage.getItem("onecall_enable_partial_transcribe") !== "false";
@@ -209,6 +210,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           >
             코치 알림 (넛지)
           </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("geminiKey")}
+            className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
+              activeTab === "geminiKey"
+                ? "border-amber-400 text-amber-300"
+                : "border-transparent text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            Gemini 키
+          </button>
         </div>
 
         {/* Body */}
@@ -279,6 +291,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               </div>
             </div>
+          ) : activeTab === "geminiKey" ? (
+            <GeminiKeyPanel userId={userId} />
           ) : activeTab === "models" && !devMode ? null : activeTab === "usage" ? (
             <UsagePanel userId={userId} />
           ) : activeTab === "feed" ? (

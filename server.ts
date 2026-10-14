@@ -6,7 +6,8 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { GoogleGenAI, Modality, Type } from '@google/genai';
-import { requireAuth, verifyFirebaseIdToken } from './server/auth.ts';
+import { requireAuth, verifyFirebaseIdToken, setAfterAuthHook } from './server/auth.ts';
+import { ensureUserGeminiKey, getUserSuppliedKey } from './server/userKey.ts';
 import { geminiLimit, checkLiveSessionStart } from './server/rateLimit.ts';
 import { DATA_DIR, startLectureJob, readLectureState, lectureAudioPath, kstToday } from './server/lecture.ts';
 import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive } from './server/sttBench.ts';
@@ -83,7 +84,7 @@ function parseDotenv(content: string): Array<[string, string]> {
  */
 function resolveGeminiApiKey(): string | undefined {
   const found = resolveGeminiApiKeyInner();
-  if (found && (!process.env.GEMINI_API_KEY || !isUsableKey(process.env.GEMINI_API_KEY))) {
+  if (found && lastKeySource !== 'firestore:user-settings' && (!process.env.GEMINI_API_KEY || !isUsableKey(process.env.GEMINI_API_KEY))) {
     process.env.GEMINI_API_KEY = found;
     process.env.GOOGLE_API_KEY = found;
     process.env.GOOGLE_GENAI_API_KEY = found;
@@ -167,8 +168,25 @@ function resolveGeminiApiKeyInner(): string | undefined {
     }
   } catch { /* ignore */ }
 
+  // Last resort: key the signed-in user saved in app Settings (server/userKey.ts).
+  const userKey = getUserSuppliedKey();
+  if (isUsableKey(userKey)) {
+    lastKeySource = 'firestore:user-settings';
+    return userKey.trim();
+  }
+
   return undefined;
 }
+
+/** True when the platform environment gave no key, so the user-saved key is needed. */
+function needsUserKey(): boolean {
+  const k = resolveGeminiApiKey();
+  return !k || lastKeySource === 'firestore:user-settings';
+}
+
+setAfterAuthHook(async (idToken, user) => {
+  if (needsUserKey()) await ensureUserGeminiKey(idToken, user.uid);
+});
 
 // Initialize GoogleGenAI client with official header
 // Server key only: client-supplied API keys are no longer accepted (no client sends one).
@@ -204,6 +222,14 @@ app.get('/api/gemini/status', async (req: Request, res: Response) => {
     hasServerKey,
     keySource: lastKeySource, // name/location only, never the value
   });
+});
+
+// Re-read the key saved in app Settings right after the user saves or deletes it.
+app.post('/api/gemini/key-refresh', requireAuth, async (req: Request, res: Response) => {
+  const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '');
+  if (m && needsUserKey()) await ensureUserGeminiKey(m[1].trim(), res.locals.user.uid, true);
+  const key = resolveGeminiApiKey();
+  res.json({ ok: true, hasServerKey: isUsableKey(key), keySource: lastKeySource });
 });
 
 // Ephemeral token endpoint for browser-direct Gemini Live connection (B-2 requirement 3 & 2-1)
@@ -1219,7 +1245,8 @@ async function startServer() {
         // Auth: Firebase ID token in ?token= (browsers cannot set headers on WebSocket).
         const token = new URL(request.url || '/', 'http://localhost').searchParams.get('token') || '';
         verifyFirebaseIdToken(token)
-          .then((user) => {
+          .then(async (user) => {
+            if (needsUserKey()) await ensureUserGeminiKey(token, user.uid).catch(() => {});
             const lim = checkLiveSessionStart(user.uid);
             if (!lim.ok) {
               console.warn('[Gemini Live] stage=ws_rate_limited', user.uid);
@@ -1283,7 +1310,7 @@ async function startServer() {
             clientWs.send(JSON.stringify({
               type: 'fallback_required',
               error: 'API Key not configured',
-              userMessage: '서버가 Gemini 키를 찾지 못했어요. AI Studio Secrets의 GEMINI_API_KEY를 확인하고 다시 Publish해 주세요.',
+              userMessage: '서버가 Gemini 키를 찾지 못했어요. 설정 → Gemini 키에서 키를 저장한 뒤 다시 걸어 주세요.',
             }));
             setTimeout(() => { try { clientWs.close(1011, 'no api key'); } catch { /* ignore */ } }, 100);
             return;

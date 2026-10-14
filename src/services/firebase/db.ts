@@ -1299,3 +1299,24 @@ export async function advanceGoalAfterCompletedCall(
   const nextLessonIndex = completedLessonIndex + 1;
   await updateGoalProgress(userId, goalId, nextLessonIndex);
 }
+
+// ---- Gemini key fallback (deployed server has no key from AI Studio Secrets) ----
+// Stored only in the user's own Firestore doc; the server reads it with the user's ID token.
+
+export async function saveUserGeminiKey(userId: string, apiKey: string): Promise<void> {
+  await setDoc(doc(db, "users", userId, "private", "gemini"), {
+    apiKey: apiKey.trim(),
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+export async function deleteUserGeminiKey(userId: string): Promise<void> {
+  await deleteDoc(doc(db, "users", userId, "private", "gemini"));
+}
+
+/** Returns the last 4 characters of the saved key, or null when none is saved. */
+export async function getUserGeminiKeyHint(userId: string): Promise<string | null> {
+  const snap = await getDoc(doc(db, "users", userId, "private", "gemini"));
+  const key = snap.exists() ? String(snap.data()?.apiKey || "") : "";
+  return key ? key.slice(-4) : null;
+}
