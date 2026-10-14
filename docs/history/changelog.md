@@ -4,6 +4,15 @@
 
 ---
 
+### [2026-10-14 KST] v2.7.4 — 배포 서버 Gemini 키 우회 (GitHub PR, Claude)
+- **문제 원인 (Root Cause)**: AI Studio에서 Publish한 서버(aicall.ai.studio)에 Secrets의 키가 전달되지 않음. `/api/gemini/status` 결과 `hasServerKey:false`, `keySource:"none"`(환경 변수·파일·/proc 어디에도 쓸 수 있는 키 없음). 코드가 아닌 AI Studio 쪽 문제로, Google 포럼에도 같은 신고가 있고 공식 해결책은 없음.
+- **적용된 수정 내역 (Changes)**:
+  - `server/userKey.ts`(신규): 로그인한 사용자가 저장한 키를 Firestore REST(`users/{uid}/private/gemini`)에서 사용자 본인 토큰으로 읽어 서버 메모리에만 보관(10분 캐시). 배포 환경에 진짜 키가 있으면 그 키가 항상 우선.
+  - `server/auth.ts`: 로그인 확인 직후 실행되는 훅(`setAfterAuthHook`). `server.ts`: 키 찾기 마지막 단계에 사용자 저장 키 추가, `/live` 연결 때도 읽음, `/api/gemini/key-refresh` 추가, 키 없음 안내 문구를 "설정 → Gemini 키"로 변경.
+  - 설정 화면에 **Gemini 키** 탭(`src/ui/settings/GeminiKeyPanel.tsx`): 키 저장·삭제, 현재 어느 키로 통화하는지 표시.
+
+---
+
 ### [2026-10-14 KST] v2.7.3 — 저장소 검수 반영 (GitHub PR, Claude)
 - **문제 원인 (Root Cause)**:
   - 녹음 10초 조각은 각각 완결된 WebM 파일인데, 받아쓰기 전에 바이트로 이어 붙였음. 이렇게 만든 파일은 앞부분만 읽혀서(시험: 3초×3개 → 5.9초만 해독) 기록용 받아쓰기에서 말이 빠질 수 있었음.

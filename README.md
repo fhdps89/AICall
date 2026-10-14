@@ -1,6 +1,6 @@
 # One Call English — AI 1:1 전화영어 (옛 이름: 오늘도 한 통)
 
-> **버전**: `v2.7.3` | **최종 갱신**: 2026-10-14 (KST)
+> **버전**: `v2.7.4` | **최종 갱신**: 2026-10-14 (KST)
 > **기준 기획**: [`docs/plan/implementation_plan_v4.md`](./docs/plan/implementation_plan_v4.md) Part B · 진행 가이드 [`docs/plan/ai-studio-build-guide.md`](./docs/plan/ai-studio-build-guide.md)
 > 아키텍처와 버전 기록: [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) · 상세 변경 기록: [`docs/history/changelog.md`](./docs/history/changelog.md)
 
@@ -53,6 +53,8 @@ npm start          # NODE_ENV=production 에서 dist/ 를 서빙
 ```
 
 서버에는 `GEMINI_API_KEY`가 있어야 합니다(AI Studio: Settings → Secrets). 상태 확인: `/api/gemini/status`(키 값은 보여 주지 않고 찾았는지와 위치만 표시).
+
+**배포 서버에 키가 안 들어갈 때**(2026-10 현재 AI Studio Publish가 Secrets를 서버에 전달하지 않는 문제): 앱의 설정 → **Gemini 키** 탭에서 키를 저장하면 됩니다. 키는 내 계정 Firestore(`users/{uid}/private/gemini`)에만 저장되고, 서버는 로그인 토큰으로 읽어 메모리에만 둡니다(`server/userKey.ts`). 배포 환경에 진짜 키가 생기면 그 키가 우선이고, 이때 `keySource`가 `firestore:user-settings`가 아닌 값으로 바뀝니다.
 
 ## AI Studio ↔ GitHub 작업 규칙
 - GitHub에서 PR을 병합했다면, **AI Studio에서 먼저 GitHub 변경을 가져오기(pull)** 한 뒤에 AI Studio에서 작업하세요. 가져오지 않고 올리면(push) AI Studio의 옛 파일이 GitHub의 새 파일을 덮어씁니다(2026-10-14에 `package-lock.json`이 이렇게 되돌아가 CI가 실패했음).
