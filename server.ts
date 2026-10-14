@@ -10,6 +10,7 @@ import { requireAuth, verifyFirebaseIdToken } from './server/auth.ts';
 import { geminiLimit, checkLiveSessionStart } from './server/rateLimit.ts';
 import { DATA_DIR, startLectureJob, readLectureState, lectureAudioPath, kstToday } from './server/lecture.ts';
 import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive } from './server/sttBench.ts';
+import { LIVE_MODEL, TEXT_MODEL, GEMINI_STT_MODEL, GEMINI_TTS_LITE_MODEL } from './src/config/models.ts';
 import { isValidFeedSecret, writeFeedSync, feedForSecret, buildFeedToday, feedAudioFile, renderFeedHtml } from './server/feed.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -22,14 +23,14 @@ const isProd = process.env.NODE_ENV === 'production';
 // CORS: no cross-origin access needed (SPA is same-origin; feed is fetched server-to-server).
 app.use(express.json({ limit: '10mb' }));
 
-// Target Native Audio Dialog Model (Part B-1: gemini-3.8-live)
-const LIVE_MODELS = ['gemini-3.8-live'];
-const NATIVE_AUDIO_MODEL = 'gemini-3.8-live';
+// Model names come from the single config file (Part B-1: src/config/models.ts).
+const LIVE_MODELS: string[] = [LIVE_MODEL];
+const NATIVE_AUDIO_MODEL: string = LIVE_MODEL;
 // Server-side Live connect timeout; shorter than the client's proxy ready timeout.
 const LIVE_CONNECT_TIMEOUT_MS = 10000;
-const FALLBACK_CHAT_MODEL = 'gemini-3.8-flash';
-const FALLBACK_TTS_MODEL = 'gemini-3.8-flash-lite-tts';
-const TRANSCRIBE_MODEL = 'gemini-3.5-transcribe';
+const FALLBACK_CHAT_MODEL = TEXT_MODEL;
+const FALLBACK_TTS_MODEL = GEMINI_TTS_LITE_MODEL;
+const TRANSCRIBE_MODEL = GEMINI_STT_MODEL;
 
 // Dynamic Build Version tracking mtime in KST
 export function getBuildVersion(): string {
@@ -195,7 +196,7 @@ app.get('/api/gemini/status', async (req: Request, res: Response) => {
     buildVersion: getBuildVersion(),
     defaultModel: NATIVE_AUDIO_MODEL,
     liveModel: NATIVE_AUDIO_MODEL,
-    modelName: 'Gemini 3.8 Live Native Audio Dialog',
+    modelName: `${NATIVE_AUDIO_MODEL} (Live native audio)`,
     ttsModel: FALLBACK_TTS_MODEL,
     transcribeModel: TRANSCRIBE_MODEL,
     liveSupported: true,
@@ -1203,7 +1204,7 @@ app.use('/api', (_req: Request, res: Response) => {
   res.status(404).json({ ok: false, error: 'not found' });
 });
 
-// Setup Server & WebSockets for Gemini 2.5 Flash Native Audio Live Dialog
+// Setup Server & WebSockets for the Gemini Live native audio dialog (LIVE_MODEL)
 async function startServer() {
   const server = http.createServer(app);
 
@@ -1272,7 +1273,7 @@ async function startServer() {
             const match = validVoices.find(v => v.toLowerCase() === msg.voiceName.trim().toLowerCase());
             if (match) voiceName = match;
           }
-          const systemInstruction = msg.systemInstruction || '너는 다정하고 따뜻하게 통화하는 한국어 친구야. 자연스럽고 짧게 구어체로 답해줘.';
+          const systemInstruction = msg.systemInstruction || 'You are a friendly English conversation tutor on a phone call. Speak natural, simple American English in short turns, and keep the learner talking.';
 
           console.log('[Gemini Live] stage=init_received');
           const ai = createGenAI();
@@ -1454,7 +1455,7 @@ async function startServer() {
             clientWs.send(JSON.stringify({
               type: 'ready',
               model: activeModel,
-              modelName: 'Gemini 3.8 Live Native Audio',
+              modelName: `${activeModel} (Live native audio)`,
               languageLock: activeLock,
             }));
           } else {
@@ -1548,7 +1549,7 @@ async function startServer() {
   }
 
   server.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Full-Stack Server] Gemini 2.5 Flash Native Audio Dialog running on http://0.0.0.0:${PORT}`);
+    console.log(`[Full-Stack Server] One Call English (${NATIVE_AUDIO_MODEL}) running on http://0.0.0.0:${PORT}`);
   });
 }
 

@@ -1,6 +1,7 @@
 /**
  * Model Configuration & Provider Constants
  * Strictly follows Part B-1 and Part B-10 specifications.
+ * Single source of model names for BOTH the client and the server (server.ts, server/*.ts import this file).
  * DO NOT change the model names!
  */
 
@@ -16,6 +17,8 @@ export const ASSEMBLYAI_STT_MODEL = "universal-3-5-pro" as const;
 export type TtsEngineType = "gemini" | "elevenlabs";
 export const DEFAULT_TTS_ENGINE: TtsEngineType = "gemini";
 export const GEMINI_TTS_MODEL = "gemini-3.8-flash-tts" as const;
+/** Short single-phrase playback ("발음 듣기" on the review screen): cheaper/faster lite TTS. */
+export const GEMINI_TTS_LITE_MODEL = "gemini-3.8-flash-lite-tts" as const;
 
 /**
  * Standard pricing unit rates for Part B-10 usage & cost estimation
