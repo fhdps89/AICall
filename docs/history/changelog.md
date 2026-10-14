@@ -4,6 +4,17 @@
 
 ---
 
+### [2026-10-15 KST] v2.7.8 — 아침 피드 404 수정: 피드 설정 Firestore 백업 (GitHub PR, Claude)
+- **문제 원인 (Root Cause)**: 피드 설정(비밀값·강의 후보 실수)을 서버의 `.data/feed.json`에만 저장했음. Cloud Run은 밤새 요청이 없으면 서버를 내렸다가 새로 띄우는데, 이때 `.data/`가 비어서 6:40 그록봇 요청이 404. 앱을 열면 설정이 다시 보내져서 정상으로 돌아왔음.
+- **적용된 수정 내역 (Changes)**:
+  - `server/feedStore.ts`(신규): `/api/feed/sync` 때 사용자 로그인 토큰으로 Firestore `feeds/{id}`에 백업. 문서 id와 암호화 키(AES-256-GCM)는 피드 비밀값에서 각각 따로 만들어서, 비밀값 없이는 문서를 찾거나 읽을 수 없음.
+  - `server/feed.ts` `loadFeedForSecret`: 로컬 파일이 없으면 백업을 로그인 없이 읽어 복원. 피드 페이지·오디오 경로가 이걸 사용.
+  - 설정에서 비밀값을 바꾸면 예전 백업을 지워서 옛 주소가 계속 열리지 않게 함(`feedService.ts` → `previousSecret`).
+  - `firestore.rules`: `feeds/{feedId}` 정확한 id로 읽기만 공개(목록 불가), 쓰기·삭제는 허용 계정 본인만. **AI Studio에서 규칙 배포가 필요함.**
+- **남은 한계**: 새로 뜬 서버는 Gemini 키를 모름(키는 로그인 요청이 와야 불러옴). 키를 백업에 넣을지는 찬식 님 결정 대기.
+
+---
+
 ### [2026-10-14 KST] v2.7.7 — 블루이 첫 통화 피드백 반영 (GitHub PR, Claude)
 - **문제 원인 (Root Cause)**:
   - 아침 강의 실패: `gemini-3.8-flash-tts` 2인 음성 요청이 400 "Multi-speaker generation requests must specify speech_metadata.speaker for each text part". 대본 전체를 한 덩어리 글로 보냈기 때문.
