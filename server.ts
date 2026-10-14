@@ -155,11 +155,9 @@ function resolveGeminiApiKeyInner(): string | undefined {
 }
 
 // Initialize GoogleGenAI client with official header
-function createGenAI(apiKeyOverride?: string) {
-  const resolved = resolveGeminiApiKey();
-  const apiKey = (apiKeyOverride && apiKeyOverride.trim().length > 0)
-    ? apiKeyOverride.trim()
-    : resolved;
+// Server key only: client-supplied API keys are no longer accepted (no client sends one).
+function createGenAI() {
+  const apiKey = resolveGeminiApiKey();
 
   if (!isUsableKey(apiKey)) return null;
 
@@ -242,14 +240,14 @@ app.post('/api/gemini/token', async (req: Request, res: Response) => {
 // 4. Native Gemini Voice Speech (TTS) endpoint
 app.post('/api/gemini/tts', async (req: Request, res: Response) => {
   const start = performance.now();
-  const { text, voiceName, customApiKey } = req.body || {};
+  const { text, voiceName } = req.body || {};
 
   if (!text || typeof text !== 'string' || !text.trim()) {
     res.status(400).json({ error: '변환할 텍스트가 없습니다.' });
     return;
   }
 
-  const ai = createGenAI(customApiKey);
+  const ai = createGenAI();
   if (!ai) {
     res.status(500).json({ error: 'Gemini 서버 연동이 준비되지 않았습니다.' });
     return;
@@ -311,14 +309,14 @@ if (!fs.existsSync(RECORDINGS_DIR)) {
 // B-3 Requirement 2: 1-minute asynchronous partial transcription via gemini-3.5-transcribe VERBATIM
 app.post('/api/gemini/transcribe-partial', async (req: Request, res: Response) => {
   const start = performance.now();
-  const { sessionId, userId, minuteIndex, timeRange, audioBase64, mimeType = 'audio/webm', customApiKey } = req.body || {};
+  const { sessionId, userId, minuteIndex, timeRange, audioBase64, mimeType = 'audio/webm' } = req.body || {};
 
   if (!audioBase64 || typeof audioBase64 !== 'string') {
     res.status(400).json({ ok: false, error: '변환할 오디오 데이터가 없습니다.' });
     return;
   }
 
-  const ai = createGenAI(customApiKey);
+  const ai = createGenAI();
   if (!ai) {
     res.status(500).json({ ok: false, error: 'Gemini 서버 연동이 준비되지 않았습니다.' });
     return;
@@ -464,14 +462,14 @@ app.get('/api/recordings/file', (req: Request, res: Response) => {
 // B-4 Final Full-Audio Transcription endpoint via gemini-3.5-transcribe (VERBATIM)
 app.post('/api/gemini/transcribe-final', requireAuth, async (req: Request, res: Response) => {
   const start = performance.now();
-  const { audioBase64, mimeType = 'audio/webm', customApiKey } = req.body || {};
+  const { audioBase64, mimeType = 'audio/webm' } = req.body || {};
 
   if (!audioBase64 || typeof audioBase64 !== 'string') {
     res.status(400).json({ ok: false, error: '변환할 오디오 데이터가 없습니다.' });
     return;
   }
 
-  const ai = createGenAI(customApiKey);
+  const ai = createGenAI();
   if (!ai) {
     res.status(500).json({ ok: false, error: 'Gemini 서버 연동이 준비되지 않았습니다.' });
     return;
@@ -526,10 +524,9 @@ app.post('/api/review', requireAuth, async (req: Request, res: Response) => {
     todayLessonPrompt = '',
     reviewingMistakes = [], // Existing reviewing mistakes for detecting usedCorrectly
     graduatedMistakes = [], // Existing graduated mistakes for detecting repeatedMistakes
-    customApiKey,
   } = req.body || {};
 
-  const ai = createGenAI(customApiKey);
+  const ai = createGenAI();
   if (!ai) {
     res.status(503).json({ ok: false, code: 'NO_SERVER_KEY', error: '서버에 Gemini 키가 없어요. AI Studio Secrets에 GEMINI_API_KEY를 넣어 주세요.' });
     return;
@@ -674,14 +671,14 @@ STRICT ANALYSIS RULES (Part B-4):
 
 // B-6 Requirement 3: Quiz Grading endpoint (TEXT_MODEL = gemini-3.8-flash)
 app.post('/api/quiz/grade', async (req: Request, res: Response) => {
-  const { mistakeId, myPhrase, naturalPhrase, reason, answer, customApiKey } = req.body || {};
+  const { mistakeId, myPhrase, naturalPhrase, reason, answer } = req.body || {};
 
   if (!naturalPhrase || answer === undefined) {
     res.status(400).json({ ok: false, error: 'naturalPhrase and answer are required' });
     return;
   }
 
-  const ai = createGenAI(customApiKey);
+  const ai = createGenAI();
   if (!ai) {
     res.status(500).json({ ok: false, error: 'Gemini API 연동이 준비되지 않았습니다.' });
     return;
@@ -743,14 +740,14 @@ app.post('/api/quiz/grade', async (req: Request, res: Response) => {
 
 // B-6 Requirement 2: Quiz Flashcard Korean Meaning generator (gemini-3.8-flash)
 app.post('/api/quiz/meaning-ko', async (req: Request, res: Response) => {
-  const { items, customApiKey } = req.body || {};
+  const { items } = req.body || {};
 
   if (!Array.isArray(items) || items.length === 0) {
     res.status(400).json({ ok: false, error: 'items array is required' });
     return;
   }
 
-  const ai = createGenAI(customApiKey);
+  const ai = createGenAI();
   if (!ai) {
     res.status(500).json({ ok: false, error: 'Gemini API 연동이 준비되지 않았습니다.' });
     return;
@@ -803,14 +800,14 @@ ${listStr}
 
 // B-9 Requirement 4: Coach LLM chat endpoint (gemini-3.8-flash + function calling)
 app.post('/api/coach/chat', requireAuth, async (req: Request, res: Response) => {
-  const { text, plan, goals, mistakeStats, recentSessions, memory, history = [], customApiKey } = req.body || {};
+  const { text, plan, goals, mistakeStats, recentSessions, memory, history = [] } = req.body || {};
 
   if (!text || typeof text !== 'string' || !text.trim()) {
     res.status(400).json({ ok: false, error: '메시지를 입력해 주세요.' });
     return;
   }
 
-  const ai = createGenAI(customApiKey);
+  const ai = createGenAI();
   if (!ai) {
     res.status(500).json({ ok: false, error: 'Gemini API 연동이 준비되지 않았습니다.' });
     return;
@@ -1220,7 +1217,6 @@ async function startServer() {
 
         // Init message to start Native Audio session
         if (msg.type === 'init') {
-          const customApiKey = msg.apiKey;
           const validVoices = ['Kore', 'Puck', 'Charon', 'Fenrir', 'Zephyr'];
           let voiceName = 'Kore';
           if (typeof msg.voiceName === 'string') {
@@ -1230,7 +1226,7 @@ async function startServer() {
           const systemInstruction = msg.systemInstruction || '너는 다정하고 따뜻하게 통화하는 한국어 친구야. 자연스럽고 짧게 구어체로 답해줘.';
 
           console.log('[Gemini Live] stage=init_received');
-          const ai = createGenAI(customApiKey);
+          const ai = createGenAI();
           if (!ai) {
             console.warn('[Gemini Live] stage=no_api_key -> fallback_required');
             clientWs.send(JSON.stringify({
