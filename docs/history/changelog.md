@@ -4,6 +4,12 @@
 
 ---
 
+### [2026-10-14 KST] v2.7.5 — 설정 화면이 열리지 않던 문제 (GitHub PR, Claude)
+- **문제 원인 (Root Cause)**: `SettingsModal.tsx`에서 `if (!isOpen) return null;`이 `useEffect`보다 위에 있었음. 설정을 여는 순간 React 훅 개수가 바뀌어 오류가 나고 화면이 뜨지 않음(2026-10-13 커밋 0c42085부터).
+- **적용된 수정 내역 (Changes)**: 닫혀 있을 때 숨기는 줄을 모든 훅 아래로 옮김.
+
+---
+
 ### [2026-10-14 KST] v2.7.4 — 배포 서버 Gemini 키 우회 (GitHub PR, Claude)
 - **문제 원인 (Root Cause)**: AI Studio에서 Publish한 서버(aicall.ai.studio)에 Secrets의 키가 전달되지 않음. `/api/gemini/status` 결과 `hasServerKey:false`, `keySource:"none"`(환경 변수·파일·/proc 어디에도 쓸 수 있는 키 없음). 코드가 아닌 AI Studio 쪽 문제로, Google 포럼에도 같은 신고가 있고 공식 해결책은 없음.
 - **적용된 수정 내역 (Changes)**:

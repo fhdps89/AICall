@@ -76,8 +76,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
-  if (!isOpen) return null;
-
   // Fetch recordings when tab opened
   useEffect(() => {
     if (activeTab === "recordings" && userId) {
@@ -106,6 +104,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         .finally(() => setLoadingRecordings(false));
     }
   }, [activeTab, userId]);
+
+  // Must stay below every hook: returning before a hook changes the hook count when the
+  // modal opens, and React then throws instead of showing the settings screen.
+  if (!isOpen) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
