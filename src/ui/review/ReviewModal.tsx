@@ -347,7 +347,7 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
           )}
           <ul className="text-xs text-slate-300 leading-relaxed list-disc pl-4 space-y-0.5">
             <li>내일 아침 강의에서 오늘 실수를 다시 들어요.</li>
-            <li>내일 홈의 "퀴즈 풀기"로 맞게 말할 수 있는지 확인해요. 맞히면 단계가 올라가고, 다음 통화에서 맞게 쓰면 졸업해요.</li>
+            <li>내일 홈의 "퀴즈 풀기"로 맞게 말할 수 있는지 확인해요. 맞히면 그 실수는 졸업이에요.</li>
           </ul>
         </div>
 
