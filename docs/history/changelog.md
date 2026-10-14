@@ -13,6 +13,7 @@
   - `server/lecture.ts`: 2인 음성은 말하는 사람마다 한 조각씩 `speechMetadata.speaker`(+style)를 붙여 보냄. 1인 음성에서는 "Coach:" 꼬리표를 읽지 않게 뺌.
   - `src/data/lessonPromptBuilder.ts`: "앱 통화 규칙"을 추가해 원문보다 우선 적용. 채팅용 안내 무시, 오늘 과만 진행, 한 번에 1~2문장과 질문 하나(학습자 70% 이상 말하기), 같은 목소리 유지·억양 흉내 금지·영어 위주, 끝나면 "That's it for today. See you next time."으로 마무리.
   - `ReviewModal.tsx`: "통화 후 할 일" 안내(실수 N개 자동 저장됨, 내일 아침 강의·퀴즈). Keep 복사는 접힌 선택 항목으로 옮김(Google 개인 계정은 Keep API를 쓸 수 없음). `reviewPipeline.ts`: 저장 성공 여부(`mistakesSaved`)를 기록.
+  - `NewCallScreen.tsx`: 오늘 복습 차례인 실수 최대 3개를 통화 지시문에 넣음(기획 B-2 요구 4). 튜터가 그 표현을 쓸 상황을 만들고, 복기에서 맞게 쓰면 졸업. 불러오기가 3초 넘게 걸리면 빈 목록으로 바로 통화 시작.
 
 ---
 

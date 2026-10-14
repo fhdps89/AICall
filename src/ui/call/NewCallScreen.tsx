@@ -6,6 +6,8 @@ import {
   createCallSession,
   finalizeCallSession,
   updateSessionLiveTranscript,
+  getDueMistakes,
+  MistakeData,
 } from "../../services/firebase/db";
 import { PromptPlaceholders } from "../../data/promptCustomizer";
 import { buildTodayLessonSystemPrompt } from "../../data/lessonPromptBuilder";
@@ -120,15 +122,24 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
     setConnectError(null);
     setMicWarning(null);
 
-    const systemPrompt = buildTodayLessonSystemPrompt(
-      goal,
-      lessonIndex,
-      placeholders,
-      [] // No mistakes in vault yet for Phase 1 Step 2
-    );
+    // B-2 req 4: up to 3 mistakes due for review go into the call so the tutor sets up chances
+    // to use them (the post-call review then graduates ones used correctly). Never block the
+    // call for more than 3 s on this.
+    const dueMistakes: Promise<MistakeData[]> = userId
+      ? Promise.race([
+          getDueMistakes(userId).catch(() => [] as MistakeData[]),
+          new Promise<MistakeData[]>((r) => setTimeout(() => r([]), 3000)),
+        ])
+      : Promise.resolve([]);
 
-    provider
-      .connect({
+    dueMistakes
+      .then((due) => {
+        if (isCancelled) return;
+        const reviewTargets = (due || [])
+          .slice(0, 3)
+          .map((m) => ({ id: m.id, myPhrase: m.myPhrase, naturalPhrase: m.naturalPhrase, reason: m.reason }));
+        const systemPrompt = buildTodayLessonSystemPrompt(goal, lessonIndex, placeholders, reviewTargets);
+        return provider.connect({
         sessionId: currentSessionId,
         systemPrompt,
         onMediaStreamReady: (stream) => {
@@ -223,6 +234,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
         onInterrupted: () => {
           setIsSpeakingModel(false);
         },
+        });
       })
       .catch((err) => {
         if (!isCancelled) {
