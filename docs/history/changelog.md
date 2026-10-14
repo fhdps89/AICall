@@ -4,6 +4,12 @@
 
 ---
 
+### [2026-10-15 KST] v2.7.8 — 아침 강의·녹음 오디오가 재생되지 않던 문제 (GitHub PR, Claude)
+- **문제 원인 (Root Cause)**: 강의 오디오와 녹음 파일은 `.data/` 폴더에 저장되는데, Express `res.sendFile`은 기본값으로 "."으로 시작하는 폴더가 들어간 경로를 거부하고 404 "Not Found"를 돌려줌. 강의는 만들어졌지만 앱 플레이어("강의 오디오를 불러오지 못했어요")와 피드 재생 링크가 모두 실패.
+- **적용된 수정 내역 (Changes)**: `server.ts` 강의 오디오(`/api/lecture/audio`), 피드 오디오(`/feed/:secret/audio/:file`), 녹음 파일(`/api/recordings/file`)의 `sendFile`에 `dotfiles: 'allow'` 지정.
+
+---
+
 ### [2026-10-14 KST] v2.7.7 — 블루이 첫 통화 피드백 반영 (GitHub PR, Claude)
 - **문제 원인 (Root Cause)**:
   - 아침 강의 실패: `gemini-3.8-flash-tts` 2인 음성 요청이 400 "Multi-speaker generation requests must specify speech_metadata.speaker for each text part". 대본 전체를 한 덩어리 글로 보냈기 때문.
