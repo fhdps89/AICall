@@ -19,7 +19,7 @@ jobs:
       - name: Typecheck (client)
         run: npm run lint
       - name: Typecheck (server.ts)
-        run: npx tsc --noEmit --module esnext --moduleResolution bundler --target es2022 --types node --skipLibCheck --esModuleInterop server.ts
+        run: npx tsc -p tsconfig.server.json --noEmit
       - name: Build
         run: npm run build
       - name: Test (if present)
