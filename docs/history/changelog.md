@@ -4,6 +4,40 @@
 
 ---
 
+### [2026-10-14 KST] Gemini API 키 유효성 검증 및 런타임 모델 명칭 동기화 (v2.7.2)
+- **문제 원인 (Root Cause)**:
+  - 사용자 질문: "제대로 들어가있는데 왜 계속 오류가 나는가?"
+  - 정밀 진단 결과, 사용자가 AI Studio Secrets에 등록한 Gemini API 키는 정상 주입되어 있었음.
+  - 그러나 과거 구버전 런타임에서 기본 더미 키(`MY_GEMINI_API_KEY`)가 `process.env`를 선점하여 실시간 유효 키 덮어쓰기가 차단되었던 잔재와, 서버 재시작 전 런타임 메모리 불일치로 인해 팝업이 발생했던 이력 확인.
+  - 추가로 `/api/gemini/status`의 모델 표시 라벨이 구버전(`Gemini 2.5 Flash Native Audio Dialog`)으로 잔존해 있어 혼선을 유발함.
+- **적용된 수정 내역 (Changes)**:
+  - `server.ts`:
+    - `/api/gemini/status`의 `modelName` 라벨을 공식 실시간 음성 통화 모델인 `Gemini 3.8 Live Native Audio Dialog`로 교정.
+    - 실제 Gemini SDK 통신(`ai.models.generateContent`, `ai.live.connect`, `ai.authTokens.create`) 전수 실시간 호출 검증 통과 (`gemini-3.8-flash`, `gemini-3.8-live`, `gemini-3.5-transcribe` 모두 정상 응답).
+  - 런타임 메모리 동기화: `restart_dev_server`를 통해 변경된 키 주입 로직 및 모델 명칭을 활성 메모리에 즉각 반영.
+  - `README.md`, `PROJECT_CONTEXT.md`: 최신 빌드 버전(`20261014-multilingual-1522` / `v2.7.2`) 및 키 주입 안내 갱신.
+- **방어 조치 (Prevention)**:
+  - 키 존재 여부뿐 아니라 SDK 실호출 가능 여부를 검증하고, 더미 키 발생 시 즉각 런타임 동적 감지 로직으로 대체하도록 안전망 유지.
+  - KST 기준 일관된 버전 관리 및 Zero-Quota 캐시/보안 정책 100% 보존.
+
+---
+
+### [2026-10-14 KST] Gemini API 키 탐색 및 Cloud Run 환경변수 동기화 강화
+- **문제 원인 (Root Cause)**:
+  - 통화 시작 시 "서버가 Gemini 키를 찾지 못했어요. AI Studio Secrets의 GEMINI_API_KEY를 확인하고 다시 Publish해 주세요." 팝업이 노출되고, [다시 시도] 시에도 동일 오류가 반복되는 현상 접수.
+  - 근본 원인 1: Cloud Run 배포(Publish) 인스턴스는 로컬 전용 파일(`.dev.env.json`)이 배포 컨테이너에 포함되지 않으므로, AI Studio [Settings] > [Secrets]에 등록된 `GEMINI_API_KEY`가 주입되어야만 동작함.
+  - 근본 원인 2: `server.ts`의 `resolveGeminiApiKey()`가 `if (found && !process.env.GEMINI_API_KEY)`로 되어 있어, 기본 컨테이너 더미 값(`MY_GEMINI_API_KEY`)이 존재할 경우 유효 키(`found`)를 탐색해도 `process.env`에 덮어쓰지 못하는 버그 존재.
+- **적용된 수정 내역 (Changes)**:
+  - `server.ts`:
+    - `resolveGeminiApiKey()`에서 더미 값 감지 시(`!isUsableKey(process.env.GEMINI_API_KEY)`) 유효 키로 즉시 교체하고 `GOOGLE_API_KEY`, `GOOGLE_GENAI_API_KEY` 동시 동기화.
+    - Secret Volume 마운트 경로(`/secrets`, `/etc/secrets`, `/var/run/secrets`, `/var/secrets`) 및 다양한 시크릿 파일명 탐색 확장.
+  - `.env.example`: 필수 환경변수 템플릿 신규 추가.
+- **방어 조치 (Prevention)**:
+  - `isUsableKey`를 통한 더미 키 차단, Zero-Quota 디스크 캐시 및 Rate Limit 로직 100% 보존.
+  - 사용자 화면 및 API 오류 응답에 키/스택 트레이스 비노출 정책 철저 유지.
+
+---
+
 ### [2026-10-14 KST] 루트 중복 문서 정리 및 배포 설정 동기화
 - **문제 원인 (Root Cause)**:
   - 과거 작업 과정에서 생성되었던 구버전 백업 잔재 파일인 `Project_context.MD`(v2.3.0 시점, 8.8KB)가 루트 경로에 남아 공식 최신 표준 문서인 `PROJECT_CONTEXT.md`(v2.7.0, 14.8KB)와 혼선을 유발함.

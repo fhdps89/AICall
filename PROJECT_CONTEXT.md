@@ -1,12 +1,19 @@
 # 📖 프로젝트 컨텍스트 및 히스토리 (Project Context)
 
 > **프로젝트**: 「오늘도 한 통」 (One Call English) — AI 1:1 전화영어 올인원 랩  
-> **현재 버전**: `v2.7.0` | **공식 빌드 버전**: `20261014-multilingual-1330` | **최종 갱신**: 2026-10-14 (KST)  
+> **현재 버전**: `v2.7.2` | **공식 빌드 버전**: `20261014-multilingual-1522` | **최종 갱신**: 2026-10-14 (KST)  
 > **관리 규칙**: `README.md` 변경 시 본 문서의 아키텍처 및 히스토리를 함께 최신화하며, 모든 일시는 한국 표준시(KST)를 기준으로 합니다.
 
 ---
 
-## 0. Phase 3: B-9 3단계 코치 & 스케줄 자동화 아키텍처 (2026-10-14 KST)
+## 0. Gemini API Key 런타임 동적 주입 및 검증 체계 (2026-10-14 KST)
+- **더미 환경변수 방어 교체**: AI Studio 기본 컨테이너의 `MY_GEMINI_API_KEY` 더미 값을 감지하여, 유효한 키 탐색 시 `process.env.GEMINI_API_KEY` 및 `GOOGLE_API_KEY`, `GOOGLE_GENAI_API_KEY`를 즉시 실시간 동기화.
+- **다중 시크릿 탐색**: `.dev.env.json`, `.env`, Secret Manager 볼륨 마운트(`/secrets`, `/etc/secrets` 등) 전수 스캔.
+- **상태 엔드포인트 정합성**: `/api/gemini/status`의 모델 라벨을 최신 `Gemini 3.8 Live Native Audio Dialog`로 동기화.
+
+---
+
+## 1. Phase 3: B-9 3단계 코치 & 스케줄 자동화 아키텍처 (2026-10-14 KST)
 - **데이터 모델**:
   - `users/{uid}/plan`: `{ weeklyPattern: { mon:[goalId], tue:..., ..., sun:[] }, minutesPerDay, updatedAt }`. 초기 진입 시 기존 4대 목표 루틴으로 자동 1회 초기화.
   - `users/{uid}/planChanges/{id}`: `{ requestedText, summary, before, after, status: proposed|approved|rejected|reverted, at, appliedAt? }`. before/after 스냅샷 격리.

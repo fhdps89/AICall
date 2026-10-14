@@ -82,7 +82,11 @@ function parseDotenv(content: string): Array<[string, string]> {
  */
 function resolveGeminiApiKey(): string | undefined {
   const found = resolveGeminiApiKeyInner();
-  if (found && !process.env.GEMINI_API_KEY) process.env.GEMINI_API_KEY = found;
+  if (found && (!process.env.GEMINI_API_KEY || !isUsableKey(process.env.GEMINI_API_KEY))) {
+    process.env.GEMINI_API_KEY = found;
+    process.env.GOOGLE_API_KEY = found;
+    process.env.GOOGLE_GENAI_API_KEY = found;
+  }
   if (!found) lastKeySource = 'none';
   if (loggedKeySource !== lastKeySource) {
     loggedKeySource = lastKeySource;
@@ -95,7 +99,16 @@ function resolveGeminiApiKeyInner(): string | undefined {
   const fromEnv = pickFromEnvPairs(Object.entries(process.env).map(([k, v]) => [k, v ?? '']), 'env');
   if (fromEnv) return fromEnv;
 
-  const dirs = Array.from(new Set([__dirname, process.cwd(), path.resolve(__dirname, '..'), '/app']));
+  const dirs = Array.from(new Set([
+    __dirname,
+    process.cwd(),
+    path.resolve(__dirname, '..'),
+    '/app',
+    '/secrets',
+    '/etc/secrets',
+    '/var/run/secrets',
+    '/var/secrets',
+  ]));
   for (const dir of dirs) {
     // Check .dev.env.json written by container/environment
     try {
@@ -111,13 +124,15 @@ function resolveGeminiApiKeyInner(): string | undefined {
       }
     } catch { /* ignore */ }
 
-    try {
-      const keyFile = path.resolve(dir, '.gemini_api_key');
-      if (fs.existsSync(keyFile)) {
-        const v = fs.readFileSync(keyFile, 'utf-8').trim();
-        if (isUsableKey(v)) { lastKeySource = `file:${keyFile}`; return v; }
-      }
-    } catch { /* ignore */ }
+    for (const kf of ['.gemini_api_key', 'gemini_api_key', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'api_key']) {
+      try {
+        const keyFile = path.resolve(dir, kf);
+        if (fs.existsSync(keyFile) && fs.statSync(keyFile).isFile()) {
+          const v = fs.readFileSync(keyFile, 'utf-8').trim();
+          if (isUsableKey(v)) { lastKeySource = `file:${keyFile}`; return v; }
+        }
+      } catch { /* ignore */ }
+    }
 
     for (const f of ['.env.local', '.env']) {
       try {
@@ -180,7 +195,7 @@ app.get('/api/gemini/status', async (req: Request, res: Response) => {
     buildVersion: getBuildVersion(),
     defaultModel: NATIVE_AUDIO_MODEL,
     liveModel: NATIVE_AUDIO_MODEL,
-    modelName: 'Gemini 2.5 Flash Native Audio Dialog',
+    modelName: 'Gemini 3.8 Live Native Audio Dialog',
     ttsModel: FALLBACK_TTS_MODEL,
     transcribeModel: TRANSCRIBE_MODEL,
     liveSupported: true,

@@ -1,8 +1,12 @@
 # 오늘도 한 통 (One Call English) — AI 1:1 전화영어 올인원 랩
 
-> **버전**: `v2.7.0` | **빌드**: `20261014-multilingual-1330` | **최종 갱신**: 2026-10-14 (KST)
+> **버전**: `v2.7.2` | **빌드**: `20261014-multilingual-1522` | **최종 갱신**: 2026-10-14 (KST)
 
 여러 도구(Claude, Gemini Live, Google Keep, Grok, ElevenLabs, Telegram)로 분산되어 있던 실전 영어회화 학습 파이프라인을 **단 하나의 통합 웹/모바일 앱에서 원클릭으로 완벽하게 자동화**한 AI 1:1 전화영어 플랫폼입니다.
+
+### 📌 [Gemini API Key & 런타임 실시간 주입 정합성]
+- AI Studio **Settings > Secrets**에 등록된 `GEMINI_API_KEY`가 개발 컨테이너 및 Cloud Run 배포 인스턴스에 정상 연동됩니다.
+- 서버 환경변수 해석 로직(`server.ts`)이 컨테이너 기본 더미 값(`MY_GEMINI_API_KEY`)을 실시간 감지하여 등록된 실제 유효 키로 즉각 교체하며, `/api/gemini/status` 엔드포인트의 모델 라벨(`Gemini 3.8 Live Native Audio Dialog`)을 최신 사양으로 동기화했습니다.
 
 ### 📌 [Phase 3: B-9 3단계 코치 & 스케줄 자동화 완성]
 - **데이터 모델 구축 (`users/{uid}/plan`, `planChanges`, `coachMemory`, `coachMessages`)**:
