@@ -1,11 +1,4 @@
-[One Call English 작업 지시서 2] 기획 v4 기준 남은 정리 (새 기능 없음)
+[One Call English 작업 지시서 2] 앱 이름 정리 (새 기능 없음)
 
-이 앱의 기준 스펙은 저장소 docs/plan/implementation_plan_v4.md의 Part B야. 예전 기획 때 만든 부분 중 아직 남은 세 가지만 정리해 줘. 새 기능은 만들지 마.
-
-1) 텔레그램과 예전 아침 팟캐스트를 지워 줘: server.ts의 /api/telegram/send와 /api/podcast, src/ui/podcast/MorningPodcastModal.tsx와 그 화면을 여는 버튼, 프로필·타입의 telegramBotToken·telegramChatId. 아침 강의는 새로 만든 강의 화면(LectureModal, /api/lecture/*)과 그록봇 피드(/feed/...)만 쓰면 돼. 지우기 전에 다른 화면에서 이 코드를 쓰는 곳이 있는지 먼저 확인해서 알려 줘.
-2) metadata.json의 name을 "One Call English", description을 "AI 코치와 실수 루프로 영어를 키우는 AI 전화영어"로 바꿔.
-3) 예전 받아쓰기 /api/gemini/transcribe의 "한국어(ko-KR)로 고정" 문구를 없애고, 이렇게 바꿔:
-   "Transcribe this audio verbatim in English. Keep every grammar mistake, filler word, repetition and false start exactly as spoken. Do not correct anything. Output only the transcript."
-
-손대지 말 것: src/config/models.ts의 모델 이름, src/voice/의 오디오 처리, docs/plan/ 폴더, 새로 만든 녹음·복기·퀴즈·강의·피드 기능.
-끝나면 README.md와 Project_context.MD의 버전 히스토리에 한 줄로 기록하고, 바꾼 파일 목록과 내가 프리뷰에서 확인할 방법을 알려 줘.
+metadata.json의 name을 "One Call English", description을 "AI 코치와 실수 루프로 영어를 키우는 AI 전화영어"로 바꿔 줘. 다른 파일은 손대지 마.
+끝나면 README.md의 버전 히스토리에 한 줄로 기록해 줘.

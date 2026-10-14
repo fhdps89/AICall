@@ -52,10 +52,10 @@
 
 ## 1-A2. 예전 기획으로 만든 부분 정리 (1-B 전에)
 
-v2.0.0 때 예전 기획으로 만든 텔레그램·아침 팟캐스트, 앱 이름, 예전 받아쓰기의 한국어 고정이 남아 있습니다(10/14 기준). 차이표: [gap-v2.1.0-vs-plan-v4.md](gap-v2.1.0-vs-plan-v4.md).
+10/14 14:30 기준 남은 차이는 앱 이름 하나입니다. 차이표: [gap-v2.1.0-vs-plan-v4.md](gap-v2.1.0-vs-plan-v4.md).
 
 1. [ai-studio-work-order-2.txt](ai-studio-work-order-2.txt) 전체를 복사해 AI Studio 채팅창에 붙여넣기.
-2. **확인**: 설정 화면에 텔레그램 칸이 없어짐 / 예전 팟캐스트 버튼이 없어지고 아침 강의 화면은 그대로 / 앱 이름이 One Call English.
+2. **확인**: AI Studio 앱 목록과 프리뷰 제목이 One Call English.
 
 ---
 
