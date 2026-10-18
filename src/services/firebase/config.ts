@@ -1,6 +1,6 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
-import { getFirestore, doc, getDocFromServer } from "firebase/firestore";
+import { getFirestore, initializeFirestore, doc, getDocFromServer, Firestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 import firebaseConfig from "../../../firebase-applet-config.json";
 
@@ -9,7 +9,17 @@ export const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfi
 
 // Initialize Services
 export const auth = getAuth(app);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+// ignoreUndefinedProperties: drop fields whose value is undefined instead of rejecting the
+// whole write (optional fields like planChangeId / storageUrl were silently failing to save).
+function createDb(): Firestore {
+  try {
+    return initializeFirestore(app, { ignoreUndefinedProperties: true }, firebaseConfig.firestoreDatabaseId);
+  } catch {
+    // Already initialized (e.g. dev hot reload)
+    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+  }
+}
+export const db = createDb();
 export const storage = getStorage(app, firebaseConfig.storageBucket);
 
 /**

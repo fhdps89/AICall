@@ -90,6 +90,14 @@ export function getLiveProvider(): LiveProvider {
   return activeLiveProvider;
 }
 
+/**
+ * A fresh Live provider for one call. Each call needs its own instance: the provider keeps the
+ * call's transcript and session resume handle, which must not leak into the next call.
+ */
+export function createLiveProvider(): LiveProvider {
+  return new GeminiLiveProvider();
+}
+
 export function getSttProvider(_engine: SttEngineType = DEFAULT_STT_ENGINE): SttProvider {
   return activeSttProvider;
 }

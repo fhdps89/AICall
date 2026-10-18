@@ -4,6 +4,7 @@ import {
   setDoc,
   updateDoc,
   deleteDoc,
+  deleteField,
   collection,
   getDocs,
   writeBatch,
@@ -1033,6 +1034,11 @@ export async function applyPlanChange(userId: string, changeId: string): Promise
     throw new Error(`이미 처리된 요청입니다. (현재 상태: ${data.status})`);
   }
 
+  // "before" is recorded now, from the live data, for exactly what this change touches. The
+  // snapshot taken when the coach proposed it can be stale and covers every goal, so reverting
+  // with it would also roll back progress made in between.
+  const before: PlanChangeSnapshot = {};
+
   // 1. Apply plan changes if specified
   if (data.after?.plan) {
     const currentPlan = (await getUserPlan(userId)) || {
@@ -1040,6 +1046,7 @@ export async function applyPlanChange(userId: string, changeId: string): Promise
       minutesPerDay: 25,
       updatedAt: new Date().toISOString(),
     };
+    before.plan = { weeklyPattern: currentPlan.weeklyPattern, minutesPerDay: currentPlan.minutesPerDay };
     const mergedPlan: UserPlanData = {
       weeklyPattern: {
         ...currentPlan.weeklyPattern,
@@ -1053,8 +1060,18 @@ export async function applyPlanChange(userId: string, changeId: string): Promise
 
   // 2. Apply goal patches if specified
   if (data.after?.goals) {
+    before.goals = {};
     for (const [goalId, patch] of Object.entries(data.after.goals)) {
       const gRef = doc(db, "users", userId, "goals", goalId);
+      const gSnap = await getDoc(gRef).catch(() => null);
+      if (gSnap?.exists()) {
+        const g = gSnap.data() as GoalData;
+        before.goals[goalId] = {
+          ...(typeof patch.nextLessonIndex === "number" ? { nextLessonIndex: g.nextLessonIndex } : {}),
+          ...(patch.deadline !== undefined ? { deadline: g.deadline ?? "" } : {}),
+          ...(patch.status ? { status: g.status } : {}),
+        };
+      }
       const updates: any = { updatedAt: new Date().toISOString() };
       if (typeof patch.nextLessonIndex === "number") updates.nextLessonIndex = patch.nextLessonIndex;
       if (patch.deadline !== undefined) updates.deadline = patch.deadline;
@@ -1067,6 +1084,7 @@ export async function applyPlanChange(userId: string, changeId: string): Promise
   await updateDoc(changeRef, {
     status: "approved",
     appliedAt: new Date().toISOString(),
+    before,
   });
 }
 
@@ -1083,32 +1101,47 @@ export async function revertPlanChange(userId: string, changeId: string): Promis
     throw new Error("승인된(approved) 변경사항만 되돌릴 수 있습니다.");
   }
 
-  // 1. Restore before plan if present
-  if (data.before?.plan) {
+  // Only what this change touched (data.after) is restored; everything else, such as lessons
+  // completed on other tracks since the approval, stays as it is now.
+
+  // 1. Restore the plan days / minutes this change set
+  const afterPlan = data.after?.plan;
+  if (afterPlan && data.before?.plan) {
     const currentPlan = (await getUserPlan(userId)) || {
       weeklyPattern: { ...DEFAULT_WEEKLY_PATTERN },
       minutesPerDay: 25,
       updatedAt: new Date().toISOString(),
     };
+    const beforePattern: Partial<WeeklyPattern> = data.before.plan.weeklyPattern || {};
+    const restoredPattern: WeeklyPattern = { ...currentPlan.weeklyPattern };
+    for (const day of Object.keys(afterPlan.weeklyPattern || {}) as Array<keyof WeeklyPattern>) {
+      restoredPattern[day] = beforePattern[day] || DEFAULT_WEEKLY_PATTERN[day] || [];
+    }
     const restoredPlan: UserPlanData = {
-      weeklyPattern: {
-        ...currentPlan.weeklyPattern,
-        ...(data.before.plan.weeklyPattern || {}),
-      },
-      minutesPerDay: data.before.plan.minutesPerDay || currentPlan.minutesPerDay,
+      weeklyPattern: restoredPattern,
+      minutesPerDay:
+        afterPlan.minutesPerDay !== undefined && data.before.plan.minutesPerDay
+          ? data.before.plan.minutesPerDay
+          : currentPlan.minutesPerDay,
       updatedAt: new Date().toISOString(),
     };
     await saveUserPlan(userId, restoredPlan);
   }
 
-  // 2. Restore before goals if present
-  if (data.before?.goals) {
-    for (const [goalId, patch] of Object.entries(data.before.goals)) {
+  // 2. Restore the goal fields this change set
+  if (data.after?.goals) {
+    for (const [goalId, afterPatch] of Object.entries(data.after.goals)) {
+      const beforePatch = data.before?.goals?.[goalId] || {};
       const gRef = doc(db, "users", userId, "goals", goalId);
       const updates: any = { updatedAt: new Date().toISOString() };
-      if (typeof patch.nextLessonIndex === "number") updates.nextLessonIndex = patch.nextLessonIndex;
-      if (patch.deadline !== undefined) updates.deadline = patch.deadline;
-      if (patch.status) updates.status = patch.status;
+      if (typeof afterPatch.nextLessonIndex === "number" && typeof beforePatch.nextLessonIndex === "number") {
+        updates.nextLessonIndex = beforePatch.nextLessonIndex;
+      }
+      if (afterPatch.deadline !== undefined) {
+        // No deadline before → remove the one this change added
+        updates.deadline = beforePatch.deadline ? beforePatch.deadline : deleteField();
+      }
+      if (afterPatch.status && beforePatch.status) updates.status = beforePatch.status;
       await updateDoc(gRef, updates).catch(() => {});
     }
   }

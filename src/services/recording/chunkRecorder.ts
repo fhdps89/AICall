@@ -44,6 +44,10 @@ export class ChunkRecorder {
   private minuteBatchIndex: number = 0;
   private mimeType: string = "audio/webm";
   private sessionRecordedBlobs: Blob[] = [];
+  /** Session the counters above belong to (a restart in the same call keeps counting). */
+  private countersSessionId: string | null = null;
+  /** Settles when the current segment's blob has been collected (its onstop ran). */
+  private currentSegmentDone: Promise<void> = Promise.resolve();
 
   constructor() {
     // Detect preferred audio mimeType
@@ -68,11 +72,16 @@ export class ChunkRecorder {
 
     this.isRunning = true;
     this.options = options;
-    this.chunkIndex = 0;
-    this.minuteBatchIndex = 0;
-    this.accumulatedBlobsForMinute = [];
-    this.accumulatedChunkIndices = [];
-    this.sessionRecordedBlobs = [];
+    // Restarting in the same call ("다시 시도") must continue the chunk numbering and keep the
+    // audio already recorded; otherwise two chunks share an index and the review mixes them up.
+    if (this.countersSessionId !== options.sessionId) {
+      this.countersSessionId = options.sessionId;
+      this.chunkIndex = 0;
+      this.minuteBatchIndex = 0;
+      this.accumulatedBlobsForMinute = [];
+      this.accumulatedChunkIndices = [];
+      this.sessionRecordedBlobs = [];
+    }
 
     // Clone audio tracks so that Live reconnects/cleanups don't stop our background recording
     const audioTracks = stream.getAudioTracks().map((track) => track.clone());
@@ -94,13 +103,22 @@ export class ChunkRecorder {
       this.segmentTimer = null;
     }
 
-    if (this.currentRecorder && this.currentRecorder.state !== "inactive") {
+    const recorder = this.currentRecorder;
+    if (recorder && recorder.state !== "inactive") {
       try {
-        this.currentRecorder.stop();
+        recorder.stop();
       } catch {
         // ignore
       }
     }
+    // Wait until the last segment has been collected (also when its 10 s timer had just
+    // stopped it), so getSessionRecordedBlobs() right after stop() includes the final words.
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      this.currentSegmentDone,
+      new Promise<void>((r) => (timeout = setTimeout(r, 3000))),
+    ]);
+    if (timeout) clearTimeout(timeout);
 
     if (this.stream) {
       this.stream.getTracks().forEach((track) => track.stop());
@@ -138,6 +156,8 @@ export class ChunkRecorder {
 
     const currentIdx = this.chunkIndex++;
     const chunks: Blob[] = [];
+    let segmentDone: () => void = () => {};
+    this.currentSegmentDone = new Promise<void>((r) => (segmentDone = r));
 
     try {
       const recorder = new MediaRecorder(this.stream, { mimeType: this.mimeType });
@@ -152,8 +172,10 @@ export class ChunkRecorder {
       recorder.onstop = async () => {
         if (chunks.length > 0) {
           const finalBlob = new Blob(chunks, { type: this.mimeType });
+          // processChunk adds the blob to sessionRecordedBlobs synchronously, before any await.
           this.processChunk(currentIdx, finalBlob);
         }
+        segmentDone();
 
         // Loop to next segment if still running
         if (this.isRunning) {
@@ -171,6 +193,7 @@ export class ChunkRecorder {
       }, 10000);
     } catch (err: any) {
       console.error("[ChunkRecorder] Error recording 10-second segment:", err);
+      segmentDone();
       this.options?.onError?.(err instanceof Error ? err : new Error(String(err)));
       if (this.isRunning) {
         // Retry in 2 seconds

@@ -206,6 +206,17 @@ export const App: React.FC = () => {
     setShowInitialProgressModal(false);
   };
 
+  // Re-read goals after something changed them in Firestore (call review advanced the lesson,
+  // coach plan change approved/reverted), so 「오늘 수업」 shows the current lesson.
+  const refreshGoals = async () => {
+    if (!user) return;
+    try {
+      setGoals(await getUserGoals(user.uid));
+    } catch (err) {
+      console.warn("[App] Could not refresh goals:", err);
+    }
+  };
+
   // Handle Goal Lesson Change
   const handleUpdateGoalProgress = async (goalId: string, nextLessonIndex: number) => {
     if (!user) return;
@@ -273,6 +284,7 @@ export const App: React.FC = () => {
           liveTranscript: transcripts,
           onProgress: (step) => setReviewProgressStep(step),
         });
+        await refreshGoals();
         setActiveReviewData({
           review: result.review,
           sttFinal: result.sttFinal,
@@ -345,6 +357,7 @@ export const App: React.FC = () => {
           liveTranscript: session.liveTranscript,
           onProgress: (step) => setReviewProgressStep(step),
         });
+        await refreshGoals();
 
         setActiveReviewData({
           review: result.review,
@@ -431,6 +444,7 @@ export const App: React.FC = () => {
         goals={goals}
         placeholders={placeholders}
         onUpdateGoalProgress={handleUpdateGoalProgress}
+        onGoalsChanged={refreshGoals}
         onStartCall={handleStartCall}
         onOpenSettings={() => setShowSettingsModal(true)}
         onLogout={handleLogout}

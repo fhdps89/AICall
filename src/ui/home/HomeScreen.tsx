@@ -56,6 +56,8 @@ interface HomeScreenProps {
   goals: GoalData[];
   placeholders: PromptPlaceholders;
   onUpdateGoalProgress: (goalId: string, nextLessonIndex: number) => Promise<void>;
+  /** Re-read goals from Firestore (after the coach changed a deadline / lesson / status). */
+  onGoalsChanged?: () => Promise<void>;
   onStartCall: (goal: GoalData, lessonIndex: number) => void;
   onOpenSettings: () => void;
   onLogout: () => void;
@@ -66,6 +68,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   goals,
   placeholders,
   onUpdateGoalProgress,
+  onGoalsChanged,
   onStartCall,
   onOpenSettings,
   onLogout,
@@ -869,7 +872,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
           onClose={() => setShowCoachModal(false)}
           goals={goals}
           onPlanUpdated={async () => {
-            await loadPlanAndSettings();
+            await Promise.all([loadPlanAndSettings(), onGoalsChanged?.()]);
           }}
         />
       )}
