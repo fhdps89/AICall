@@ -42,6 +42,15 @@ import { ReviewFlowScreen } from "./ui/review/ReviewFlowScreen";
 import { LiveTranscriptItem } from "./services/providers/types";
 import { Loader2 } from "lucide-react";
 
+/** Settings → 1분 임시 받아쓰기 switch (saved in this browser by SettingsModal). Default on. */
+function isPartialTranscribeEnabled(): boolean {
+  try {
+    return localStorage.getItem("onecall_enable_partial_transcribe") !== "false";
+  } catch {
+    return true;
+  }
+}
+
 interface ActiveReviewState {
   review: SessionReviewData;
   sttFinal?: SttFinalData;
@@ -415,7 +424,7 @@ export const App: React.FC = () => {
         goal={activeCallGoal}
         lessonIndex={activeCallLesson}
         placeholders={placeholders}
-        enablePartialTranscribe={(userProfile as any)?.enablePartialTranscribe !== false}
+        enablePartialTranscribe={isPartialTranscribeEnabled()}
         onEndCall={handleEndCall}
         onExit={() => setActiveCallGoal(null)}
       />

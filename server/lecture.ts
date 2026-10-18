@@ -81,11 +81,18 @@ export function kstToday(): string {
 export function readLectureState(uid: string, date: string): LectureState | null {
   const file = path.join(userDir(uid), `${safeDate(date)}.json`);
   if (!fs.existsSync(file)) return null;
+  let state: LectureState;
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf-8'));
+    state = JSON.parse(fs.readFileSync(file, 'utf-8'));
   } catch {
     return null;
   }
+  // "generating" but no job is running (the server restarted mid-job): report it as failed so
+  // the app offers 「다시 만들기」 and the feed retries, instead of waiting forever.
+  if (state.status === 'generating' && !running.has(`${uid}:${date}`)) {
+    return { ...state, status: 'failed', error: 'INTERRUPTED' };
+  }
+  return state;
 }
 
 function writeLectureState(state: LectureState): void {

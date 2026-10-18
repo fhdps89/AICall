@@ -35,6 +35,7 @@ import {
   MistakeData,
   GoalData,
   advanceGoalAfterCompletedCall,
+  deleteCallMistakesForSession,
 } from "../firebase/db";
 import { PromptPlaceholders } from "../../data/promptCustomizer";
 import { buildTodayLessonSystemPrompt } from "../../data/lessonPromptBuilder";
@@ -214,8 +215,11 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
   try {
     const existing = await getUserMistakes(userId);
     // B-6 requirement 5: Include both reviewing and deferred so deferred mistakes can also graduate quickly
-    reviewingMistakes = existing.filter((m) => m.status === "reviewing" || m.status === "deferred");
-    graduatedMistakes = existing.filter((m) => m.status === "graduated");
+    // Mistakes from an earlier run of this same call's review are not "existing" ones: they are
+    // replaced below, so they must not be graded as used correctly / repeated.
+    const others = existing.filter((m) => m.sessionId !== sessionId);
+    reviewingMistakes = others.filter((m) => m.status === "reviewing" || m.status === "deferred");
+    graduatedMistakes = others.filter((m) => m.status === "graduated");
   } catch (err) {
     console.warn("[ReviewPipeline] Could not load user mistakes:", err);
   }
@@ -276,8 +280,14 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
   }));
 
   try {
+    // Re-running the review for the same call (after an earlier failure) replaces what that run
+    // saved instead of adding duplicates.
+    const removed = await deleteCallMistakesForSession(userId, sessionId);
+    if (removed > 0) console.log(`[ReviewPipeline] Replaced ${removed} mistakes from an earlier review of this call.`);
     if (mistakeDocs.length > 0) {
-      await saveCallMistakes(userId, mistakeDocs);
+      const ids = await saveCallMistakes(userId, mistakeDocs);
+      // Keep each mistake's id in the saved review, so 「이건 내가 한 말이 아니에요」 can remove it.
+      review.mistakes = (review.mistakes || []).map((m, i) => (ids[i] ? { ...m, id: ids[i] } : m));
       console.log(`[ReviewPipeline] Saved ${mistakeDocs.length} new mistakes to mistakes collection.`);
     }
     review.mistakesSaved = true;

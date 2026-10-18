@@ -1332,7 +1332,65 @@ export async function advanceGoalAfterCompletedCall(
   completedLessonIndex: number
 ): Promise<void> {
   const nextLessonIndex = completedLessonIndex + 1;
+  // Never move backwards: reviewing an older unfinished call (e.g. lesson 3 after lesson 4 was
+  // already done) must not reset progress.
+  const snap = await getDoc(doc(db, "users", userId, "goals", goalId));
+  const current = snap.exists() ? Number((snap.data() as GoalData).nextLessonIndex) || 0 : 0;
+  if (current >= nextLessonIndex) return;
   await updateGoalProgress(userId, goalId, nextLessonIndex);
+}
+
+/**
+ * Delete mistakes an earlier, unfinished review run already saved for this call, so running the
+ * review again replaces them instead of adding duplicates. Returns how many were removed.
+ */
+export async function deleteCallMistakesForSession(userId: string, sessionId: string): Promise<number> {
+  const snap = await getDocs(
+    query(collection(db, "users", userId, "mistakes"), where("sessionId", "==", sessionId))
+  );
+  const batch = writeBatch(db);
+  let n = 0;
+  for (const d of snap.docs) {
+    if ((d.data() as MistakeData).source === "call") {
+      batch.delete(d.ref);
+      n++;
+    }
+  }
+  if (n > 0) await batch.commit();
+  return n;
+}
+
+/**
+ * 「이건 내가 한 말이 아니에요」: remove the misheard mistake from the review list (so it never
+ * reaches quiz / lecture) and remember it as hidden in the session's saved review.
+ */
+export async function hideReportedMistake(
+  userId: string,
+  sessionId: string,
+  index: number,
+  myPhrase: string,
+  mistakeId?: string
+): Promise<void> {
+  // 1. The saved mistake document
+  if (mistakeId) {
+    await deleteDoc(doc(db, "users", userId, "mistakes", mistakeId));
+  } else {
+    // Reviews saved before mistake ids were recorded: match by call + phrase
+    const snap = await getDocs(
+      query(collection(db, "users", userId, "mistakes"), where("sessionId", "==", sessionId))
+    );
+    const hit = snap.docs.find((d) => (d.data() as MistakeData).myPhrase === myPhrase);
+    if (hit) await deleteDoc(hit.ref);
+  }
+
+  // 2. The session's review, so reopening it keeps the item hidden
+  const sessionRef = doc(db, "users", userId, "sessions", sessionId);
+  const sSnap = await getDoc(sessionRef);
+  const review = sSnap.exists() ? (sSnap.data() as SessionData).review : undefined;
+  if (review?.mistakes?.[index]) {
+    const mistakes = review.mistakes.map((m, i) => (i === index ? { ...m, hidden: true } : m));
+    await updateDoc(sessionRef, { "review.mistakes": mistakes, updatedAt: new Date().toISOString() });
+  }
 }
 
 // ---- Gemini key fallback (deployed server has no key from AI Studio Secrets) ----
