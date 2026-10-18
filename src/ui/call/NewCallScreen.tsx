@@ -11,8 +11,8 @@ import {
 } from "../../services/firebase/db";
 import { PromptPlaceholders } from "../../data/promptCustomizer";
 import { buildTodayLessonSystemPrompt } from "../../data/lessonPromptBuilder";
-import { getLiveProvider } from "../../services/providers";
-import { LiveCommand, LiveTranscriptItem } from "../../services/providers/types";
+import { createLiveProvider } from "../../services/providers";
+import { LiveCommand, LiveProvider, LiveTranscriptItem } from "../../services/providers/types";
 import { getChunkRecorder } from "../../services/recording/chunkRecorder";
 import {
   PhoneOff,
@@ -29,7 +29,6 @@ import {
   Disc3,
   FileAudio,
 } from "lucide-react";
-import { authFetch } from "../../services/api/authFetch";
 
 const COMMAND_LABELS: Record<string, string> = {
   Done: "끝내기",
@@ -82,7 +81,10 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
   const sessionCreatedRef = useRef<boolean>(false);
 
   const transcriptsEndRef = useRef<HTMLDivElement>(null);
-  const providerRef = useRef(getLiveProvider());
+  // One provider per call screen: "다시 시도" in the same call reuses it (keeps transcript and
+  // resume handle), a new call gets a clean one.
+  const providerRef = useRef<LiveProvider>(null as unknown as LiveProvider);
+  if (!providerRef.current) providerRef.current = createLiveProvider();
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const modelSpeakingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -163,16 +165,6 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
             onChunkRecorded: () => {
               if (isCancelled) return;
               setChunkCount((prev) => prev + 1);
-              // Send heartbeat to server watchdog (B-3 requirement 4)
-              authFetch("/api/sessions/heartbeat", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  sessionId: currentSessionId,
-                  userId,
-                  status: "in-progress",
-                }),
-              }).catch(() => {});
             },
             onPartialStt: (stt) => {
               if (isCancelled) return;
@@ -291,8 +283,9 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
       return;
     }
     const chunkRecorder = getChunkRecorder();
-    const recordedBlobs = chunkRecorder.getSessionRecordedBlobs();
+    // Stop first: stop() waits for the last (partial) chunk, so the final words are included.
     await chunkRecorder.stop();
+    const recordedBlobs = chunkRecorder.getSessionRecordedBlobs();
 
     const finalTranscripts = providerRef.current.getLiveTranscript();
     const stats = providerRef.current.getConnectionStats();

@@ -104,7 +104,16 @@ export async function syncLectureFromServer(uid: string, date = getKSTToday()): 
   const current = await getLecture(uid, date);
   if (current?.status === "ready" && current.audioUrl) return current;
   const { lecture } = await authJson<{ lecture: any }>(`/api/lecture/status?date=${date}`, undefined, "GET");
-  if (!lecture) return current;
+  if (!lecture) {
+    // The server has no record (its .data/ folder was wiped on restart). A Firestore doc still
+    // saying "generating" would otherwise keep the card spinning forever.
+    if (current?.status === "generating") {
+      const failed: LectureDoc = { ...current, status: "failed", error: "INTERRUPTED", updatedAt: new Date().toISOString() };
+      await setDoc(lectureRef(uid, date), failed, { merge: true });
+      return failed;
+    }
+    return current;
+  }
   if (lecture.status !== "ready") {
     const patch: LectureDoc = {
       ...(current || { createdAt: lecture.createdAt }),

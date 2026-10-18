@@ -10,6 +10,9 @@
  * everything in it except uid is AES-256-GCM encrypted with a key derived from the feed
  * secret; the id is a different hash of the secret. Without the secret the document
  * reveals nothing, and whoever holds the secret could already use the feed.
+ * The user's Gemini key from Settings rides along inside the ciphertext (user's choice,
+ * 2026-10-19), so a fresh server can make the morning lecture before anyone signs in.
+ * Whoever holds the feed secret can therefore recover that key.
  */
 import crypto from 'crypto';
 import { firestoreDocUrl } from './userKey.ts';
@@ -17,6 +20,8 @@ import type { FeedSyncState } from './feed.ts';
 
 export interface FeedBackup {
   state: FeedSyncState;
+  /** Gemini key the user saved in Settings, only when that is the key the server uses. */
+  apiKey?: string;
 }
 
 const sha256 = (s: string) => crypto.createHash('sha256').update(s, 'utf8').digest();

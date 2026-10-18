@@ -11,6 +11,7 @@ import { DATA_DIR, kstToday, readLectureState, startLectureJob, lectureAudioPath
 import type { LectureMistakeInput } from './lecture.ts';
 import { safeEqual } from './auth.ts';
 import { loadFeedBackup } from './feedStore.ts';
+import { setUserKeyFromFeed } from './userKey.ts';
 
 const FEED_FILE = path.join(DATA_DIR, 'feed.json');
 const FAILED_RETRY_COOLDOWN_MS = 30 * 60 * 1000;
@@ -48,7 +49,10 @@ export function feedForSecret(secret: string): FeedSyncState | null {
   return st;
 }
 
-/** Like feedForSecret, but a fresh server (empty .data/) restores the state from the Firestore backup first. */
+/**
+ * Like feedForSecret, but a fresh server (empty .data/) restores the state, and the user's
+ * Gemini key when it was backed up, from Firestore first.
+ */
 export async function loadFeedForSecret(secret: string): Promise<FeedSyncState | null> {
   const local = feedForSecret(secret);
   if (local || !isValidFeedSecret(secret)) return local;
@@ -56,6 +60,7 @@ export async function loadFeedForSecret(secret: string): Promise<FeedSyncState |
     const backup = await loadFeedBackup(secret);
     if (!backup) return null;
     writeFeedSync(backup.state);
+    if (backup.apiKey) setUserKeyFromFeed(backup.state.uid, backup.apiKey);
     console.log('[feed] restored feed state from Firestore backup');
     return backup.state;
   } catch (err: any) {
@@ -83,7 +88,9 @@ export function buildFeedToday(ai: GoogleGenAI | null, st: FeedSyncState, baseUr
   // polled repeatedly does not restart a costly, failing generation on every request.
   const failedLongAgo = lecture?.status === 'failed' && lecture.error !== 'NOTHING_TO_TEACH'
     && Date.now() - Date.parse(lecture.updatedAt || lecture.createdAt) > FAILED_RETRY_COOLDOWN_MS;
-  if ((!lecture || failedLongAgo) && hasCandidates && ai) {
+  // A job cut off by a server restart did not fail on its own, so it is retried right away.
+  const interrupted = lecture?.status === 'failed' && lecture.error === 'INTERRUPTED';
+  if ((!lecture || failedLongAgo || interrupted) && hasCandidates && ai) {
     lecture = startLectureJob(ai, st.uid, date, st.newMistakes, st.reviewMistakes);
   }
   const base: FeedToday = {

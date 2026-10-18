@@ -53,6 +53,15 @@ async function fetchKey(idToken: string, uid: string): Promise<string | null> {
 }
 
 /**
+ * Key restored from the feed backup (server/feedStore.ts) on a fresh server that has had no
+ * signed-in request yet. The next signed-in request reloads the key from Firestore as usual.
+ */
+export function setUserKeyFromFeed(uid: string, key: string): void {
+  if (cached?.key) return;
+  cached = { key, uid, at: 0 };
+}
+
+/**
  * Load (or refresh) the user's saved key. Cheap to call on every authed request:
  * it hits Firestore at most once per 10 minutes (once per minute when no key is saved).
  */

@@ -3,6 +3,7 @@ import {
   SessionReviewData,
   SttFinalData,
   createQualityReport,
+  hideReportedMistake,
 } from "../../services/firebase/db";
 import {
   Check,
@@ -48,7 +49,10 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
 }) => {
   const [copied, setCopied] = useState<boolean>(false);
   const [playingIndex, setPlayingIndex] = useState<number | null>(null);
-  const [hiddenMistakes, setHiddenMistakes] = useState<Set<number>>(new Set());
+  // Items reported earlier stay hidden when the review is reopened
+  const [hiddenMistakes, setHiddenMistakes] = useState<Set<number>>(
+    () => new Set<number>((review?.mistakes || []).flatMap((m: any, i: number) => (m?.hidden ? [i] : [])))
+  );
   const [reportedMessage, setReportedMessage] = useState<string | null>(null);
   const [showFullTranscript, setShowFullTranscript] = useState<boolean>(false);
 
@@ -81,7 +85,9 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
       return next;
     });
 
-    // 2. Save report to qualityReports collection
+    // 2. Save report to qualityReports, and remove the mistake from the review list so it does
+    //    not come back in quiz / morning lecture
+    let removed = true;
     if (userId && sessionId) {
       try {
         await createQualityReport(userId, {
@@ -94,9 +100,25 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
       } catch (err) {
         console.warn("[ReviewModal] Failed to create qualityReport:", err);
       }
+      try {
+        await hideReportedMistake(userId, sessionId, idx, m.myPhrase || "", m.id);
+      } catch (err) {
+        removed = false;
+        console.warn("[ReviewModal] Failed to remove reported mistake:", err);
+      }
     }
 
-    setReportedMessage(`"${m.myPhrase}" 항목이 품질 리포트에 기록되고 화면에서 제외되었습니다.`);
+    if (!removed) {
+      setReportedMessage(`"${m.myPhrase}" 항목을 복습 목록에서 빼지 못했어요. 잠시 뒤 다시 눌러 주세요.`);
+      setHiddenMistakes((prev) => {
+        const next = new Set(prev);
+        next.delete(idx);
+        return next;
+      });
+      setTimeout(() => setReportedMessage(null), 3500);
+      return;
+    }
+    setReportedMessage(`"${m.myPhrase}" 항목을 복습 목록에서 뺐어요. 퀴즈·아침 강의에도 나오지 않아요.`);
     setTimeout(() => setReportedMessage(null), 3500);
   };
 

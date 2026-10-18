@@ -1,14 +1,15 @@
 {
   "name": "onecall-aivoice",
   "private": true,
-  "version": "1.2.2",
+  "version": "2.8.0",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
     "build": "tsc && vite build",
     "start": "node server.ts",
     "lint": "tsc --noEmit",
-    "preview": "vite preview --port 3000"
+    "preview": "vite preview --port 3000",
+    "test": "node --import tsx --test --test-force-exit tests/*.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.24.0",

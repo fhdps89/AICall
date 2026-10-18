@@ -22,7 +22,8 @@ export const DEFAULT_PROMPT_PLACEHOLDERS: PromptPlaceholders = {
  */
 export function hydrateTutorPrompt(
   rawPrompt: string,
-  placeholders: Partial<PromptPlaceholders> = {}
+  placeholders: Partial<PromptPlaceholders> = {},
+  goalId?: string
 ): string {
   const merged = { ...DEFAULT_PROMPT_PLACEHOLDERS, ...placeholders };
 
@@ -49,10 +50,10 @@ export function hydrateTutorPrompt(
     merged.opicWeakPoints
   );
 
-  // Replace [복기 프롬프트 결과 3줄 또는 "none yet"]
+  // Replace [복기 프롬프트 결과 3줄 또는 "none yet"] (used by both the Philly and Travel prompts)
   hydrated = hydrated.replace(
     /\[복기 프롬프트 결과 3줄 또는 "none yet"\]/g,
-    merged.phillyWeakPoints
+    goalId === "travel" ? merged.travelWeakPoints : merged.phillyWeakPoints
   );
 
   return hydrated;

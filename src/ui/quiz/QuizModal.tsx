@@ -25,6 +25,15 @@ import {
   Check,
 } from "lucide-react";
 
+/** First recording format this browser supports, or "" to let it choose. */
+function pickRecordingMimeType(): string {
+  if (typeof MediaRecorder === "undefined" || !MediaRecorder.isTypeSupported) return "";
+  for (const t of ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg"]) {
+    if (MediaRecorder.isTypeSupported(t)) return t;
+  }
+  return "";
+}
+
 interface QuizModalProps {
   user: User;
   dueMistakes: MistakeData[];
@@ -174,10 +183,20 @@ export const QuizModal: React.FC<QuizModalProps> = ({
 
   // Start Voice Recording
   const handleStartRecording = async () => {
+    let stream: MediaStream;
     try {
       audioChunksRef.current = [];
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err: any) {
+      const denied = err?.name === "NotAllowedError" || err?.name === "SecurityError";
+      alert(denied ? "마이크 권한을 허용해 주세요." : "마이크를 찾지 못했어요. 이어폰·브라우저 설정을 확인해 주세요.");
+      console.error("Mic access error:", err);
+      return;
+    }
+    try {
+      // Use a format this browser can record (iPhone Safari may not record WebM).
+      const mimeType = pickRecordingMimeType();
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
 
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) {
@@ -187,7 +206,8 @@ export const QuizModal: React.FC<QuizModalProps> = ({
 
       recorder.onstop = async () => {
         stream.getTracks().forEach((track) => track.stop());
-        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+        const type = recorder.mimeType || mimeType || "audio/webm";
+        const audioBlob = new Blob(audioChunksRef.current, { type });
         await handleTranscribeAudio(audioBlob);
       };
 
@@ -196,8 +216,9 @@ export const QuizModal: React.FC<QuizModalProps> = ({
       setIsRecording(true);
       setSpokenTranscript("");
     } catch (err) {
-      alert("마이크 권한을 허용해 주세요.");
-      console.error("Mic access error:", err);
+      stream.getTracks().forEach((track) => track.stop());
+      alert("이 브라우저에서는 음성 녹음을 할 수 없어요. 타이핑으로 답해 주세요.");
+      console.error("MediaRecorder error:", err);
     }
   };
 
@@ -217,7 +238,8 @@ export const QuizModal: React.FC<QuizModalProps> = ({
       const base64Promise = new Promise<string>((resolve, reject) => {
         reader.onloadend = () => {
           const res = reader.result as string;
-          resolve(res.replace(/^data:audio\/[^;]+;base64,/, ""));
+          // "data:<type>;base64,<data>" (the type may carry ";codecs=..." too)
+          resolve(res.slice(res.indexOf(",") + 1));
         };
         reader.onerror = reject;
       });
@@ -228,7 +250,8 @@ export const QuizModal: React.FC<QuizModalProps> = ({
         method: "POST",
         body: JSON.stringify({
           audioBase64,
-          mimeType: "audio/webm",
+          // Server/Gemini wants the bare type ("audio/mp4"), not "audio/mp4;codecs=..."
+          mimeType: (blob.type || "audio/webm").split(";")[0],
         }),
       });
 
