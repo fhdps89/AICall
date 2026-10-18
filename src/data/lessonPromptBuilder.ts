@@ -26,7 +26,7 @@ export function buildTodayLessonSystemPrompt(
     title: `Lesson ${lessonIndex}`,
   };
 
-  const hydratedPrompt = hydrateTutorPrompt(goal.tutorPrompt, placeholders);
+  const hydratedPrompt = hydrateTutorPrompt(goal.tutorPrompt, placeholders, goal.id);
 
   // Take up to 3 review mistakes
   const targetMistakes = reviewMistakes.slice(0, 3);

@@ -4,6 +4,7 @@ import {
   setDoc,
   updateDoc,
   deleteDoc,
+  deleteField,
   collection,
   getDocs,
   writeBatch,
@@ -14,6 +15,7 @@ import {
   limit,
 } from "firebase/firestore";
 import { db, auth } from "./config";
+import { sanitizePlanChangeAfter, isEmptyPlanChange } from "../../data/planValidation";
 
 export enum OperationType {
   CREATE = "create",
@@ -59,6 +61,10 @@ export interface UserProfileData {
   job: string;
   surveyTopics: string;
   phillyRole: string;
+  /** Recent weak points shown to the tutor (Settings → 프롬프트 변수) */
+  opicWeakPoints?: string;
+  phillyWeakPoints?: string;
+  travelWeakPoints?: string;
   sttEngine: string;
   ttsEngine: string;
   lectureTime: string;
@@ -477,26 +483,17 @@ export async function finalizeCallSession(
 export async function getUnfinishedSessions(userId: string): Promise<SessionData[]> {
   const sessionsCol = collection(db, "users", userId, "sessions");
   try {
-    const q = query(
-      sessionsCol,
-      where("status", "in", ["in-progress", "pending_review"]),
-      orderBy("startedAt", "desc"),
-      limit(5)
-    );
-    const snap = await getDocs(q);
-    return snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<SessionData, "id">) }));
+    // Filter on status only (works without a composite index), then sort here. The old
+    // status + orderBy query needed an index this project does not define, so it always fell
+    // back to reading every session.
+    const snap = await getDocs(query(sessionsCol, where("status", "in", ["in-progress", "pending_review"])));
+    return snap.docs
+      .map((d) => ({ id: d.id, ...(d.data() as Omit<SessionData, "id">) }))
+      .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
+      .slice(0, 5);
   } catch (error) {
-    // If composite index is missing in development, fallback to fetching recent and filtering in-memory
-    try {
-      const snap = await getDocs(sessionsCol);
-      const all = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<SessionData, "id">) }));
-      return all
-        .filter((s) => s.status === "in-progress" || s.status === "pending_review")
-        .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
-        .slice(0, 5);
-    } catch {
-      return [];
-    }
+    console.warn("[db] Failed to load unfinished sessions:", error);
+    return [];
   }
 }
 
@@ -525,7 +522,9 @@ export async function checkAndMarkInterruptedSessions(userId: string): Promise<S
   const now = Date.now();
 
   try {
-    const snap = await getDocs(sessionsCol);
+    // Only unfinished calls (single-field filter: no composite index needed). Reading every
+    // session, each with its transcript and chunk list, got slower with every call.
+    const snap = await getDocs(query(sessionsCol, where("status", "in", ["in-progress", "pending_review"])));
     const sessions = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<SessionData, "id">) }));
     const result: SessionData[] = [];
 
@@ -1033,28 +1032,52 @@ export async function applyPlanChange(userId: string, changeId: string): Promise
     throw new Error(`이미 처리된 요청입니다. (현재 상태: ${data.status})`);
   }
 
+  // The coach (LLM) wrote this change: keep only values that fit the app's data
+  // (known goals and lessons, real dates, valid weekday lists).
+  const goalsNow = await getUserGoals(userId);
+  const after = sanitizePlanChangeAfter(data.after, goalsNow) as PlanChangeSnapshot;
+  if (isEmptyPlanChange(after)) {
+    throw new Error("이 제안에는 적용할 수 있는 변경 내용이 없어요. 코치에게 다시 요청해 주세요.");
+  }
+
+  // "before" is recorded now, from the live data, for exactly what this change touches. The
+  // snapshot taken when the coach proposed it can be stale and covers every goal, so reverting
+  // with it would also roll back progress made in between.
+  const before: PlanChangeSnapshot = {};
+
   // 1. Apply plan changes if specified
-  if (data.after?.plan) {
+  if (after.plan) {
     const currentPlan = (await getUserPlan(userId)) || {
       weeklyPattern: { ...DEFAULT_WEEKLY_PATTERN },
       minutesPerDay: 25,
       updatedAt: new Date().toISOString(),
     };
+    before.plan = { weeklyPattern: currentPlan.weeklyPattern, minutesPerDay: currentPlan.minutesPerDay };
     const mergedPlan: UserPlanData = {
       weeklyPattern: {
         ...currentPlan.weeklyPattern,
-        ...(data.after.plan.weeklyPattern || {}),
+        ...(after.plan.weeklyPattern || {}),
       },
-      minutesPerDay: data.after.plan.minutesPerDay || currentPlan.minutesPerDay,
+      minutesPerDay: after.plan.minutesPerDay || currentPlan.minutesPerDay,
       updatedAt: new Date().toISOString(),
     };
     await saveUserPlan(userId, mergedPlan);
   }
 
   // 2. Apply goal patches if specified
-  if (data.after?.goals) {
-    for (const [goalId, patch] of Object.entries(data.after.goals)) {
+  if (after.goals) {
+    before.goals = {};
+    for (const [goalId, patch] of Object.entries(after.goals)) {
       const gRef = doc(db, "users", userId, "goals", goalId);
+      const gSnap = await getDoc(gRef).catch(() => null);
+      if (gSnap?.exists()) {
+        const g = gSnap.data() as GoalData;
+        before.goals[goalId] = {
+          ...(typeof patch.nextLessonIndex === "number" ? { nextLessonIndex: g.nextLessonIndex } : {}),
+          ...(patch.deadline !== undefined ? { deadline: g.deadline ?? "" } : {}),
+          ...(patch.status ? { status: g.status } : {}),
+        };
+      }
       const updates: any = { updatedAt: new Date().toISOString() };
       if (typeof patch.nextLessonIndex === "number") updates.nextLessonIndex = patch.nextLessonIndex;
       if (patch.deadline !== undefined) updates.deadline = patch.deadline;
@@ -1067,6 +1090,8 @@ export async function applyPlanChange(userId: string, changeId: string): Promise
   await updateDoc(changeRef, {
     status: "approved",
     appliedAt: new Date().toISOString(),
+    before,
+    after, // what was actually applied (revert restores exactly these fields)
   });
 }
 
@@ -1083,32 +1108,47 @@ export async function revertPlanChange(userId: string, changeId: string): Promis
     throw new Error("승인된(approved) 변경사항만 되돌릴 수 있습니다.");
   }
 
-  // 1. Restore before plan if present
-  if (data.before?.plan) {
+  // Only what this change touched (data.after) is restored; everything else, such as lessons
+  // completed on other tracks since the approval, stays as it is now.
+
+  // 1. Restore the plan days / minutes this change set
+  const afterPlan = data.after?.plan;
+  if (afterPlan && data.before?.plan) {
     const currentPlan = (await getUserPlan(userId)) || {
       weeklyPattern: { ...DEFAULT_WEEKLY_PATTERN },
       minutesPerDay: 25,
       updatedAt: new Date().toISOString(),
     };
+    const beforePattern: Partial<WeeklyPattern> = data.before.plan.weeklyPattern || {};
+    const restoredPattern: WeeklyPattern = { ...currentPlan.weeklyPattern };
+    for (const day of Object.keys(afterPlan.weeklyPattern || {}) as Array<keyof WeeklyPattern>) {
+      restoredPattern[day] = beforePattern[day] || DEFAULT_WEEKLY_PATTERN[day] || [];
+    }
     const restoredPlan: UserPlanData = {
-      weeklyPattern: {
-        ...currentPlan.weeklyPattern,
-        ...(data.before.plan.weeklyPattern || {}),
-      },
-      minutesPerDay: data.before.plan.minutesPerDay || currentPlan.minutesPerDay,
+      weeklyPattern: restoredPattern,
+      minutesPerDay:
+        afterPlan.minutesPerDay !== undefined && data.before.plan.minutesPerDay
+          ? data.before.plan.minutesPerDay
+          : currentPlan.minutesPerDay,
       updatedAt: new Date().toISOString(),
     };
     await saveUserPlan(userId, restoredPlan);
   }
 
-  // 2. Restore before goals if present
-  if (data.before?.goals) {
-    for (const [goalId, patch] of Object.entries(data.before.goals)) {
+  // 2. Restore the goal fields this change set
+  if (data.after?.goals) {
+    for (const [goalId, afterPatch] of Object.entries(data.after.goals)) {
+      const beforePatch = data.before?.goals?.[goalId] || {};
       const gRef = doc(db, "users", userId, "goals", goalId);
       const updates: any = { updatedAt: new Date().toISOString() };
-      if (typeof patch.nextLessonIndex === "number") updates.nextLessonIndex = patch.nextLessonIndex;
-      if (patch.deadline !== undefined) updates.deadline = patch.deadline;
-      if (patch.status) updates.status = patch.status;
+      if (typeof afterPatch.nextLessonIndex === "number" && typeof beforePatch.nextLessonIndex === "number") {
+        updates.nextLessonIndex = beforePatch.nextLessonIndex;
+      }
+      if (afterPatch.deadline !== undefined) {
+        // No deadline before → remove the one this change added
+        updates.deadline = beforePatch.deadline ? beforePatch.deadline : deleteField();
+      }
+      if (afterPatch.status && beforePatch.status) updates.status = beforePatch.status;
       await updateDoc(gRef, updates).catch(() => {});
     }
   }
@@ -1299,7 +1339,65 @@ export async function advanceGoalAfterCompletedCall(
   completedLessonIndex: number
 ): Promise<void> {
   const nextLessonIndex = completedLessonIndex + 1;
+  // Never move backwards: reviewing an older unfinished call (e.g. lesson 3 after lesson 4 was
+  // already done) must not reset progress.
+  const snap = await getDoc(doc(db, "users", userId, "goals", goalId));
+  const current = snap.exists() ? Number((snap.data() as GoalData).nextLessonIndex) || 0 : 0;
+  if (current >= nextLessonIndex) return;
   await updateGoalProgress(userId, goalId, nextLessonIndex);
+}
+
+/**
+ * Delete mistakes an earlier, unfinished review run already saved for this call, so running the
+ * review again replaces them instead of adding duplicates. Returns how many were removed.
+ */
+export async function deleteCallMistakesForSession(userId: string, sessionId: string): Promise<number> {
+  const snap = await getDocs(
+    query(collection(db, "users", userId, "mistakes"), where("sessionId", "==", sessionId))
+  );
+  const batch = writeBatch(db);
+  let n = 0;
+  for (const d of snap.docs) {
+    if ((d.data() as MistakeData).source === "call") {
+      batch.delete(d.ref);
+      n++;
+    }
+  }
+  if (n > 0) await batch.commit();
+  return n;
+}
+
+/**
+ * 「이건 내가 한 말이 아니에요」: remove the misheard mistake from the review list (so it never
+ * reaches quiz / lecture) and remember it as hidden in the session's saved review.
+ */
+export async function hideReportedMistake(
+  userId: string,
+  sessionId: string,
+  index: number,
+  myPhrase: string,
+  mistakeId?: string
+): Promise<void> {
+  // 1. The saved mistake document
+  if (mistakeId) {
+    await deleteDoc(doc(db, "users", userId, "mistakes", mistakeId));
+  } else {
+    // Reviews saved before mistake ids were recorded: match by call + phrase
+    const snap = await getDocs(
+      query(collection(db, "users", userId, "mistakes"), where("sessionId", "==", sessionId))
+    );
+    const hit = snap.docs.find((d) => (d.data() as MistakeData).myPhrase === myPhrase);
+    if (hit) await deleteDoc(hit.ref);
+  }
+
+  // 2. The session's review, so reopening it keeps the item hidden
+  const sessionRef = doc(db, "users", userId, "sessions", sessionId);
+  const sSnap = await getDoc(sessionRef);
+  const review = sSnap.exists() ? (sSnap.data() as SessionData).review : undefined;
+  if (review?.mistakes?.[index]) {
+    const mistakes = review.mistakes.map((m, i) => (i === index ? { ...m, hidden: true } : m));
+    await updateDoc(sessionRef, { "review.mistakes": mistakes, updatedAt: new Date().toISOString() });
+  }
 }
 
 // ---- Gemini key fallback (deployed server has no key from AI Studio Secrets) ----

@@ -32,7 +32,29 @@ export interface ChunkRecorderOptions {
   onError?: (err: Error) => void;
 }
 
+/** Storage / network steps, replaceable in tests (defaults: IndexedDB, Cloud Storage, Firestore, server). */
+export interface ChunkRecorderDeps {
+  saveChunkLocally: typeof saveChunkLocally;
+  deleteChunkLocally: typeof deleteChunkLocally;
+  uploadAudioFile: typeof uploadAudioFile;
+  appendSessionChunk: typeof appendSessionChunk;
+  appendSessionSttPartial: typeof appendSessionSttPartial;
+  authFetch: typeof authFetch;
+  mergeChunksToWav: typeof mergeChunksToWav;
+}
+
+const DEFAULT_DEPS: ChunkRecorderDeps = {
+  saveChunkLocally,
+  deleteChunkLocally,
+  uploadAudioFile,
+  appendSessionChunk,
+  appendSessionSttPartial,
+  authFetch,
+  mergeChunksToWav,
+};
+
 export class ChunkRecorder {
+  private deps: ChunkRecorderDeps;
   private stream: MediaStream | null = null;
   private currentRecorder: MediaRecorder | null = null;
   private isRunning: boolean = false;
@@ -44,8 +66,13 @@ export class ChunkRecorder {
   private minuteBatchIndex: number = 0;
   private mimeType: string = "audio/webm";
   private sessionRecordedBlobs: Blob[] = [];
+  /** Session the counters above belong to (a restart in the same call keeps counting). */
+  private countersSessionId: string | null = null;
+  /** Settles when the current segment's blob has been collected (its onstop ran). */
+  private currentSegmentDone: Promise<void> = Promise.resolve();
 
-  constructor() {
+  constructor(deps: Partial<ChunkRecorderDeps> = {}) {
+    this.deps = { ...DEFAULT_DEPS, ...deps };
     // Detect preferred audio mimeType
     if (typeof MediaRecorder !== "undefined") {
       if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) {
@@ -68,11 +95,16 @@ export class ChunkRecorder {
 
     this.isRunning = true;
     this.options = options;
-    this.chunkIndex = 0;
-    this.minuteBatchIndex = 0;
-    this.accumulatedBlobsForMinute = [];
-    this.accumulatedChunkIndices = [];
-    this.sessionRecordedBlobs = [];
+    // Restarting in the same call ("다시 시도") must continue the chunk numbering and keep the
+    // audio already recorded; otherwise two chunks share an index and the review mixes them up.
+    if (this.countersSessionId !== options.sessionId) {
+      this.countersSessionId = options.sessionId;
+      this.chunkIndex = 0;
+      this.minuteBatchIndex = 0;
+      this.accumulatedBlobsForMinute = [];
+      this.accumulatedChunkIndices = [];
+      this.sessionRecordedBlobs = [];
+    }
 
     // Clone audio tracks so that Live reconnects/cleanups don't stop our background recording
     const audioTracks = stream.getAudioTracks().map((track) => track.clone());
@@ -94,13 +126,22 @@ export class ChunkRecorder {
       this.segmentTimer = null;
     }
 
-    if (this.currentRecorder && this.currentRecorder.state !== "inactive") {
+    const recorder = this.currentRecorder;
+    if (recorder && recorder.state !== "inactive") {
       try {
-        this.currentRecorder.stop();
+        recorder.stop();
       } catch {
         // ignore
       }
     }
+    // Wait until the last segment has been collected (also when its 10 s timer had just
+    // stopped it), so getSessionRecordedBlobs() right after stop() includes the final words.
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      this.currentSegmentDone,
+      new Promise<void>((r) => (timeout = setTimeout(r, 3000))),
+    ]);
+    if (timeout) clearTimeout(timeout);
 
     if (this.stream) {
       this.stream.getTracks().forEach((track) => track.stop());
@@ -138,6 +179,8 @@ export class ChunkRecorder {
 
     const currentIdx = this.chunkIndex++;
     const chunks: Blob[] = [];
+    let segmentDone: () => void = () => {};
+    this.currentSegmentDone = new Promise<void>((r) => (segmentDone = r));
 
     try {
       const recorder = new MediaRecorder(this.stream, { mimeType: this.mimeType });
@@ -152,8 +195,10 @@ export class ChunkRecorder {
       recorder.onstop = async () => {
         if (chunks.length > 0) {
           const finalBlob = new Blob(chunks, { type: this.mimeType });
+          // processChunk adds the blob to sessionRecordedBlobs synchronously, before any await.
           this.processChunk(currentIdx, finalBlob);
         }
+        segmentDone();
 
         // Loop to next segment if still running
         if (this.isRunning) {
@@ -171,6 +216,7 @@ export class ChunkRecorder {
       }, 10000);
     } catch (err: any) {
       console.error("[ChunkRecorder] Error recording 10-second segment:", err);
+      segmentDone();
       this.options?.onError?.(err instanceof Error ? err : new Error(String(err)));
       if (this.isRunning) {
         // Retry in 2 seconds
@@ -208,18 +254,18 @@ export class ChunkRecorder {
     };
 
     // 1) Save to IndexedDB first (guarantees persistence across crashes)
-    await saveChunkLocally(localChunk);
+    await this.deps.saveChunkLocally(localChunk);
 
     // 2) Upload to Cloud Storage
     let storageUrl: string | undefined;
     let uploadedSuccessfully = false;
 
     try {
-      storageUrl = await uploadAudioFile(userId, storagePath, blob);
+      storageUrl = await this.deps.uploadAudioFile(userId, storagePath, blob);
       uploadedSuccessfully = true;
 
       // 3) Once uploaded, remove from IndexedDB
-      await deleteChunkLocally(chunkId);
+      await this.deps.deleteChunkLocally(chunkId);
     } catch (uploadErr: any) {
       console.warn(`[ChunkRecorder] Chunk ${index} upload failed, retained in IndexedDB for retry:`, uploadErr);
     }
@@ -236,7 +282,7 @@ export class ChunkRecorder {
     };
 
     try {
-      await appendSessionChunk(userId, sessionId, chunkMeta);
+      await this.deps.appendSessionChunk(userId, sessionId, chunkMeta);
     } catch (dbErr) {
       console.warn("[ChunkRecorder] Failed to append chunk metadata to Firestore:", dbErr);
     }
@@ -279,13 +325,13 @@ export class ChunkRecorder {
 
     try {
       // Combine 6 standalone chunks into one 1-minute WAV (byte-joining WebM files loses audio)
-      const merged = await mergeChunksToWav(blobs);
+      const merged = await this.deps.mergeChunksToWav(blobs);
       const combinedBlob = merged ? merged.wav : new Blob(blobs, { type: this.mimeType });
       const base64Audio = await this.blobToBase64(combinedBlob);
 
       console.log(`[ChunkRecorder] Requesting 1-min partial transcribe for ${timeRange} (${blobs.length} chunks)`);
 
-      const response = await authFetch("/api/gemini/transcribe-partial", {
+      const response = await this.deps.authFetch("/api/gemini/transcribe-partial", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -313,7 +359,7 @@ export class ChunkRecorder {
         };
 
         // Append to Firestore sessions.sttPartial
-        await appendSessionSttPartial(userId, sessionId, sttItem);
+        await this.deps.appendSessionSttPartial(userId, sessionId, sttItem);
         this.options.onPartialStt?.(sttItem);
         console.log(`[ChunkRecorder] 1-min partial transcribe complete for ${timeRange}: "${sttItem.transcript.slice(0, 40)}..."`);
       }

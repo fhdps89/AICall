@@ -12,6 +12,7 @@ import { geminiLimit, checkLiveSessionStart } from './server/rateLimit.ts';
 import { DATA_DIR, startLectureJob, readLectureState, lectureAudioPath, kstToday } from './server/lecture.ts';
 import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive } from './server/sttBench.ts';
 import { LIVE_MODEL, TEXT_MODEL, GEMINI_STT_MODEL, GEMINI_TTS_LITE_MODEL } from './src/config/models.ts';
+import { userRecordingPath as userRecordingPathIn } from './server/recordingPath.ts';
 import { isValidFeedSecret, writeFeedSync, feedForSecret, buildFeedToday, feedAudioFile, renderFeedHtml } from './server/feed.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -79,7 +80,8 @@ function parseDotenv(content: string): Array<[string, string]> {
 
 /**
  * Resolve the Gemini key at call time (secrets can be injected after boot).
- * Order: process.env (all known names) -> key/.env files -> ancestor /proc environ.
+ * Order: process.env (all known names) -> key/.env files -> parent processes' /proc environ
+ * (cached 1 min) -> key saved by the user in app Settings.
  * Never writes the key to disk.
  */
 function resolveGeminiApiKey(): string | undefined {
@@ -97,10 +99,54 @@ function resolveGeminiApiKey(): string | undefined {
   return found;
 }
 
+// Searching files and parent processes is slow, and the result rarely changes: remember it
+// for a minute (hits and misses), instead of repeating the scan on every request.
+const KEY_SCAN_CACHE_MS = 60 * 1000;
+let keyScanCache: { key: string | undefined; source: string; at: number } | null = null;
+
 function resolveGeminiApiKeyInner(): string | undefined {
+  // 1. process.env: cheap, checked every time (secrets can be injected after boot)
   const fromEnv = pickFromEnvPairs(Object.entries(process.env).map(([k, v]) => [k, v ?? '']), 'env');
   if (fromEnv) return fromEnv;
 
+  // 2. Key / .env files and parent-process environments (cached)
+  if (!keyScanCache || Date.now() - keyScanCache.at > KEY_SCAN_CACHE_MS) {
+    const key = scanFilesAndParentsForKey();
+    keyScanCache = { key, source: key ? lastKeySource : 'none', at: Date.now() };
+  }
+  if (keyScanCache.key) {
+    lastKeySource = keyScanCache.source;
+    return keyScanCache.key;
+  }
+
+  // 3. Last resort: key the signed-in user saved in app Settings (server/userKey.ts).
+  const userKey = getUserSuppliedKey();
+  if (isUsableKey(userKey)) {
+    lastKeySource = 'firestore:user-settings';
+    return userKey.trim();
+  }
+
+  return undefined;
+}
+
+/** Parent process ids of this server (nearest first), read from /proc/<pid>/status. */
+function ancestorPids(max = 8): string[] {
+  const out: string[] = [];
+  let pid = String(process.pid);
+  for (let i = 0; i < max; i++) {
+    try {
+      const m = /^PPid:\s*(\d+)/m.exec(fs.readFileSync(`/proc/${pid}/status`, 'utf-8'));
+      if (!m || m[1] === '0') break;
+      pid = m[1];
+      out.push(pid);
+    } catch {
+      break;
+    }
+  }
+  return out;
+}
+
+function scanFilesAndParentsForKey(): string | undefined {
   const dirs = Array.from(new Set([
     __dirname,
     process.cwd(),
@@ -155,24 +201,15 @@ function resolveGeminiApiKeyInner(): string | undefined {
     }
   } catch { /* ignore */ }
 
-  // Scan all running processes in /proc/*/environ
-  try {
-    const pids = fs.readdirSync('/proc').filter((p) => /^\d+$/.test(p));
-    for (const p of pids) {
-      try {
-        const pairs = fs.readFileSync(`/proc/${p}/environ`, 'utf-8').split('\0').filter((x) => x.includes('='))
-          .map((x) => { const i = x.indexOf('='); return [x.slice(0, i), x.slice(i + 1)] as [string, string]; });
-        const v = pickFromEnvPairs(pairs, `proc:${p}`);
-        if (v) return v;
-      } catch { /* ignore */ }
-    }
-  } catch { /* ignore */ }
-
-  // Last resort: key the signed-in user saved in app Settings (server/userKey.ts).
-  const userKey = getUserSuppliedKey();
-  if (isUsableKey(userKey)) {
-    lastKeySource = 'firestore:user-settings';
-    return userKey.trim();
+  // Environment of the processes that started this server (the container launcher may hold
+  // the secret). Only this server's own parent chain, never unrelated processes.
+  for (const p of ancestorPids()) {
+    try {
+      const pairs = fs.readFileSync(`/proc/${p}/environ`, 'utf-8').split('\0').filter((x) => x.includes('='))
+        .map((x) => { const i = x.indexOf('='); return [x.slice(0, i), x.slice(i + 1)] as [string, string]; });
+      const v = pickFromEnvPairs(pairs, `proc:${p}`);
+      if (v) return v;
+    } catch { /* ignore */ }
   }
 
   return undefined;
@@ -205,6 +242,12 @@ function createGenAI() {
   });
 }
 
+/** "file:/app/.env" -> "file", "env:GEMINI_API_KEY" -> "env", "firestore:user-settings" stays. */
+function publicKeySource(src: string): string {
+  if (src === 'none' || src === 'firestore:user-settings') return src;
+  return src.split(':')[0];
+}
+
 // 1. Check Gemini server connectivity and GDP credit status
 app.get('/api/gemini/status', async (req: Request, res: Response) => {
   const key = resolveGeminiApiKey();
@@ -220,7 +263,8 @@ app.get('/api/gemini/status', async (req: Request, res: Response) => {
     liveSupported: true,
     gdpConnected: hasServerKey,
     hasServerKey,
-    keySource: lastKeySource, // name/location only, never the value
+    // Public (no login): only the kind of source, never file paths or the value.
+    keySource: publicKeySource(lastKeySource),
   });
 });
 
@@ -404,67 +448,13 @@ app.post('/api/gemini/transcribe-partial', requireAuth, geminiLimit, async (req:
   }
 });
 
-// In-memory active session tracker for detecting interrupted calls (last chunk > 2 min)
-interface ActiveSessionTracker {
-  sessionId: string;
-  userId: string;
-  lastChunkAt: number;
-  status: 'in-progress' | 'pending_review' | 'done';
-}
-const activeSessionsMap = new Map<string, ActiveSessionTracker>();
-
-// Heartbeat / Chunk registration to track active call sessions
-app.post('/api/sessions/heartbeat', requireAuth, (req: Request, res: Response) => {
-  const { sessionId, status = 'in-progress' } = req.body || {};
-  const userId = res.locals.user.uid as string; // the signed-in user, never a client-supplied id
-  if (sessionId) {
-    activeSessionsMap.set(sessionId, {
-      sessionId,
-      userId,
-      lastChunkAt: Date.now(),
-      status,
-    });
-  }
-  res.json({ ok: true });
-});
-
-// Periodic watchdog (every 30s): marks active sessions without new chunks for > 2 min as pending_review
-setInterval(() => {
-  const now = Date.now();
-  const TWO_MINUTES_MS = 2 * 60 * 1000;
-
-  for (const [sId, sess] of activeSessionsMap.entries()) {
-    if (sess.status === 'in-progress' && now - sess.lastChunkAt > TWO_MINUTES_MS) {
-      console.warn(`[Watchdog] Session ${sId} timed out (>2min since last chunk). Marking as pending_review.`);
-      sess.status = 'pending_review';
-    }
-  }
-}, 30000);
-
-// Check interrupted sessions status
-app.get('/api/sessions/interrupted-check', requireAuth, (req: Request, res: Response) => {
-  const userId = res.locals.user.uid as string; // only the signed-in user's sessions
-  const interrupted: string[] = [];
-  const now = Date.now();
-  const TWO_MINUTES_MS = 2 * 60 * 1000;
-
-  for (const [sId, sess] of activeSessionsMap.entries()) {
-    if (sess.userId === userId && sess.status === 'in-progress' && now - sess.lastChunkAt > TWO_MINUTES_MS) {
-      sess.status = 'pending_review';
-      interrupted.push(sId);
-    } else if (sess.userId === userId && sess.status === 'pending_review') {
-      interrupted.push(sId);
-    }
-  }
-
-  res.json({ ok: true, interruptedSessionIds: interrupted });
-});
+// Interrupted calls are detected in the app from Firestore (sessions.lastChunkAt older than
+// 2 minutes -> pending_review, see checkAndMarkInterruptedSessions in src/services/firebase/db.ts).
+// The old in-memory server watchdog was never read by the app and was removed.
 
 // Resilient chunk upload endpoint (fallback when client Firebase Storage direct upload is restricted)
 function userRecordingPath(uid: string, relPath: string): string | null {
-  const userDir = path.join(RECORDINGS_DIR, uid.replace(/[^a-zA-Z0-9_\-]/g, '_'));
-  const resolved = path.resolve(userDir, relPath.replace(/[^a-zA-Z0-9_\-\.\/]/g, '_'));
-  return resolved.startsWith(userDir + path.sep) ? resolved : null; // blocks ../ traversal
+  return userRecordingPathIn(RECORDINGS_DIR, uid, relPath);
 }
 
 app.post('/api/recordings/upload-chunk', requireAuth, express.raw({ type: ['audio/*', 'application/octet-stream'], limit: '20mb' }), (req: Request, res: Response) => {
@@ -877,7 +867,7 @@ app.post('/api/coach/chat', requireAuth, geminiLimit, async (req: Request, res: 
 1. 오직 학습 계획, 요일별 루틴, 목표(OPIc AL, 필리조선소 주재원, Bluey 듣기, 미국·호주 여행), 진도 및 실수 패턴만 다룹니다.
 2. 답변은 친절하고 격려하는 한국어 구어체로 2~4문장으로 간결하게 작성합니다.
 3. 사용자가 일정 변경, 출장, 야근, 휴식, 요일 변경, 시험일 접수 등을 언급하면 반드시 'propose_plan_change' 도구를 호출해 변경 제안 카드를 생성하세요.
-4. 중요: 사용자 승인(클라이언트의 승인 버튼) 없이 실제 계획이나 목표를 절대 직접 바꾸거나 완료하지 마세요. 'apply_plan_change'는 모델이 직접 호출할 수 없습니다.
+4. 중요: 사용자 승인(클라이언트의 승인 버튼) 없이 실제 계획이나 목표를 절대 직접 바꾸거나 완료하지 마세요. 변경을 적용하는 도구는 없으며, 제안만 할 수 있습니다.
 5. '시험이 11/29로 잡혔어'와 같이 OPIc 시험 날짜(deadline)를 언급하면:
    - goalPatches에 { opic: { deadline: "2026-11-29" } }를 넣고,
    - 시험 1~2주 전 구간에 OPIc 실전 모의고사(14과)를 월·토 OPIc 슬롯에 집중 배치하는 제안을 만드세요.
@@ -988,12 +978,6 @@ app.post('/api/coach/chat', requireAuth, geminiLimit, async (req: Request, res: 
           if (!reply) {
             reply = `요청하신 내용을 바탕으로 계획 변경 제안 카드를 준비했어요. 아래 카드를 확인하시고 [승인]해 주세요.`;
           }
-        } else if (call.name === 'apply_plan_change') {
-          res.status(400).json({
-            ok: false,
-            error: 'AI 코치가 직접 변경을 적용할 수 없습니다. 사용자의 승인이 필요합니다.',
-          });
-          return;
         }
       }
     }
@@ -1556,18 +1540,7 @@ async function startServer() {
     });
   });
 
-  if (!isProd) {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: {
-        middlewareMode: true,
-        host: '0.0.0.0',
-        port: PORT,
-      },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
+  const serveBuiltApp = () => {
     const distPath = path.resolve(__dirname, 'dist');
     const indexPath = path.resolve(distPath, 'index.html');
     app.use(express.static(distPath));
@@ -1578,6 +1551,28 @@ async function startServer() {
         res.status(200).send('<!doctype html><html><body>Initializing...</body></html>');
       }
     });
+  };
+
+  if (!isProd) {
+    // Dev: Vite middleware. If NODE_ENV was not set on a deployed server where dev packages are
+    // not installed, fall back to the built app instead of crashing on the missing vite import.
+    try {
+      const { createServer: createViteServer } = await import('vite');
+      const vite = await createViteServer({
+        server: {
+          middlewareMode: true,
+          host: '0.0.0.0',
+          port: PORT,
+        },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+    } catch (err: any) {
+      console.warn('[Server] Vite dev server unavailable, serving the built app from dist/:', err?.message || err);
+      serveBuiltApp();
+    }
+  } else {
+    serveBuiltApp();
   }
 
   server.listen(PORT, '0.0.0.0', () => {

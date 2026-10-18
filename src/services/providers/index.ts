@@ -1,105 +1,21 @@
 /**
- * Provider Accessor & Registry
- * Screen components access providers via these factories without referencing vendor specifics.
+ * Provider accessor (Part B-1 provider abstraction).
+ * Screens get the Live (real-time call) provider from here without referencing vendor code.
+ *
+ * Only the Live provider runs in the browser. Transcription (STT), text (LLM) and speech (TTS)
+ * run on the server (server.ts, server/lecture.ts, server/sttBench.ts); their interfaces stay in
+ * ./types for a future vendor switch. The empty browser-side placeholders that used to live here
+ * returned blank results and were never used, so they were removed.
  */
-import {
-  LIVE_MODEL,
-  TEXT_MODEL,
-  GEMINI_STT_MODEL,
-  GEMINI_STT_MODE,
-  GEMINI_TTS_MODEL,
-  DEFAULT_STT_ENGINE,
-  DEFAULT_TTS_ENGINE,
-  SttEngineType,
-  TtsEngineType,
-} from "../../config/models";
-import {
-  LiveProvider,
-  SttProvider,
-  LlmProvider,
-  TtsProvider,
-  LiveSessionOptions,
-  SttTranscriptionOptions,
-  SttResult,
-  LlmGenerateOptions,
-  LlmResult,
-  TtsSynthesisOptions,
-  TtsResult,
-} from "./types";
-
+import { LiveProvider } from "./types";
 import { GeminiLiveProvider } from "./geminiLiveProvider";
 
 /**
- * Skeleton Implementation of SttProvider
+ * A fresh Live provider for one call. Each call needs its own instance: the provider keeps the
+ * call's transcript and session resume handle, which must not leak into the next call.
  */
-class GeminiSttProvider implements SttProvider {
-  name = `${GEMINI_STT_MODEL} (${GEMINI_STT_MODE})`;
-
-  async transcribe(_options: SttTranscriptionOptions): Promise<SttResult> {
-    return {
-      text: "",
-      engine: this.name,
-      durationSec: 0,
-    };
-  }
-}
-
-/**
- * Skeleton Implementation of LlmProvider
- */
-class GeminiLlmProvider implements LlmProvider {
-  name = TEXT_MODEL;
-
-  async generateText(_options: LlmGenerateOptions): Promise<LlmResult<string>> {
-    return {
-      content: "",
-      tokensUsed: { prompt: 0, completion: 0, total: 0 },
-    };
-  }
-
-  async generateJson<T>(_options: LlmGenerateOptions): Promise<LlmResult<T>> {
-    return {
-      content: {} as T,
-      tokensUsed: { prompt: 0, completion: 0, total: 0 },
-    };
-  }
-}
-
-/**
- * Skeleton Implementation of TtsProvider
- */
-class GeminiTtsProvider implements TtsProvider {
-  name = GEMINI_TTS_MODEL;
-
-  async synthesize(_options: TtsSynthesisOptions): Promise<TtsResult> {
-    return {
-      audioBuffer: new ArrayBuffer(0),
-      durationSec: 0,
-      engine: this.name,
-    };
-  }
-}
-
-// Singletons / Factory accessors
-let activeLiveProvider: LiveProvider = new GeminiLiveProvider();
-let activeSttProvider: SttProvider = new GeminiSttProvider();
-let activeLlmProvider: LlmProvider = new GeminiLlmProvider();
-let activeTtsProvider: TtsProvider = new GeminiTtsProvider();
-
-export function getLiveProvider(): LiveProvider {
-  return activeLiveProvider;
-}
-
-export function getSttProvider(_engine: SttEngineType = DEFAULT_STT_ENGINE): SttProvider {
-  return activeSttProvider;
-}
-
-export function getLlmProvider(): LlmProvider {
-  return activeLlmProvider;
-}
-
-export function getTtsProvider(_engine: TtsEngineType = DEFAULT_TTS_ENGINE): TtsProvider {
-  return activeTtsProvider;
+export function createLiveProvider(): LiveProvider {
+  return new GeminiLiveProvider();
 }
 
 export * from "./types";

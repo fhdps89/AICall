@@ -4,6 +4,10 @@
  * Once successfully uploaded to Cloud Storage, the chunk is removed from IndexedDB.
  */
 
+import { doc, getDoc, updateDoc } from "firebase/firestore";
+import { db } from "../firebase/config";
+import { uploadAudioFile } from "../firebase/storage";
+
 export interface LocalRecordingChunk {
   id: string; // `${sessionId}_chunk_${index}`
   sessionId: string;
@@ -131,11 +135,6 @@ export async function retryPendingUploads(userId: string): Promise<number> {
 
   console.log(`[IndexedDB] Found ${pending.length} pending unuploaded chunks. Retrying upload...`);
   let successCount = 0;
-
-  // Lazy import storage and firestore to avoid cyclic imports
-  const { uploadAudioFile } = await import("../firebase/storage");
-  const { doc, getDoc, updateDoc } = await import("firebase/firestore");
-  const { db } = await import("../firebase/config");
 
   for (const chunk of pending) {
     try {

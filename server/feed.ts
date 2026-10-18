@@ -66,7 +66,9 @@ export function buildFeedToday(ai: GoogleGenAI | null, st: FeedSyncState, baseUr
   // polled repeatedly does not restart a costly, failing generation on every request.
   const failedLongAgo = lecture?.status === 'failed' && lecture.error !== 'NOTHING_TO_TEACH'
     && Date.now() - Date.parse(lecture.updatedAt || lecture.createdAt) > FAILED_RETRY_COOLDOWN_MS;
-  if ((!lecture || failedLongAgo) && hasCandidates && ai) {
+  // A job cut off by a server restart did not fail on its own, so it is retried right away.
+  const interrupted = lecture?.status === 'failed' && lecture.error === 'INTERRUPTED';
+  if ((!lecture || failedLongAgo || interrupted) && hasCandidates && ai) {
     lecture = startLectureJob(ai, st.uid, date, st.newMistakes, st.reviewMistakes);
   }
   const base: FeedToday = {

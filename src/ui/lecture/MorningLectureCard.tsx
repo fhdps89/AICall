@@ -95,7 +95,11 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({ user, on
             {status === "failed" && lecture?.error && (
               <div className="text-[11px] text-rose-300 flex items-center gap-1">
                 <AlertTriangle className="w-3 h-3" />
-                {lecture.error === "NOTHING_TO_TEACH" ? "새 실수·복습 대상이 없어요" : lecture.error}
+                {lecture.error === "NOTHING_TO_TEACH"
+                  ? "새 실수·복습 대상이 없어요"
+                  : lecture.error === "INTERRUPTED"
+                  ? "서버가 다시 시작되어 만들던 강의가 멈췄어요. 다시 만들어 주세요."
+                  : lecture.error}
               </div>
             )}
             {error && <div className="text-[11px] text-rose-300">{error}</div>}

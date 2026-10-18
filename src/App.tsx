@@ -42,6 +42,15 @@ import { ReviewFlowScreen } from "./ui/review/ReviewFlowScreen";
 import { LiveTranscriptItem } from "./services/providers/types";
 import { Loader2 } from "lucide-react";
 
+/** Settings → 1분 임시 받아쓰기 switch (saved in this browser by SettingsModal). Default on. */
+function isPartialTranscribeEnabled(): boolean {
+  try {
+    return localStorage.getItem("onecall_enable_partial_transcribe") !== "false";
+  } catch {
+    return true;
+  }
+}
+
 interface ActiveReviewState {
   review: SessionReviewData;
   sttFinal?: SttFinalData;
@@ -145,9 +154,9 @@ export const App: React.FC = () => {
           job: profile.job || DEFAULT_PROMPT_PLACEHOLDERS.job,
           surveyTopics: profile.surveyTopics || DEFAULT_PROMPT_PLACEHOLDERS.surveyTopics,
           phillyRole: profile.phillyRole || DEFAULT_PROMPT_PLACEHOLDERS.phillyRole,
-          opicWeakPoints: DEFAULT_PROMPT_PLACEHOLDERS.opicWeakPoints,
-          phillyWeakPoints: DEFAULT_PROMPT_PLACEHOLDERS.phillyWeakPoints,
-          travelWeakPoints: DEFAULT_PROMPT_PLACEHOLDERS.travelWeakPoints,
+          opicWeakPoints: profile.opicWeakPoints || DEFAULT_PROMPT_PLACEHOLDERS.opicWeakPoints,
+          phillyWeakPoints: profile.phillyWeakPoints || DEFAULT_PROMPT_PLACEHOLDERS.phillyWeakPoints,
+          travelWeakPoints: profile.travelWeakPoints || DEFAULT_PROMPT_PLACEHOLDERS.travelWeakPoints,
         });
 
         // Fetch or initialize Goals
@@ -206,6 +215,17 @@ export const App: React.FC = () => {
     setShowInitialProgressModal(false);
   };
 
+  // Re-read goals after something changed them in Firestore (call review advanced the lesson,
+  // coach plan change approved/reverted), so 「오늘 수업」 shows the current lesson.
+  const refreshGoals = async () => {
+    if (!user) return;
+    try {
+      setGoals(await getUserGoals(user.uid));
+    } catch (err) {
+      console.warn("[App] Could not refresh goals:", err);
+    }
+  };
+
   // Handle Goal Lesson Change
   const handleUpdateGoalProgress = async (goalId: string, nextLessonIndex: number) => {
     if (!user) return;
@@ -223,6 +243,9 @@ export const App: React.FC = () => {
       job: updated.job,
       surveyTopics: updated.surveyTopics,
       phillyRole: updated.phillyRole,
+      opicWeakPoints: updated.opicWeakPoints,
+      phillyWeakPoints: updated.phillyWeakPoints,
+      travelWeakPoints: updated.travelWeakPoints,
     });
   };
 
@@ -273,6 +296,7 @@ export const App: React.FC = () => {
           liveTranscript: transcripts,
           onProgress: (step) => setReviewProgressStep(step),
         });
+        await refreshGoals();
         setActiveReviewData({
           review: result.review,
           sttFinal: result.sttFinal,
@@ -345,6 +369,7 @@ export const App: React.FC = () => {
           liveTranscript: session.liveTranscript,
           onProgress: (step) => setReviewProgressStep(step),
         });
+        await refreshGoals();
 
         setActiveReviewData({
           review: result.review,
@@ -402,7 +427,7 @@ export const App: React.FC = () => {
         goal={activeCallGoal}
         lessonIndex={activeCallLesson}
         placeholders={placeholders}
-        enablePartialTranscribe={(userProfile as any)?.enablePartialTranscribe !== false}
+        enablePartialTranscribe={isPartialTranscribeEnabled()}
         onEndCall={handleEndCall}
         onExit={() => setActiveCallGoal(null)}
       />
@@ -431,6 +456,7 @@ export const App: React.FC = () => {
         goals={goals}
         placeholders={placeholders}
         onUpdateGoalProgress={handleUpdateGoalProgress}
+        onGoalsChanged={refreshGoals}
         onStartCall={handleStartCall}
         onOpenSettings={() => setShowSettingsModal(true)}
         onLogout={handleLogout}
