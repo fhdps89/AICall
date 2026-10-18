@@ -13,6 +13,15 @@ service cloud.firestore {
              request.auth.token.email_verified == true;
     }
 
+    // Grok Bot feed backup (server/feedStore.ts): id and contents derive from the feed secret,
+    // so it can be read by exact id without login (no listing); only the owner writes it.
+    match /feeds/{feedId} {
+      allow get: if true;
+      allow create: if isSingleAllowedUser(request.resource.data.uid);
+      allow update: if isSingleAllowedUser(resource.data.uid) && isSingleAllowedUser(request.resource.data.uid);
+      allow delete: if isSingleAllowedUser(resource.data.uid);
+    }
+
     // User profile and subcollections
     match /users/{userId} {
       allow get, write: if isSingleAllowedUser(userId);

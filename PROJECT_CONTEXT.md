@@ -1,7 +1,7 @@
 # 📖 프로젝트 컨텍스트 및 히스토리 (Project Context)
 
 > **프로젝트**: One Call English (옛 이름: 「오늘도 한 통」) — AI 1:1 전화영어  
-> **현재 버전**: `v2.8.0` | **최종 갱신**: 2026-10-19 (KST)  
+> **현재 버전**: `v2.8.1` | **최종 갱신**: 2026-10-19 (KST)  
 > **기준 기획**: [`docs/plan/implementation_plan_v4.md`](./docs/plan/implementation_plan_v4.md) Part B · 진행 가이드 [`docs/plan/ai-studio-build-guide.md`](./docs/plan/ai-studio-build-guide.md) · 현재 앱과의 차이 [`docs/plan/gap-v2.1.0-vs-plan-v4.md`](./docs/plan/gap-v2.1.0-vs-plan-v4.md)  
 > **관리 규칙**: `README.md` 변경 시 본 문서의 아키텍처 및 히스토리를 함께 최신화하며, 모든 일시는 한국 표준시(KST)를 기준으로 합니다.
 
@@ -141,6 +141,7 @@
 ---
 
 ## 5. 버전 히스토리
+- **v2.8.1 (2026-10-19 KST)**: [피드 404] 피드 설정과 사용자 Gemini 키를 Firestore `feeds/{id}`에 암호화 백업, 새로 뜬 서버가 복원해 그록봇만으로 아침 강의 생성. `firestore.rules`에 feeds 규칙 추가(배포 필요).
 - **v2.8.0 (2026-10-19 KST)**: [전체 코드 리뷰 반영] 통화마다 새 Live 인스턴스(앞 통화 섞임 해결), 통화 마지막 말 복기 포함, "다시 시도" 시 녹음 번호 이어 가기, Firestore `ignoreUndefinedProperties`(코치 답장·업로드 실패 조각 기록 저장), 복기·코치 승인 뒤 목표 다시 불러오기, 코치 되돌리기는 바꾼 항목만, 오인식 신고 시 실수 삭제, 서버 재시작으로 멈춘 강의 복구, 다시 복기해도 중복·진도 후퇴 없음, 1분 받아쓰기 스위치 연결, 퀴즈 녹음 형식 자동 선택, 취약점 3개 저장(여행 치환 수정), 코치 제안 검사, 키 탐색 1분 캐시·부모 프로세스만, 상태 API 경로 비노출, 미완료 통화만 읽기, 안 쓰는 코드 삭제, 빌드 파일 나누기, 자동 테스트 17개. 상세: [`docs/reviews/2026-10-full-code-review.md`](./docs/reviews/2026-10-full-code-review.md).
 - **v2.7.8 (2026-10-15 KST)**: [오디오 404] `.data/` 아래 파일을 `sendFile`이 거부하던 문제 수정(`dotfiles: 'allow'`). 강의·피드·녹음 오디오 재생.
 - **v2.7.7 (2026-10-14 KST)**: [블루이 피드백] 아침 강의 2인 음성 요청 형식 수정(speechMetadata.speaker), 통화 지시문에 앱 통화 규칙(짧게 말하기·같은 목소리·오늘 과만·마무리 인사) 추가, 복기 화면에 "통화 후 할 일"과 자동 저장 안내, Keep 복사는 선택 항목.

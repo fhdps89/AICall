@@ -1,6 +1,6 @@
 # One Call English — AI 1:1 전화영어 (옛 이름: 오늘도 한 통)
 
-> **버전**: `v2.8.0` | **최종 갱신**: 2026-10-19 (KST)
+> **버전**: `v2.8.1` | **최종 갱신**: 2026-10-19 (KST)
 > **기준 기획**: [`docs/plan/implementation_plan_v4.md`](./docs/plan/implementation_plan_v4.md) Part B · 진행 가이드 [`docs/plan/ai-studio-build-guide.md`](./docs/plan/ai-studio-build-guide.md)
 > 아키텍처와 버전 기록: [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) · 상세 변경 기록: [`docs/history/changelog.md`](./docs/history/changelog.md) · 최근 전체 코드 리뷰: [`docs/reviews/2026-10-full-code-review.md`](./docs/reviews/2026-10-full-code-review.md)
 
@@ -38,7 +38,7 @@ AI 튜터와 영어로 통화하고, 통화에서 **틀린 말을 틀린 그대�
 - 1인당 한도: 1분 60회, 하루 1,500회 Gemini 호출, 하루 60번 통화 시작(`server/rateLimit.ts`, 서버 메모리 기준).
 
 ## 알아 둘 한계
-- 아침 강의 음성, 그록봇 피드 설정, 서버 예비 녹음은 서버 안 `.data/` 폴더에 저장됩니다. AI Studio 배포(Cloud Run)에서는 서버가 다시 켜지면 지워질 수 있습니다. 앱을 열면 피드 설정은 다시 보내집니다.
+- 아침 강의 음성, 그록봇 피드 설정, 서버 예비 녹음은 서버 안 `.data/` 폴더에 저장됩니다. AI Studio 배포(Cloud Run)에서는 서버가 다시 켜지면 지워질 수 있습니다. 피드 설정과 설정에 저장한 Gemini 키는 Firestore `feeds/{id}`에 암호화 백업되어, 새로 켜진 서버가 그록봇 요청만으로 복원합니다(v2.8.1). 강의 음성·예비 녹음은 여전히 지워질 수 있습니다.
 - 허용 계정 이메일이 `firestore.rules`, `server/auth.ts`, `src/services/firebase/auth.ts`에 고정돼 있습니다(베타 전에 바꿔야 함).
 - `npm audit`에 high 4건이 나옵니다. Firebase가 쓰는 `@grpc/grpc-js`(서버용 통신 라이브러리)에서 나오며 브라우저 앱에서는 쓰이지 않는 부분으로 보고 있습니다(추정). 고치려면 Firebase 큰 버전 업그레이드가 필요합니다.
 

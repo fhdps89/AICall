@@ -34,15 +34,31 @@ export function getUserSuppliedKey(): string | undefined {
   return cached?.key || undefined;
 }
 
-async function fetchKey(idToken: string, uid: string): Promise<string | null> {
+/** Firestore REST URL for a document path like `users/{uid}/private/gemini` (null when the project is unknown). */
+export function firestoreDocUrl(docPath: string): string | null {
   if (!projectId) return null;
-  const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents/users/${encodeURIComponent(uid)}/private/gemini`;
+  const segs = docPath.split('/').map(encodeURIComponent).join('/');
+  return `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents/${segs}`;
+}
+
+async function fetchKey(idToken: string, uid: string): Promise<string | null> {
+  const url = firestoreDocUrl(`users/${uid}/private/gemini`);
+  if (!url) return null;
   const res = await fetch(url, { headers: { Authorization: `Bearer ${idToken}` } });
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`Firestore ${res.status}`);
   const json: any = await res.json();
   const v = String(json?.fields?.apiKey?.stringValue || '').trim();
   return v || null;
+}
+
+/**
+ * Key restored from the feed backup (server/feedStore.ts) on a fresh server that has had no
+ * signed-in request yet. The next signed-in request reloads the key from Firestore as usual.
+ */
+export function setUserKeyFromFeed(uid: string, key: string): void {
+  if (cached?.key) return;
+  cached = { key, uid, at: 0 };
 }
 
 /**
