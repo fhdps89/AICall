@@ -154,9 +154,9 @@ export const App: React.FC = () => {
           job: profile.job || DEFAULT_PROMPT_PLACEHOLDERS.job,
           surveyTopics: profile.surveyTopics || DEFAULT_PROMPT_PLACEHOLDERS.surveyTopics,
           phillyRole: profile.phillyRole || DEFAULT_PROMPT_PLACEHOLDERS.phillyRole,
-          opicWeakPoints: DEFAULT_PROMPT_PLACEHOLDERS.opicWeakPoints,
-          phillyWeakPoints: DEFAULT_PROMPT_PLACEHOLDERS.phillyWeakPoints,
-          travelWeakPoints: DEFAULT_PROMPT_PLACEHOLDERS.travelWeakPoints,
+          opicWeakPoints: profile.opicWeakPoints || DEFAULT_PROMPT_PLACEHOLDERS.opicWeakPoints,
+          phillyWeakPoints: profile.phillyWeakPoints || DEFAULT_PROMPT_PLACEHOLDERS.phillyWeakPoints,
+          travelWeakPoints: profile.travelWeakPoints || DEFAULT_PROMPT_PLACEHOLDERS.travelWeakPoints,
         });
 
         // Fetch or initialize Goals
@@ -243,6 +243,9 @@ export const App: React.FC = () => {
       job: updated.job,
       surveyTopics: updated.surveyTopics,
       phillyRole: updated.phillyRole,
+      opicWeakPoints: updated.opicWeakPoints,
+      phillyWeakPoints: updated.phillyWeakPoints,
+      travelWeakPoints: updated.travelWeakPoints,
     });
   };
 

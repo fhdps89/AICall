@@ -38,6 +38,7 @@ import {
   getDueMistakes,
 } from "../../services/firebase/db";
 import { authFetch } from "../../services/api/authFetch";
+import { sanitizePlanChangeAfter, isEmptyPlanChange } from "../../data/planValidation";
 
 const DAY_LABELS: Record<string, string> = {
   mon: "월",
@@ -180,12 +181,15 @@ export const CoachModal: React.FC<CoachModalProps> = ({
       let createdChange: PlanChangeData | undefined = undefined;
 
       // 4. If coach proposed a plan change, save it to planChanges collection with status: proposed
-      if (data.proposal) {
+      // Drop anything in the coach's proposal that does not fit the app's data; a proposal with
+      // nothing valid left gets no card (memory notes below are still kept).
+      const safeAfter = data.proposal ? sanitizePlanChangeAfter(data.proposal.after, goals) : null;
+      if (data.proposal && safeAfter && !isEmptyPlanChange(safeAfter)) {
         const changePayload = {
           requestedText: textToSend,
           summary: data.proposal.summary || "학습 일정 변경 제안",
           before: data.proposal.before || {},
-          after: data.proposal.after || {},
+          after: safeAfter as PlanChangeData["after"],
           status: "proposed" as const,
           at: new Date().toISOString(),
         };
@@ -196,22 +200,24 @@ export const CoachModal: React.FC<CoachModalProps> = ({
           id: planChangeId,
         };
 
-        // If memory patch provided, update coachMemory
-        if (data.proposal.memoryPatch) {
-          const mp = data.proposal.memoryPatch;
-          const newMem: CoachMemoryData = {
-            constraints: Array.from(new Set([...(memory.constraints || []), ...(mp.constraints || [])])),
-            preferences: Array.from(new Set([...(memory.preferences || []), ...(mp.preferences || [])])),
-            weakPoints: Array.from(new Set([...(memory.weakPoints || []), ...(mp.weakPoints || [])])),
-            updatedAt: new Date().toISOString(),
-          };
-          await saveCoachMemory(userId, newMem).catch(() => {});
-          setMemory(newMem);
-        }
-
         // Refresh planChanges list
         const updatedChanges = await getPlanChanges(userId);
         setPlanChanges(updatedChanges);
+      }
+
+      // If memory patch provided, update coachMemory
+      if (data.proposal?.memoryPatch) {
+        const mp = data.proposal.memoryPatch;
+        const strList = (v: unknown): string[] =>
+          Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x.trim() !== "") : [];
+        const newMem: CoachMemoryData = {
+          constraints: Array.from(new Set([...(memory.constraints || []), ...strList(mp.constraints)])),
+          preferences: Array.from(new Set([...(memory.preferences || []), ...strList(mp.preferences)])),
+          weakPoints: Array.from(new Set([...(memory.weakPoints || []), ...strList(mp.weakPoints)])),
+          updatedAt: new Date().toISOString(),
+        };
+        await saveCoachMemory(userId, newMem).catch(() => {});
+        setMemory(newMem);
       }
 
       // 5. Save coach message

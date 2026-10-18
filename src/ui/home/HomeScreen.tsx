@@ -833,7 +833,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
             <div className="p-6 overflow-y-auto flex-1 font-mono text-xs leading-relaxed text-slate-300 whitespace-pre-wrap select-text bg-[#0F141C]">
               {promptViewMode === "raw"
                 ? selectedPromptGoal.tutorPrompt
-                : hydrateTutorPrompt(selectedPromptGoal.tutorPrompt, placeholders)}
+                : hydrateTutorPrompt(selectedPromptGoal.tutorPrompt, placeholders, selectedPromptGoal.id)}
             </div>
           </div>
         </div>

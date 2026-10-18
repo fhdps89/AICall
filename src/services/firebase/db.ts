@@ -15,6 +15,7 @@ import {
   limit,
 } from "firebase/firestore";
 import { db, auth } from "./config";
+import { sanitizePlanChangeAfter, isEmptyPlanChange } from "../../data/planValidation";
 
 export enum OperationType {
   CREATE = "create",
@@ -60,6 +61,10 @@ export interface UserProfileData {
   job: string;
   surveyTopics: string;
   phillyRole: string;
+  /** Recent weak points shown to the tutor (Settings → 프롬프트 변수) */
+  opicWeakPoints?: string;
+  phillyWeakPoints?: string;
+  travelWeakPoints?: string;
   sttEngine: string;
   ttsEngine: string;
   lectureTime: string;
@@ -478,26 +483,17 @@ export async function finalizeCallSession(
 export async function getUnfinishedSessions(userId: string): Promise<SessionData[]> {
   const sessionsCol = collection(db, "users", userId, "sessions");
   try {
-    const q = query(
-      sessionsCol,
-      where("status", "in", ["in-progress", "pending_review"]),
-      orderBy("startedAt", "desc"),
-      limit(5)
-    );
-    const snap = await getDocs(q);
-    return snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<SessionData, "id">) }));
+    // Filter on status only (works without a composite index), then sort here. The old
+    // status + orderBy query needed an index this project does not define, so it always fell
+    // back to reading every session.
+    const snap = await getDocs(query(sessionsCol, where("status", "in", ["in-progress", "pending_review"])));
+    return snap.docs
+      .map((d) => ({ id: d.id, ...(d.data() as Omit<SessionData, "id">) }))
+      .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
+      .slice(0, 5);
   } catch (error) {
-    // If composite index is missing in development, fallback to fetching recent and filtering in-memory
-    try {
-      const snap = await getDocs(sessionsCol);
-      const all = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<SessionData, "id">) }));
-      return all
-        .filter((s) => s.status === "in-progress" || s.status === "pending_review")
-        .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
-        .slice(0, 5);
-    } catch {
-      return [];
-    }
+    console.warn("[db] Failed to load unfinished sessions:", error);
+    return [];
   }
 }
 
@@ -526,7 +522,9 @@ export async function checkAndMarkInterruptedSessions(userId: string): Promise<S
   const now = Date.now();
 
   try {
-    const snap = await getDocs(sessionsCol);
+    // Only unfinished calls (single-field filter: no composite index needed). Reading every
+    // session, each with its transcript and chunk list, got slower with every call.
+    const snap = await getDocs(query(sessionsCol, where("status", "in", ["in-progress", "pending_review"])));
     const sessions = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<SessionData, "id">) }));
     const result: SessionData[] = [];
 
@@ -1034,13 +1032,21 @@ export async function applyPlanChange(userId: string, changeId: string): Promise
     throw new Error(`이미 처리된 요청입니다. (현재 상태: ${data.status})`);
   }
 
+  // The coach (LLM) wrote this change: keep only values that fit the app's data
+  // (known goals and lessons, real dates, valid weekday lists).
+  const goalsNow = await getUserGoals(userId);
+  const after = sanitizePlanChangeAfter(data.after, goalsNow) as PlanChangeSnapshot;
+  if (isEmptyPlanChange(after)) {
+    throw new Error("이 제안에는 적용할 수 있는 변경 내용이 없어요. 코치에게 다시 요청해 주세요.");
+  }
+
   // "before" is recorded now, from the live data, for exactly what this change touches. The
   // snapshot taken when the coach proposed it can be stale and covers every goal, so reverting
   // with it would also roll back progress made in between.
   const before: PlanChangeSnapshot = {};
 
   // 1. Apply plan changes if specified
-  if (data.after?.plan) {
+  if (after.plan) {
     const currentPlan = (await getUserPlan(userId)) || {
       weeklyPattern: { ...DEFAULT_WEEKLY_PATTERN },
       minutesPerDay: 25,
@@ -1050,18 +1056,18 @@ export async function applyPlanChange(userId: string, changeId: string): Promise
     const mergedPlan: UserPlanData = {
       weeklyPattern: {
         ...currentPlan.weeklyPattern,
-        ...(data.after.plan.weeklyPattern || {}),
+        ...(after.plan.weeklyPattern || {}),
       },
-      minutesPerDay: data.after.plan.minutesPerDay || currentPlan.minutesPerDay,
+      minutesPerDay: after.plan.minutesPerDay || currentPlan.minutesPerDay,
       updatedAt: new Date().toISOString(),
     };
     await saveUserPlan(userId, mergedPlan);
   }
 
   // 2. Apply goal patches if specified
-  if (data.after?.goals) {
+  if (after.goals) {
     before.goals = {};
-    for (const [goalId, patch] of Object.entries(data.after.goals)) {
+    for (const [goalId, patch] of Object.entries(after.goals)) {
       const gRef = doc(db, "users", userId, "goals", goalId);
       const gSnap = await getDoc(gRef).catch(() => null);
       if (gSnap?.exists()) {
@@ -1085,6 +1091,7 @@ export async function applyPlanChange(userId: string, changeId: string): Promise
     status: "approved",
     appliedAt: new Date().toISOString(),
     before,
+    after, // what was actually applied (revert restores exactly these fields)
   });
 }
 

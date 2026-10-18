@@ -6,5 +6,5 @@
     "allowImportingTsExtensions": true,
     "jsx": "react-jsx"
   },
-  "include": ["server.ts", "server/**/*.ts"]
+  "include": ["server.ts", "server/**/*.ts", "tests/**/*.ts"]
 }

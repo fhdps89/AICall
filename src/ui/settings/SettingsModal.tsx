@@ -54,6 +54,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [pendingLocalChunks, setPendingLocalChunks] = useState<LocalRecordingChunk[]>([]);
   const [loadingRecordings, setLoadingRecordings] = useState(false);
 
+  // Show the latest saved values each time the modal opens
+  useEffect(() => {
+    if (isOpen) setFormData(placeholders);
+  }, [isOpen]);
+
   useEffect(() => {
     if (userId) {
       getUserSettings(userId).then((s) => {
@@ -364,6 +369,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     rows={3}
                     value={formData.phillyWeakPoints}
                     onChange={(e) => setFormData({ ...formData, phillyWeakPoints: e.target.value })}
+                    className="w-full bg-[#121824] border border-slate-700 rounded-lg p-2.5 text-xs text-slate-200 focus:outline-none focus:border-amber-400"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-300 block mb-1">
+                    여행 영어 최근 취약점
+                  </label>
+                  <textarea
+                    rows={3}
+                    value={formData.travelWeakPoints}
+                    onChange={(e) => setFormData({ ...formData, travelWeakPoints: e.target.value })}
                     className="w-full bg-[#121824] border border-slate-700 rounded-lg p-2.5 text-xs text-slate-200 focus:outline-none focus:border-amber-400"
                   />
                 </div>
