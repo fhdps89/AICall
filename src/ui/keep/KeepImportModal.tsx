@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { friendlyError } from "../common/friendlyError";
 import { User } from "firebase/auth";
 import { X, Loader2, ClipboardPaste, CheckCircle2 } from "lucide-react";
 import { authJson } from "../../services/api/authFetch";
@@ -35,7 +36,7 @@ export const KeepImportModal: React.FC<{ user: User; onClose: () => void; onSave
       setItems(res.items.map((it) => ({ ...it, selected: true })));
       if (res.usage) recordUsage(user.uid, { textInputTokens: res.usage.inputTokens, textOutputTokens: res.usage.outputTokens });
     } catch (e: any) {
-      setError(e?.message || String(e));
+      setError(friendlyError(e));
     } finally {
       setBusy(false);
     }
@@ -64,7 +65,7 @@ export const KeepImportModal: React.FC<{ user: User; onClose: () => void; onSave
       setSaved(ids.length);
       onSaved?.(ids.length);
     } catch (e: any) {
-      setError(e?.message || String(e));
+      setError(friendlyError(e));
     } finally {
       setBusy(false);
     }

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { friendlyError } from "../common/friendlyError";
 import { KeyRound, Loader2, Trash2 } from "lucide-react";
 import { saveUserGeminiKey, deleteUserGeminiKey, getUserGeminiKeyHint } from "../../services/firebase/db";
 import { authJson } from "../../services/api/authFetch";
@@ -32,7 +33,7 @@ export const GeminiKeyPanel: React.FC<{ userId?: string }> = ({ userId }) => {
   useEffect(() => {
     if (!userId) return;
     getUserGeminiKeyHint(userId).then(setHint).catch(() => setHint(null));
-    refresh().catch((e) => setMsg(`상태 확인 실패: ${e?.message || e}`));
+    refresh().catch((e) => setMsg(`상태 확인 실패: ${friendlyError(e)}`));
   }, [userId]);
 
   const save = async () => {
@@ -51,7 +52,7 @@ export const GeminiKeyPanel: React.FC<{ userId?: string }> = ({ userId }) => {
       const st = await refresh();
       setMsg(st.hasServerKey ? "저장했어요. 이제 통화를 걸어 보세요." : "저장했지만 서버가 아직 키를 못 읽었어요. 잠시 뒤 다시 열어 주세요.");
     } catch (e: any) {
-      setMsg(`저장 실패: ${e?.message || e}`);
+      setMsg(`저장 실패: ${friendlyError(e)}`);
     } finally {
       setBusy(false);
     }
@@ -66,7 +67,7 @@ export const GeminiKeyPanel: React.FC<{ userId?: string }> = ({ userId }) => {
       await refresh();
       setMsg("지웠어요.");
     } catch (e: any) {
-      setMsg(`삭제 실패: ${e?.message || e}`);
+      setMsg(`삭제 실패: ${friendlyError(e)}`);
     } finally {
       setBusy(false);
     }

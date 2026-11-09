@@ -163,7 +163,8 @@ export function startLectureJob(
     .catch((err) => {
       console.error('[Lecture] job failed:', err);
       state.status = 'failed';
-      state.error = err?.message || String(err);
+      // Shown in the app and on the public feed page: a code only, details stay in the log.
+      state.error = 'GENERATION_FAILED';
       writeLectureState(state);
     })
     .finally(() => running.delete(key));

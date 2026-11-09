@@ -267,7 +267,7 @@ export interface SttPartialItem {
 
 export interface SttFinalData {
   transcript: string;
-  sourceStt: "sttFinal" | "sttPartial_fallback";
+  sourceStt: "sttFinal" | "sttPartial_fallback" | "liveTranscript_fallback" | "none";
   createdAt: string;
   engine: string;
   mode: string;
@@ -284,7 +284,7 @@ export interface ReviewMistakeItem {
 
 export interface SessionReviewData {
   overallEvaluation: string;
-  estimatedLevel: "IM2" | "IH" | "AL" | "Native";
+  estimatedLevel: "IM2" | "IH" | "AL" | "Native" | "-";
   mistakes: ReviewMistakeItem[];
   keyExpressions: Array<{
     expression: string;
@@ -297,6 +297,8 @@ export interface SessionReviewData {
   generatedAt: string;
   /** false when saving this call's mistakes to the app's review list failed */
   mistakesSaved?: boolean;
+  /** false when nothing the learner said was recorded, so the lesson was not counted as done */
+  lessonAdvanced?: boolean;
 }
 
 export interface SessionData {
@@ -450,7 +452,11 @@ export async function updateSessionLiveTranscript(
 }
 
 /**
- * Finalize a normal call session
+ * Close a call session when the user hangs up.
+ * The call is left as "pending_review" until its review is saved (saveSessionReview marks it
+ * "done"). If the app is closed while the review is being made, the call then shows up under
+ * 「끝나지 않은 통화」 instead of silently staying "done" with no review and no saved mistakes.
+ * `archive: true` (「보관만 하기」) marks it "done" without a review.
  */
 export async function finalizeCallSession(
   userId: string,
@@ -459,13 +465,14 @@ export async function finalizeCallSession(
     liveTranscript: Array<{ role: "user" | "model"; text: string; timestamp?: number }>;
     connectionPath?: "direct" | "proxy";
     directFailCount?: number;
+    archive?: boolean;
   }
 ): Promise<void> {
   const sessionRef = doc(db, "users", userId, "sessions", sessionId);
   const now = new Date().toISOString();
   try {
     await updateDoc(sessionRef, {
-      status: "done",
+      status: data.archive ? "done" : "pending_review",
       endedAt: now,
       liveTranscript: data.liveTranscript,
       connectionPath: data.connectionPath || "direct",
@@ -1235,9 +1242,11 @@ export async function removeCoachMemoryItem(
 export async function getCoachMessages(userId: string): Promise<CoachMessageData[]> {
   const colRef = collection(db, "users", userId, "coachMessages");
   try {
-    const q = query(colRef, orderBy("at", "asc"), limit(50));
+    // The latest 50, shown oldest first. (Asking for the first 50 in ascending order returned the
+    // oldest 50 forever, so new messages stopped appearing once the chat passed 50.)
+    const q = query(colRef, orderBy("at", "desc"), limit(50));
     const snap = await getDocs(q);
-    return snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<CoachMessageData, "id">) }));
+    return snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<CoachMessageData, "id">) })).reverse();
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, `users/${userId}/coachMessages`);
   }
@@ -1322,6 +1331,8 @@ export async function checkTwoDayAbsence(userId: string): Promise<boolean> {
       }
     }
 
+    // No finished call at all yet (first days of use): nothing to nudge about.
+    if (doneDates.size === 0) return false;
     // Two consecutive days absent: neither yesterday nor twoDaysAgo had a completed call
     return !doneDates.has(yesterday) && !doneDates.has(twoDaysAgo);
   } catch (error) {

@@ -45,6 +45,7 @@ export const UnfinishedSessionModal: React.FC<UnfinishedSessionModalProps> = ({
         liveTranscript: selectedSession.liveTranscript || [],
         connectionPath: selectedSession.connectionPath || "direct",
         directFailCount: selectedSession.directFailCount || 0,
+        archive: true,
       });
       onResolved();
     } catch (err) {

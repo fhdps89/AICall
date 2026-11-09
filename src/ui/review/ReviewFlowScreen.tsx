@@ -13,7 +13,7 @@ interface ReviewFlowScreenProps {
 export function friendlyReviewError(raw: string): string {
   const m = raw || "";
   if (/Gemini 키가 없어요|GEMINI_API_KEY|연동이 준비되지/.test(m))
-    return "서버에 Gemini 키가 없어 복기를 만들 수 없어요. AI Studio Secrets에 GEMINI_API_KEY를 넣어 주세요.";
+    return "서버에 Gemini 키가 없어 복기를 만들 수 없어요. 설정 → Gemini 키에서 키를 저장한 뒤 다시 만들어 주세요.";
   if (/로그인|인증|401/.test(m)) return "로그인이 만료됐어요. 다시 로그인한 뒤 다시 만들어 주세요.";
   if (/Failed to fetch|NetworkError|network/i.test(m)) return "인터넷 연결이 불안정해요. 연결을 확인하고 다시 만들어 주세요.";
   return m.length > 80 ? "복기를 만드는 중 문제가 생겼어요." : m;
@@ -55,7 +55,7 @@ export const ReviewFlowScreen: React.FC<ReviewFlowScreenProps> = ({
             <h3 className="text-sm font-bold text-white">복기를 만들지 못했어요</h3>
           </div>
           <p className="text-xs text-slate-300 leading-relaxed mb-1">{friendlyReviewError(errorMessage)}</p>
-          <p className="text-[11px] text-slate-500 mb-4">통화 녹음은 저장돼 있어요. 나중에 홈의 '끝나지 않은 통화'에서 다시 만들 수 있어요.</p>
+          <p className="text-[11px] text-slate-500 mb-4">통화 녹음은 저장돼 있어요. 나중에 홈 화면 아래의 '끝나지 않은 통화' 버튼에서 다시 만들 수 있어요.</p>
           <div className="flex gap-2">
             <button
               onClick={onRetry}

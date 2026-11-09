@@ -196,7 +196,9 @@ export class ChunkRecorder {
         if (chunks.length > 0) {
           const finalBlob = new Blob(chunks, { type: this.mimeType });
           // processChunk adds the blob to sessionRecordedBlobs synchronously, before any await.
-          this.processChunk(currentIdx, finalBlob);
+          this.processChunk(currentIdx, finalBlob).catch((err) =>
+            console.warn(`[ChunkRecorder] Chunk ${currentIdx} could not be saved:`, err)
+          );
         }
         segmentDone();
 
@@ -230,12 +232,29 @@ export class ChunkRecorder {
    * 1. Save to IndexedDB
    * 2. Upload to Cloud Storage
    * 3. On success: delete from IndexedDB & append to session doc in Firestore
-   * 4. Check if 1-minute batch is ready for async gemini-3.5-transcribe VERBATIM
+   * (The 1-minute batch for the backup transcript is collected first, before any upload.)
    */
   private async processChunk(index: number, blob: Blob): Promise<void> {
     if (!this.options) return;
     const { userId, sessionId } = this.options;
     this.sessionRecordedBlobs.push(blob);
+
+    // Collect the 1-minute batch right away, in recording order. Doing this after the upload
+    // (as before) let a slow or hanging upload reorder the chunks or hold the minute back, so
+    // the in-call backup transcript came out scrambled or not at all on a weak connection.
+    this.accumulatedBlobsForMinute.push(blob);
+    this.accumulatedChunkIndices.push(index);
+    if (this.accumulatedBlobsForMinute.length >= 6) {
+      const blobsToTranscribe = this.accumulatedBlobsForMinute;
+      const indicesToTranscribe = this.accumulatedChunkIndices;
+      const minuteIdx = this.minuteBatchIndex++;
+      this.accumulatedBlobsForMinute = [];
+      this.accumulatedChunkIndices = [];
+      if (this.options.enablePartialTranscribe !== false) {
+        this.triggerPartialTranscription(minuteIdx, blobsToTranscribe, indicesToTranscribe);
+      }
+    }
+
     const timestamp = Date.now();
     const chunkId = `${sessionId}_chunk_${index}`;
     const storagePath = `recordings/${sessionId}/chunk_${String(index).padStart(4, "0")}_${timestamp}.webm`;
@@ -287,25 +306,7 @@ export class ChunkRecorder {
       console.warn("[ChunkRecorder] Failed to append chunk metadata to Firestore:", dbErr);
     }
 
-    this.options.onChunkRecorded?.(chunkMeta);
-
-    // 5) Accumulate chunks for 1-minute partial transcription
-    this.accumulatedBlobsForMinute.push(blob);
-    this.accumulatedChunkIndices.push(index);
-
-    // 6 chunks = 60 seconds
-    if (this.accumulatedBlobsForMinute.length >= 6) {
-      const blobsToTranscribe = [...this.accumulatedBlobsForMinute];
-      const indicesToTranscribe = [...this.accumulatedChunkIndices];
-      const minuteIdx = this.minuteBatchIndex++;
-
-      this.accumulatedBlobsForMinute = [];
-      this.accumulatedChunkIndices = [];
-
-      if (this.options.enablePartialTranscribe !== false) {
-        this.triggerPartialTranscription(minuteIdx, blobsToTranscribe, indicesToTranscribe);
-      }
-    }
+    this.options?.onChunkRecorded?.(chunkMeta);
   }
 
   /**

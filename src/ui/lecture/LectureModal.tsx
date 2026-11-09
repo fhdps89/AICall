@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { friendlyError } from "../common/friendlyError";
 import { User } from "firebase/auth";
 import { X, Play, Pause, RotateCcw, CheckCircle2, ListOrdered, GraduationCap, Loader2 } from "lucide-react";
 import {
@@ -47,7 +48,7 @@ export const LectureModal: React.FC<LectureModalProps> = ({ user, lecture, onClo
           setOffline("stream");
         }
       } catch (err: any) {
-        setError(err?.message || "오디오를 불러오지 못했어요.");
+        setError(friendlyError(err, "오디오를 불러오지 못했어요."));
       }
     })();
     return () => {
@@ -67,7 +68,7 @@ export const LectureModal: React.FC<LectureModalProps> = ({ user, lecture, onClo
       setToast(`강의 완료! 복습 실수 ${n}개 단계가 올라갔어요.`);
       onCompleted?.();
     } catch (err: any) {
-      setToast(`완료 처리 오류: ${err?.message || err}`);
+      setToast(`완료 처리 오류: ${friendlyError(err)}`);
     }
   };
 

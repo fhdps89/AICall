@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { friendlyError } from "../common/friendlyError";
 import { useDevMode } from "../../data/devMode";
 import { User } from "firebase/auth";
 import {
@@ -153,7 +154,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       );
       setTimeout(() => setDebugToast(null), 4000);
     } catch (err: any) {
-      alert(`단계 진행 오류: ${err?.message || err}`);
+      alert(`단계 진행 오류: ${friendlyError(err)}`);
     } finally {
       setAdvancingId(null);
     }

@@ -55,3 +55,18 @@ test('recording paths stay inside the user folder', () => {
 test('malformed login tokens are rejected', async () => {
   await assert.rejects(verifyFirebaseIdToken('not-a-token'), /malformed/);
 });
+
+test('API error replies carry a fixed sentence and code, never the raw error', async () => {
+  const { apiError, noKey, NO_KEY_MESSAGE } = await import('../server/errors.ts');
+  const calls: any[] = [];
+  const res: any = { status(c: number) { calls.push(c); return this; }, json(b: any) { calls.push(b); return this; } };
+  apiError(res, 500, 'REVIEW_FAILED', '복기 리포트를 만들지 못했어요.');
+  assert.deepEqual(calls, [500, { ok: false, code: 'REVIEW_FAILED', error: '복기 리포트를 만들지 못했어요.' }]);
+  calls.length = 0;
+  noKey(res);
+  assert.deepEqual(calls, [503, { ok: false, code: 'NO_SERVER_KEY', error: NO_KEY_MESSAGE }]);
+  // Guard against a regression: no route in server.ts may put err.message into a response.
+  const src = fs.readFileSync(path.resolve(DATA_DIR, '..', 'server.ts'), 'utf-8');
+  const leaks = src.split('\n').filter((l) => /(json|send)\(.*(err|error|parseErr|connectError)\??\.message/.test(l));
+  assert.deepEqual(leaks, []);
+});

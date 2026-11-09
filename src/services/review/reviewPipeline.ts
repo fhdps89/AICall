@@ -40,6 +40,14 @@ import {
 import { PromptPlaceholders } from "../../data/promptCustomizer";
 import { buildTodayLessonSystemPrompt } from "../../data/lessonPromptBuilder";
 import { mergeChunksToWav, groupChunks } from "../recording/audioMerge";
+import { keepKnownIds, mergeMinuteTranscripts, MinutePartial } from "./reviewRules";
+
+/** Most existing mistakes listed for the model per group (newest first). */
+const MAX_LISTED_MISTAKES = 150;
+
+function slimMistake(m: MistakeData) {
+  return { id: m.id, myPhrase: m.myPhrase, naturalPhrase: m.naturalPhrase, reason: m.reason };
+}
 
 export interface RunReviewParams {
   userId: string;
@@ -122,43 +130,56 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
 
   // Step 2: Final Transcription (VERBATIM) via /api/gemini/transcribe-final, one minute at a time
   let sttFinalText = "";
-  let sourceStt: "sttFinal" | "sttPartial_fallback" | "liveTranscript_fallback" = "sttFinal";
+  let sourceStt: "sttFinal" | "sttPartial_fallback" | "liveTranscript_fallback" | "none" = "sttFinal";
 
   if (chunkBlobs.length > 0) {
     const groups = groupChunks(chunkBlobs);
-    const texts: string[] = [];
-    let failedMinutes = 0;
+    // One entry per minute: text ("" = silence) or null when the request failed twice.
+    const minuteTexts: Array<string | null> = [];
+
+    const transcribeMinute = async (group: Blob[]): Promise<string> => {
+      const merged = await mergeChunksToWav(group);
+      const audio = merged ? merged.wav : new Blob(group, { type: group[0].type || "audio/webm" });
+      if (audio.size <= 1000) return "";
+      const base64 = await blobToBase64(audio);
+      const res = await authFetch("/api/gemini/transcribe-final", {
+        method: "POST",
+        body: JSON.stringify({ audioBase64: base64, mimeType: (audio.type || "audio/webm").split(";")[0] }),
+      });
+      const data = await res.json();
+      if (!data.ok || typeof data.transcript !== "string") throw new Error(`transcribe-final ${res.status}`);
+      return data.transcript.trim();
+    };
 
     for (let i = 0; i < groups.length; i++) {
-      onProgress?.(`1/3 최종 받아쓰기 ${i + 1}/${groups.length}분 진행 중 (gemini-3.5-transcribe)...`);
-      try {
-        const merged = await mergeChunksToWav(groups[i]);
-        const audio = merged ? merged.wav : new Blob(groups[i], { type: groups[i][0].type || "audio/webm" });
-        if (audio.size <= 1000) continue;
-        const base64 = await blobToBase64(audio);
-        const res = await authFetch("/api/gemini/transcribe-final", {
-          method: "POST",
-          body: JSON.stringify({
-            audioBase64: base64,
-            mimeType: audio.type || "audio/webm",
-          }),
-        });
-        const data = await res.json();
-        if (data.ok && typeof data.transcript === "string") {
-          if (data.transcript.trim()) texts.push(data.transcript.trim());
-        } else {
-          failedMinutes++;
+      onProgress?.(`1/3 받아쓰는 중 (${i + 1}/${groups.length}분)...`);
+      let text: string | null = null;
+      // One retry: a single dropped request must not cost the whole verbatim transcript.
+      for (let attempt = 0; attempt < 2 && text === null; attempt++) {
+        try {
+          text = await transcribeMinute(groups[i]);
+        } catch (minuteErr) {
+          console.warn(`[ReviewPipeline] Final transcribe for minute ${i + 1} failed (try ${attempt + 1}):`, minuteErr);
         }
-      } catch (minuteErr) {
-        failedMinutes++;
-        console.warn(`[ReviewPipeline] Final transcribe for minute ${i + 1} failed:`, minuteErr);
       }
+      minuteTexts.push(text);
     }
 
-    // Use the per-minute result only when every minute succeeded; otherwise fall back below.
-    if (texts.length > 0 && failedMinutes === 0) {
-      sttFinalText = texts.join("\n");
-      sourceStt = "sttFinal";
+    let partials: MinutePartial[] = [];
+    if (minuteTexts.some((t) => t === null)) {
+      try {
+        partials = (await getSessionById(userId, sessionId))?.sttPartial || [];
+      } catch (partErr) {
+        console.warn("[ReviewPipeline] Could not load sttPartial to fill failed minutes:", partErr);
+      }
+    }
+    const mergedStt = mergeMinuteTranscripts(minuteTexts, partials);
+    if (mergedStt.missingMinutes.length > 0) {
+      console.warn(`[ReviewPipeline] ${mergedStt.missingMinutes.length}/${groups.length} minutes could not be transcribed`);
+    }
+    if (mergedStt.text) {
+      sttFinalText = mergedStt.text;
+      sourceStt = mergedStt.source;
       // B-10 usage: verbatim transcription minutes (from session start/end)
       getSessionById(userId, sessionId)
         .then((sd) => {
@@ -167,9 +188,7 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
           if (mins > 0) return recordUsage(userId, { sttMinutes: mins, sttEngine: "gemini" });
         })
         .catch(() => {});
-      console.log(`[ReviewPipeline] Final verbatim transcribe successful (${groups.length} min, ${sttFinalText.length} chars)`);
-    } else if (failedMinutes > 0) {
-      console.warn(`[ReviewPipeline] ${failedMinutes}/${groups.length} minutes failed to transcribe, preparing fallback`);
+      console.log(`[ReviewPipeline] Final transcribe done (${groups.length} min, ${sttFinalText.length} chars, source=${sourceStt})`);
     }
   }
 
@@ -202,8 +221,40 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
       sourceStt = "liveTranscript_fallback";
       console.log(`[ReviewPipeline] Using liveTranscript fallback (${userUtterances.length} turns)`);
     } else {
-      sttFinalText = "(통화 녹음 및 실시간 발화 기록이 충분하지 않습니다)";
+      sourceStt = "none";
     }
+  }
+
+  // Nothing the learner said was captured (hung up right away, or the mic was silent). There
+  // is nothing to review: do not ask the model to invent mistakes, and do not count the lesson
+  // as done (the next call offers the same lesson again).
+  if (sourceStt === "none") {
+    const emptyReview: SessionReviewData = {
+      overallEvaluation:
+        "이번 통화에서는 내가 말한 내용이 기록되지 않았어요. 그래서 진도는 그대로 두었어요. 마이크를 확인하고 같은 과로 다시 걸어 주세요.",
+      estimatedLevel: "-",
+      mistakes: [],
+      keyExpressions: [],
+      usedCorrectly: [],
+      repeatedMistakes: [],
+      keepSyncText: "",
+      generatedAt: new Date().toISOString(),
+      mistakesSaved: true,
+      lessonAdvanced: false,
+    };
+    const emptyStt: SttFinalData = {
+      transcript: "",
+      sourceStt: "none",
+      createdAt: new Date().toISOString(),
+      engine: "gemini-3.5-transcribe",
+      mode: "VERBATIM",
+    };
+    try {
+      await saveSessionReview(userId, sessionId, emptyReview, emptyStt);
+    } catch (saveErr) {
+      console.error("[ReviewPipeline] Failed to save empty review:", saveErr);
+    }
+    return { review: emptyReview, sttFinal: emptyStt, mistakes: [] };
   }
 
   onProgress?.("2/3 AI 튜터 복기 리포트 생성 중 (gemini-3.8-flash)...");
@@ -218,8 +269,9 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
     // Mistakes from an earlier run of this same call's review are not "existing" ones: they are
     // replaced below, so they must not be graded as used correctly / repeated.
     const others = existing.filter((m) => m.sessionId !== sessionId);
-    reviewingMistakes = others.filter((m) => m.status === "reviewing" || m.status === "deferred");
-    graduatedMistakes = others.filter((m) => m.status === "graduated");
+    const newestFirst = (a: MistakeData, b: MistakeData) => (b.createdAt || "").localeCompare(a.createdAt || "");
+    reviewingMistakes = others.filter((m) => m.status === "reviewing" || m.status === "deferred").sort(newestFirst).slice(0, MAX_LISTED_MISTAKES);
+    graduatedMistakes = others.filter((m) => m.status === "graduated").sort(newestFirst).slice(0, MAX_LISTED_MISTAKES);
   } catch (err) {
     console.warn("[ReviewPipeline] Could not load user mistakes:", err);
   }
@@ -240,8 +292,10 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
       sourceStt,
       liveTranscript,
       todayLessonPrompt,
-      reviewingMistakes,
-      graduatedMistakes,
+      // Only what the prompt uses, and a bounded number, so the request does not grow with
+      // every call the user has ever made.
+      reviewingMistakes: reviewingMistakes.map(slimMistake),
+      graduatedMistakes: graduatedMistakes.map(slimMistake),
     }),
   });
 
@@ -298,8 +352,12 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
 
   // B-5 Requirement 3: 빠른 졸업 & 다시 복습 (usedCorrectly -> graduated, repeatedMistakes -> reviewing stage 1)
   try {
-    const usedList = Array.isArray(review.usedCorrectly) ? review.usedCorrectly : [];
-    const repeatedList = Array.isArray(review.repeatedMistakes) ? review.repeatedMistakes : [];
+    // The model returns ids; trust only ids from the lists it was given, and only in the right
+    // direction (a "reviewing" item can graduate, a "graduated" one can be reopened).
+    const usedList = keepKnownIds(review.usedCorrectly, reviewingMistakes.map((m) => m.id));
+    const repeatedList = keepKnownIds(review.repeatedMistakes, graduatedMistakes.map((m) => m.id));
+    review.usedCorrectly = usedList;
+    review.repeatedMistakes = repeatedList;
     if (usedList.length > 0 || repeatedList.length > 0) {
       const updateResult = await applyCallMistakeUpdates(userId, usedList, repeatedList);
       console.log(`[ReviewPipeline] Applied B-5 mistake updates: ${updateResult.graduatedCount} graduated, ${updateResult.reopenedCount} reopened.`);
@@ -311,12 +369,13 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
   // Step 7: Save review & sttFinal to session document, mark done
   const sttFinalData: SttFinalData = {
     transcript: sttFinalText,
-    sourceStt: sourceStt === "sttFinal" ? "sttFinal" : "sttPartial_fallback",
+    sourceStt,
     createdAt: new Date().toISOString(),
     engine: "gemini-3.5-transcribe",
     mode: "VERBATIM",
   };
 
+  review.lessonAdvanced = true;
   try {
     await saveSessionReview(userId, sessionId, review, sttFinalData);
     console.log(`[ReviewPipeline] Updated session ${sessionId} to status 'done' with review report.`);

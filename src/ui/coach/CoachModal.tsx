@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { friendlyError } from "../common/friendlyError";
 import {
   X,
   Send,
@@ -243,7 +244,7 @@ export const CoachModal: React.FC<CoachModalProps> = ({
       const errorMsg: CoachMessageData = {
         id: `err-${Date.now()}`,
         role: "coach",
-        text: `죄송합니다. 오류가 발생했습니다: ${err?.message || "다시 시도해 주세요."}`,
+        text: `죄송합니다. 오류가 발생했습니다: ${friendlyError(err, "다시 시도해 주세요.")}`,
         at: new Date().toISOString(),
       };
       setMessages((prev) => [...prev, errorMsg]);
@@ -276,7 +277,7 @@ export const CoachModal: React.FC<CoachModalProps> = ({
       // Trigger app-wide plan & goals refresh
       await onPlanUpdated();
     } catch (err: any) {
-      alert(`적용 오류: ${err?.message || err}`);
+      alert(`적용 오류: ${friendlyError(err)}`);
     } finally {
       setActionLoadingId(null);
     }
@@ -297,7 +298,7 @@ export const CoachModal: React.FC<CoachModalProps> = ({
         )
       );
     } catch (err: any) {
-      alert(`거절 처리 오류: ${err?.message || err}`);
+      alert(`거절 처리 오류: ${friendlyError(err)}`);
     } finally {
       setActionLoadingId(null);
     }
@@ -316,7 +317,7 @@ export const CoachModal: React.FC<CoachModalProps> = ({
       setPlanChanges(updatedChanges);
       await onPlanUpdated();
     } catch (err: any) {
-      alert(`되돌리기 오류: ${err?.message || err}`);
+      alert(`되돌리기 오류: ${friendlyError(err)}`);
     } finally {
       setActionLoadingId(null);
     }
@@ -333,7 +334,7 @@ export const CoachModal: React.FC<CoachModalProps> = ({
         [category]: (prev[category] || []).filter((i) => i !== item),
       }));
     } catch (err: any) {
-      alert(`기억 삭제 실패: ${err?.message || err}`);
+      alert(`기억 삭제 실패: ${friendlyError(err)}`);
     }
   };
 

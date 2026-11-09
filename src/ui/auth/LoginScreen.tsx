@@ -20,10 +20,16 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
       if (err instanceof UnauthorizedUserError) {
         setErrorMessage(err.message);
       } else if (err instanceof Error) {
+        console.warn("[Login] sign-in failed:", err);
+        const m = err.message;
         setErrorMessage(
-          err.message.includes("popup-closed-by-user")
-            ? "로그인 팝업이 닫혔습니다. 다시 시도해 주세요."
-            : `로그인 중 오류가 발생했습니다: ${err.message}`
+          m.includes("popup-closed-by-user") || m.includes("cancelled-popup-request")
+            ? "로그인 창이 닫혔어요. 다시 눌러 주세요."
+            : m.includes("popup-blocked")
+            ? "브라우저가 로그인 창(팝업)을 막았어요. 주소창 옆 안내에서 팝업을 허용한 뒤 다시 눌러 주세요."
+            : m.includes("network-request-failed")
+            ? "인터넷 연결이 불안정해요. 연결을 확인하고 다시 눌러 주세요."
+            : "로그인하지 못했어요. Chrome 브라우저에서 다시 시도해 주세요."
         );
       } else {
         setErrorMessage("알 수 없는 로그인 오류가 발생했습니다.");
