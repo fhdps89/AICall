@@ -1,7 +1,7 @@
 # 📖 프로젝트 컨텍스트 및 히스토리 (Project Context)
 
 > **프로젝트**: One Call English (옛 이름: 「오늘도 한 통」) — AI 1:1 전화영어  
-> **현재 버전**: `v2.8.1` | **최종 갱신**: 2026-10-19 (KST)  
+> **현재 버전**: `v2.9.0` (공식 빌드 표기: `getBuildVersion()`이 `server.ts` 수정 시각으로 계산하는 `20261110-multilingual-HHmm`) | **최종 갱신**: 2026-11-10 (KST)  
 > **기준 기획**: [`docs/plan/implementation_plan_v4.md`](./docs/plan/implementation_plan_v4.md) Part B · 진행 가이드 [`docs/plan/ai-studio-build-guide.md`](./docs/plan/ai-studio-build-guide.md) · 현재 앱과의 차이 [`docs/plan/gap-v2.1.0-vs-plan-v4.md`](./docs/plan/gap-v2.1.0-vs-plan-v4.md)  
 > **관리 규칙**: `README.md` 변경 시 본 문서의 아키텍처 및 히스토리를 함께 최신화하며, 모든 일시는 한국 표준시(KST)를 기준으로 합니다.
 
@@ -133,14 +133,27 @@
    - `NODE_ENV`가 없는 배포 서버에 개발 도구(Vite)가 없으면, 죽지 않고 빌드된 `dist/`를 내보냄(v2.8.0).
 
 13. **테스트·빌드 (v2.8.0)**:
-   - `npm test`: Node 내장 테스트(`node:test`) + `tsx`, `tests/*.test.ts` 17개. 코치 제안 검사, 트랙별 취약점 치환, 복습 실수 3개 제한, 서버 재시작 강의 상태, 2인 음성 조각, 피드 비밀키 형식, 1분 호출 한도, 녹음 경로 차단, 잘못된 로그인 토큰 거부, 1분 묶음, KST 날짜 계산, 비용 계산, 녹음기(마지막 조각 포함·재시작 번호). 녹음기 테스트는 저장 함수를 가짜로 바꿔 끼워 실제 Firebase에 접속하지 않음(`ChunkRecorder` 생성자의 `deps`).
+   - `npm test`: Node 내장 테스트(`node:test`) + `tsx`, `tests/*.test.ts` 25개(v2.9.0: 복기 규칙 `reviewRules`, 화면 오류 문구 `friendlyError`, 느린 업로드에서의 1분 묶음 순서, 서버 오류 응답에 `err.message`가 없는지 검사 추가). 코치 제안 검사, 트랙별 취약점 치환, 복습 실수 3개 제한, 서버 재시작 강의 상태, 2인 음성 조각, 피드 비밀키 형식, 1분 호출 한도, 녹음 경로 차단, 잘못된 로그인 토큰 거부, 1분 묶음, KST 날짜 계산, 비용 계산, 녹음기(마지막 조각 포함·재시작 번호). 녹음기 테스트는 저장 함수를 가짜로 바꿔 끼워 실제 Firebase에 접속하지 않음(`ChunkRecorder` 생성자의 `deps`).
    - CI(`.github/workflows/ci.yml`): 설치 → 앱 타입 검사 → 서버·테스트 타입 검사(`tsconfig.server.json`이 `tests/`도 포함) → 빌드 → `npm test`.
    - 빌드는 라이브러리를 `firebase`·`react`·`icons`·`vendor` 파일로 나눔(`vite.config.ts`). Firebase SDK 자체가 약 590KB(압축 140KB)라 경고 기준을 700KB로 둠.
-   - `npm audit`의 high 4건은 Firebase가 쓰는 `@grpc/grpc-js`(서버용 통신 라이브러리)에서 나옴. 브라우저 앱에서는 쓰이지 않는 부분으로 보고 그대로 둠(추정). 고치려면 Firebase 큰 버전 업그레이드가 필요.
+   - `npm audit`는 10건(high 8, moderate 2, 2026-11-10 기준): Firebase가 쓰는 `@grpc/grpc-js` 계열, 개발 서버용 `vite`·`esbuild`, `qs`·`re2js`·`source-map-js` 등. `npm audit fix`가 Firebase SDK 버전을 올리므로 실기기 QC 뒤 별도 적용 권장.
+
+---
+
+## 4-1. v2.9.0 아키텍처 변경 요약 (2026-11-10 KST)
+- **통화 세션 상태**: `in-progress` → (통화 종료) `pending_review` → (복기 저장) `done`. 「보관만 하기」만 복기 없이 `done`(`finalizeCallSession(..., { archive: true })`). 2일 결석 판단·코치의 최근 세션은 `done`만 셈. 끝낸 통화가 하나도 없으면 결석 띠를 띄우지 않음.
+- **끝나지 않은 통화 다시 열기**: 앱을 열 때의 창 외에, `App.tsx`가 홈 아래에 버튼을 띄움. 복기 실패·완료 뒤 `getUnfinishedSessions`로 목록 갱신.
+- **복기 파이프라인**(`reviewPipeline.ts` + 순수 규칙 `reviewRules.ts`): ① 분마다 받아쓰기(실패 시 1회 재시도) → ② 실패한 분은 같은 `minuteIndex`의 `sttPartial`로 보충(`mergeMinuteTranscripts`) → ③ 녹음이 없으면 `sttPartial` 전체 → ④ 그것도 없으면 Live 대화 로그의 학습자 발화 → ⑤ 아무것도 없으면 `sourceStt: "none"`: AI 복기를 부르지 않고 안내 문구만 저장, 진도 유지(`review.lessonAdvanced = false`). `usedCorrectly`/`repeatedMistakes`는 보낸 목록의 id만 반영(`keepKnownIds`). 기존 실수 목록은 4개 항목만, 종류별 최신 150개까지 전송.
+- **피드 동기화 시점**: 홈 화면 로드 + 복기 완료 직후(`App.tsx` → `syncFeed`).
+- **녹음기**(`chunkRecorder.ts`): 1분 묶음은 조각이 만들어진 즉시 녹음 순서로 쌓음(이전: 업로드·Firestore 기록 뒤). IndexedDB 저장 → 업로드 → 세션 문서 기록 순서는 그대로.
+- **Live 공급자**(`geminiLiveProvider.ts`): `disconnect()`가 진행 중이면 다음 `connect()`가 끝날 때까지 기다림. 서버 중계는 소켓당 `init` 1회.
+- **오류 응답 규칙**(`server/errors.ts`): 모든 실패 응답은 `apiError(res, status, code, 한국어 문구)`. 코드: `NO_SERVER_KEY`·`BAD_REQUEST`·`TTS_FAILED`·`TRANSCRIBE_FAILED`·`REVIEW_FAILED`·`QUIZ_FAILED`·`COACH_FAILED`·`LECTURE_FAILED`·`KEEP_PARSE_FAILED`·`STT_BENCH_FAILED`·`UPLOAD_FAILED`·`TOKEN_FAILED`, 로그인은 `AUTH_FAILED`, 한도는 `rate_limited`. 강의 실패 사유는 `NOTHING_TO_TEACH`·`INTERRUPTED`·`GENERATION_FAILED`. 화면은 `src/ui/common/friendlyError.ts`를 거쳐 표시. (프로젝트 지침의 `/api/analyze` 6종 코드는 이 저장소에 해당 경로가 없어 적용 대상 없음.)
+- **유지한 것**: 일일 한도(`server/rateLimit.ts`), 로그인 확인, 녹음 경로 검사, 업로드 20MB·JSON 10MB 크기 제한, 같은 출처 전용(CORS 허용 헤더 없음). 추가: `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`.
 
 ---
 
 ## 5. 버전 히스토리
+- **v2.9.0 (2026-11-10 KST)**: [전체 코드 리뷰 2차 반영] 통화 종료는 `pending_review`, 복기 저장 시에만 `done`(복기 중 앱을 닫아도 다시 복기 가능, 홈 아래 「끝나지 않은 통화」 버튼). 복기 직후 피드 동기화. 1분 임시 받아쓰기 묶음을 녹음 순서대로(업로드와 무관). 기록용 받아쓰기는 분 단위 재시도 + 실패한 분만 임시 받아쓰기로 보충. 통화 종료 중복 방지, 연결 끊김 시 복기로 이어 가기, 화면 꺼짐 방지 재요청, 「다시 시도」 경합 방지. 내 말이 없는 통화는 진도 유지. 복기 AI가 준 실수 id 검사, 요청 크기 제한. 코치 메시지 최신 50개. 오류 응답 표준화(`server/errors.ts`, 내부 문구 비노출)와 화면용 `friendlyError`. 보안 헤더 2종. 테스트 25개. 기록: `docs/reviews/2026-11-full-code-review.md`, 실기기 QC: `docs/qc/2026-11-android-qc-checklist.html`.
 - **v2.8.1 (2026-10-19 KST)**: [피드 404] 피드 설정과 사용자 Gemini 키를 Firestore `feeds/{id}`에 암호화 백업, 새로 뜬 서버가 복원해 그록봇만으로 아침 강의 생성. `firestore.rules`에 feeds 규칙 추가(배포 필요).
 - **v2.8.0 (2026-10-19 KST)**: [전체 코드 리뷰 반영] 통화마다 새 Live 인스턴스(앞 통화 섞임 해결), 통화 마지막 말 복기 포함, "다시 시도" 시 녹음 번호 이어 가기, Firestore `ignoreUndefinedProperties`(코치 답장·업로드 실패 조각 기록 저장), 복기·코치 승인 뒤 목표 다시 불러오기, 코치 되돌리기는 바꾼 항목만, 오인식 신고 시 실수 삭제, 서버 재시작으로 멈춘 강의 복구, 다시 복기해도 중복·진도 후퇴 없음, 1분 받아쓰기 스위치 연결, 퀴즈 녹음 형식 자동 선택, 취약점 3개 저장(여행 치환 수정), 코치 제안 검사, 키 탐색 1분 캐시·부모 프로세스만, 상태 API 경로 비노출, 미완료 통화만 읽기, 안 쓰는 코드 삭제, 빌드 파일 나누기, 자동 테스트 17개. 상세: [`docs/reviews/2026-10-full-code-review.md`](./docs/reviews/2026-10-full-code-review.md).
 - **v2.7.8 (2026-10-15 KST)**: [오디오 404] `.data/` 아래 파일을 `sendFile`이 거부하던 문제 수정(`dotfiles: 'allow'`). 강의·피드·녹음 오디오 재생.

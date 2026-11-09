@@ -79,6 +79,9 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
   const [attempt, setAttempt] = useState<number>(0);
   const [micWarning, setMicWarning] = useState<string | null>(null);
   const sessionCreatedRef = useRef<boolean>(false);
+  // Guards 통화 종료 against a double tap (it would finalize and review the call twice).
+  const hangingUpRef = useRef<boolean>(false);
+  const [hangingUp, setHangingUp] = useState<boolean>(false);
 
   const transcriptsEndRef = useRef<HTMLDivElement>(null);
   // One provider per call screen: "다시 시도" in the same call reuses it (keeps transcript and
@@ -108,7 +111,14 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
       }
     };
     requestWakeLock();
+    // The browser drops the wake lock whenever the page is hidden (another app, notification
+    // shade, screen off). Ask again when the user comes back, or the screen dims mid-call.
+    const onVisible = () => {
+      if (document.visibilityState === "visible") requestWakeLock();
+    };
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
+      document.removeEventListener("visibilitychange", onVisible);
       if (sentinel) {
         sentinel.release().catch(() => {});
       }
@@ -277,6 +287,9 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
 
   // Handle End Call
   const handleHangUp = async () => {
+    if (hangingUpRef.current) return;
+    hangingUpRef.current = true;
+    setHangingUp(true);
     // Nothing was recorded (mic never started): just leave, no review.
     if (!sessionCreatedRef.current) {
       await handleExitAfterError();
@@ -300,7 +313,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
       recordUsage(userId, { liveMinutes: callDuration / 60 });
     }
 
-    await providerRef.current.disconnect();
+    await providerRef.current.disconnect().catch(() => {});
     onEndCall(finalTranscripts, stats, sessionIdRef.current, recordedBlobs);
   };
 
@@ -318,7 +331,9 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
           <div className="w-full max-w-sm rounded-2xl bg-[#161D2A] border border-rose-500/30 p-5 shadow-2xl">
             <div className="flex items-center gap-2 mb-2">
               <MicOff className="w-5 h-5 text-rose-400" />
-              <h3 className="text-sm font-bold text-white">통화를 시작하지 못했어요</h3>
+              <h3 className="text-sm font-bold text-white">
+                {sessionCreatedRef.current && callDuration > 0 ? "통화 연결이 끊겼어요" : "통화를 시작하지 못했어요"}
+              </h3>
             </div>
             <p className="text-xs text-slate-300 leading-relaxed mb-4">{connectError}</p>
             <div className="flex gap-2">
@@ -328,11 +343,13 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
               >
                 다시 시도
               </button>
+              {/* A call that already has recordings is ended properly (saved + reviewed), not dropped. */}
               <button
-                onClick={handleExitAfterError}
-                className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs cursor-pointer"
+                onClick={handleHangUp}
+                disabled={hangingUp}
+                className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 font-bold text-xs cursor-pointer"
               >
-                나가기
+                {sessionCreatedRef.current && callDuration > 0 ? "여기서 끝내고 복기 보기" : "나가기"}
               </button>
             </div>
           </div>
@@ -542,10 +559,11 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
           {/* End Call Button */}
           <button
             onClick={handleHangUp}
-            className="w-full py-3.5 px-4 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-rose-600/25 transition-all cursor-pointer"
+            disabled={hangingUp}
+            className="w-full py-3.5 px-4 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-60 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-rose-600/25 transition-all cursor-pointer"
           >
             <PhoneOff className="w-4 h-4" />
-            <span>통화 종료</span>
+            <span>{hangingUp ? "통화를 마무리하는 중..." : "통화 종료"}</span>
           </button>
         </div>
       </footer>

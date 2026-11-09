@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { friendlyError } from "../common/friendlyError";
 import { User } from "firebase/auth";
 import { X, Mic, Square, Loader2, ChevronRight, Copy, Save } from "lucide-react";
 import { getUserMistakes, MistakeData } from "../../services/firebase/db";
@@ -144,7 +145,7 @@ export const SttBenchmarkModal: React.FC<{ user: User; onClose: () => void }> = 
       setResults(emptyResults());
       setIdx((i) => Math.min(i + 1, sentences.length - 1));
     } catch (e: any) {
-      setMsg(`저장 실패: ${e?.message || e}`);
+      setMsg(`저장 실패: ${friendlyError(e)}`);
     } finally {
       setSaving(false);
     }

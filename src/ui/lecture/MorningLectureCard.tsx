@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { friendlyError } from "../common/friendlyError";
 import { User } from "firebase/auth";
 import { Headphones, Loader2, Play, RefreshCw, AlertTriangle } from "lucide-react";
 import { getKSTToday } from "../../services/firebase/db";
@@ -60,7 +61,7 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({ user, on
     try {
       setLecture(await startLecture(user.uid, today, force));
     } catch (err: any) {
-      setError(err?.message || String(err));
+      setError(friendlyError(err));
     } finally {
       setBusy(false);
     }
@@ -99,7 +100,7 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({ user, on
                   ? "새 실수·복습 대상이 없어요"
                   : lecture.error === "INTERRUPTED"
                   ? "서버가 다시 시작되어 만들던 강의가 멈췄어요. 다시 만들어 주세요."
-                  : lecture.error}
+                  : "강의를 만들지 못했어요. 잠시 후 다시 만들어 주세요."}
               </div>
             )}
             {error && <div className="text-[11px] text-rose-300">{error}</div>}

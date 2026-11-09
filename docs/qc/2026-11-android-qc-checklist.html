@@ -1,0 +1,705 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>One Call English 실기기 QC</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap">
+<style>
+/* 레이아웃: 한 줄 폭의 작업 지시서. 위에 진행 현황, 아래로 구역별 확인 항목. 컨설팅 보고서 스타일(흰 배경, 남색 하나와 회색, 모서리 0). */
+:root {
+  --paper: #ffffff;
+  --navy: #0B2A4A;
+  --navy-soft: #E7ECF2;
+  --ink: #1F2933;
+  --gray-600: #5B6672;
+  --gray-400: #9AA5B1;
+  --gray-300: #CBD2D9;
+  --gray-100: #F2F4F6;
+  --font: "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--paper); color: var(--ink);
+  font-family: var(--font); font-size: 16px; line-height: 1.65;
+  word-break: keep-all; overflow-wrap: anywhere;
+}
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--paper); }
+.wrap {
+  max-width: 720px; margin: 0 auto; padding-block: 24px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: flex; flex-direction: column; gap: 28px;
+}
+.tracker { font-size: 13px; color: var(--gray-600); margin: 0 0 4px; }
+h1 { font-size: 24px; line-height: 1.35; color: var(--navy); margin: 0; text-wrap: balance; }
+.rule { border: 0; border-top: 1px solid var(--gray-300); margin: 16px 0 0; }
+.lead { margin: 16px 0 0; }
+h2 { font-size: 19px; line-height: 1.4; color: var(--navy); margin: 0; text-wrap: balance; }
+.sec-head { border-bottom: 1px solid var(--gray-300); padding-bottom: 8px; display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.sec-count { font-size: 13px; color: var(--gray-600); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sec-note { font-size: 14px; color: var(--gray-600); margin: 8px 0 0; }
+section { display: flex; flex-direction: column; gap: 12px; }
+
+/* 진행 현황 */
+.status {
+  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5;
+  background: var(--paper); border-bottom: 1px solid var(--gray-300);
+  margin-inline: calc(-1 * max(16px, env(safe-area-inset-left, 0px))) calc(-1 * max(16px, env(safe-area-inset-right, 0px)));
+  padding: 10px max(16px, env(safe-area-inset-right, 0px)) 10px max(16px, env(safe-area-inset-left, 0px));
+  display: flex; flex-direction: column; gap: 8px;
+}
+.status-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.status-main { font-weight: 700; color: var(--navy); font-variant-numeric: tabular-nums; }
+.status-sub { font-size: 13px; color: var(--gray-600); font-variant-numeric: tabular-nums; }
+.bar { height: 6px; background: var(--gray-100); }
+.bar > i { display: block; height: 100%; width: 0; background: var(--navy); transition: width .2s; }
+.filters { display: flex; gap: 8px; flex-wrap: wrap; }
+.filters button {
+  font: inherit; font-size: 14px; padding: 6px 12px; min-height: 36px; cursor: pointer;
+  background: var(--paper); color: var(--ink); border: 1px solid var(--gray-400);
+}
+.filters button[aria-pressed="true"] { background: var(--navy); color: #fff; border-color: var(--navy); font-weight: 700; }
+
+/* 안내 표 */
+.kv { display: grid; grid-template-columns: minmax(84px, max-content) 1fr; gap: 6px 16px; margin: 0; font-size: 15px; }
+.kv dt { font-weight: 700; color: var(--navy); }
+.kv dd { margin: 0; min-width: 0; }
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field label { font-size: 14px; font-weight: 700; color: var(--navy); }
+.field input, .item textarea {
+  font: inherit; width: 100%; padding: 10px 12px; color: var(--ink);
+  background: var(--paper); border: 1px solid var(--gray-400); border-radius: 0;
+}
+.field .hint { font-size: 13px; color: var(--gray-600); }
+.linkrow { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+a { color: var(--navy); }
+:focus-visible { outline: 2px solid var(--navy); outline-offset: 2px; }
+
+/* 확인 항목 */
+.item { border: 1px solid var(--gray-300); }
+.item[data-s="pass"] { border-color: var(--navy); }
+.item[data-s="fail"] { border: 2px solid var(--navy); }
+.item summary {
+  list-style: none; cursor: pointer; padding: 12px 14px;
+  display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: baseline;
+}
+.item summary::-webkit-details-marker { display: none; }
+.num { font-weight: 700; color: var(--navy); font-variant-numeric: tabular-nums; }
+.ttl { font-weight: 700; min-width: 0; }
+.meta { display: block; font-weight: 400; font-size: 13px; color: var(--gray-600); margin-top: 2px; }
+.badge { font-size: 13px; font-weight: 700; padding: 1px 8px; border: 1px solid var(--gray-400); color: var(--gray-600); white-space: nowrap; }
+.item[data-s="pass"] .badge { background: var(--navy); border-color: var(--navy); color: #fff; }
+.item[data-s="fail"] .badge { border-color: var(--navy); color: var(--navy); }
+.body { padding: 0 14px 14px; display: flex; flex-direction: column; gap: 12px; }
+.body p { margin: 0; }
+.pre { font-size: 14px; color: var(--gray-600); }
+.steps { margin: 0; padding-left: 0; list-style: none; counter-reset: s; display: flex; flex-direction: column; gap: 10px; }
+.steps li { counter-increment: s; display: grid; grid-template-columns: 26px 1fr; gap: 8px; }
+.steps li::before { content: counter(s); font-weight: 700; color: var(--navy); font-variant-numeric: tabular-nums; border: 1px solid var(--navy); width: 24px; height: 24px; line-height: 22px; text-align: center; font-size: 13px; margin-top: 2px; }
+.steps .see { display: block; font-size: 14px; color: var(--gray-600); }
+.ok, .bad { padding: 10px 12px; font-size: 15px; }
+.ok { background: var(--navy-soft); }
+.bad { background: var(--gray-100); }
+.ok b, .bad b { color: var(--navy); }
+.btns { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.btns button {
+  font: inherit; font-weight: 700; min-height: 48px; cursor: pointer; border-radius: 0;
+  background: var(--paper); color: var(--navy); border: 1px solid var(--navy);
+}
+.btns button[aria-pressed="true"] { background: var(--navy); color: #fff; }
+.item textarea { min-height: 84px; resize: vertical; }
+.notelabel { font-size: 14px; font-weight: 700; color: var(--navy); }
+b.ui { font-weight: 700; color: var(--navy); white-space: normal; }
+
+.copybtn {
+  font: inherit; font-weight: 700; min-height: 48px; padding: 0 16px; cursor: pointer;
+  background: var(--navy); color: #fff; border: 1px solid var(--navy); border-radius: 0;
+}
+#copyOut { font: inherit; font-size: 14px; width: 100%; min-height: 160px; padding: 10px 12px; border: 1px solid var(--gray-400); border-radius: 0; color: var(--ink); background: var(--paper); }
+.foot { font-size: 12px; color: var(--gray-600); border-top: 1px solid var(--gray-300); padding-top: 12px; }
+.foot p { margin: 0 0 4px; }
+@media (prefers-reduced-motion: reduce) { .bar > i { transition: none; } }
+</style>
+</head>
+<body style="margin:0">
+<div class="wrap">
+  <header>
+    <p class="tracker">One Call English v2.9.0 · 안드로이드 폰 · 2026-11-10 KST 작성</p>
+    <h1>폰에서 직접 눌러 봐야 하는 <span id="totalCount">34</span>가지를 순서대로 확인한다</h1>
+    <hr class="rule">
+    <p class="lead">코드로 확인할 수 있는 것은 이미 자동 검사를 통과했다. 이 목록은 실제 폰, 실제 목소리, 실제 인터넷이 있어야만 알 수 있는 것만 모았다. 앱을 처음 보는 사람도 위에서부터 한 줄씩 따라 하면 된다. 각 항목 끝에서 <b class="ui">통과</b> 또는 <b class="ui">문제 있음</b>을 누르면 자동으로 저장된다.</p>
+  </header>
+
+  <div class="status" id="status">
+    <div class="status-row">
+      <span class="status-main" id="progMain">0 / 0 확인</span>
+      <span class="status-sub" id="progSub">통과 0 · 문제 0 · 남음 0</span>
+    </div>
+    <div class="bar"><i id="progBar"></i></div>
+    <div class="status-row">
+      <div class="filters" role="group" aria-label="보기 선택">
+        <button type="button" data-f="all" aria-pressed="true">전체</button>
+        <button type="button" data-f="todo" aria-pressed="false">남은 것만</button>
+        <button type="button" data-f="fail" aria-pressed="false">문제만</button>
+      </div>
+      <span class="status-sub" id="syncNote">이 기기에 저장</span>
+    </div>
+  </div>
+
+  <section aria-labelledby="h-guide">
+    <div class="sec-head"><h2 id="h-guide">전체는 약 80분이고, 마지막 2개는 다음 날 아침에 한다</h2></div>
+    <dl class="kv">
+      <dt>준비물</dt><dd>안드로이드 폰, Chrome 앱, 이어폰(유선이나 블루투스), Wi-Fi, 충전 50% 이상</dd>
+      <dt>계정</dt><dd>이 앱은 주인의 Google 계정 하나로만 로그인된다. 다른 사람이 테스트할 때는 주인이 그 폰에서 먼저 로그인해 준다.</dd>
+      <dt>나눠서 하기</dt><dd>중간에 닫아도 된다. 다시 열면 누른 결과가 남아 있다.</dd>
+      <dt>문제가 생기면</dt><dd><b class="ui">문제 있음</b>을 누르고 화면에 보인 글자를 그대로 적는다. 화면 캡처(전원 + 볼륨 아래 버튼을 동시에)도 찍어 둔다. 그리고 다음 항목으로 넘어간다.</dd>
+    </dl>
+    <dl class="kv">
+      <dt>홈</dt><dd>로그인하면 처음 보이는 화면. 「오늘 할 것」이라는 글자가 있다.</dd>
+      <dt>과</dt><dd>수업 한 회분. 「3과」는 세 번째 수업이라는 뜻이다.</dd>
+      <dt>복기</dt><dd>통화가 끝난 뒤 내가 틀리게 말한 문장과 고친 문장을 정리해 보여 주는 화면.</dd>
+      <dt>튜터</dt><dd>통화에서 영어로 말을 거는 AI 선생님.</dd>
+    </dl>
+    <div class="field">
+      <label for="appUrl">앱 주소 (한 번만 붙여 넣으면 저장된다)</label>
+      <input id="appUrl" type="url" inputmode="url" placeholder="https://… (주인에게 받은 주소)" autocomplete="off">
+      <div class="linkrow"><a id="appLink" href="#" target="_blank" rel="noopener" hidden>앱 새 탭으로 열기</a><span class="hint">주소를 모르면 주인에게 묻는다. AI Studio에서 Publish했을 때 나온 주소다.</span></div>
+    </div>
+    <div class="field">
+      <label for="device">테스트한 폰과 사람 (선택)</label>
+      <input id="device" type="text" placeholder="예: 갤럭시 S24 · 홍길동" autocomplete="off">
+    </div>
+  </section>
+
+  <div id="sections" style="display:flex;flex-direction:column;gap:28px"></div>
+
+  <section aria-labelledby="h-send">
+    <div class="sec-head"><h2 id="h-send">끝나면 결과를 복사해 대화창에 붙여 넣는다</h2></div>
+    <p class="sec-note">아래 단추를 누르면 통과·문제 개수와 문제로 표시한 항목의 메모가 글로 복사된다. 이 글을 Claude 대화창에 붙여 넣으면 문제 항목부터 고친다.</p>
+    <button type="button" class="copybtn" id="copyBtn">결과 글로 복사</button>
+    <span class="status-sub" id="copyMsg" role="status"></span>
+    <textarea id="copyOut" hidden readonly aria-label="복사할 결과"></textarea>
+  </section>
+
+  <footer class="foot">
+    <p>주: 화면의 단추 이름은 v2.9.0 코드 기준이다. 아이폰 전용 확인(퀴즈 말하기)은 이 목록에서 뺐다.</p>
+    <p>주: 「10월 이월」은 2026-10 리뷰에서 실기기 확인이 남았던 항목, 「이번 수정」은 v2.9.0에서 고친 부분이다.</p>
+    <p>출처: docs/reviews/2026-11-full-code-review.md, docs/reviews/2026-10-full-code-review.md (GitHub fhdps89/AICall)</p>
+  </footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var U = function (s) { return '<b class="ui">' + s + '</b>'; };
+
+  var SECTIONS = [
+    { id: "P", title: "먼저 새 버전이 올라가 있어야 한다", note: "주인만 할 수 있는 준비다. 테스트만 맡은 사람은 주인에게 끝났는지 묻고 통과를 누른다.", items: [
+      { id: "P1", t: "새 버전(v2.9.0)을 배포한다", time: "주인 · 10분", tag: "준비",
+        steps: [
+          ["GitHub에서 이번 수정 PR의 " + U("Merge pull request") + "를 누른다.", "보라색 「Merged」 표시가 나온다."],
+          ["AI Studio에서 이 앱을 열고 GitHub에서 최신 코드를 가져온다(pull).", "파일 목록에 server/errors.ts가 새로 보인다."],
+          ["AI Studio 오른쪽 위 " + U("Publish") + "를 누른다.", "배포가 끝났다는 안내와 앱 주소가 나온다."],
+          ["그 주소를 이 페이지 위쪽 「앱 주소」 칸에 붙여 넣는다.", "칸 아래에 「앱 새 탭으로 열기」가 생긴다."]
+        ],
+        ok: "Publish가 오류 없이 끝났고 앱 주소가 열린다.",
+        bad: "pull 전에 AI Studio에서 무언가 고치면 GitHub의 수정이 덮어써진다. 반드시 pull을 먼저 한다." },
+      { id: "P2", t: "폰을 준비한다", time: "2분", tag: "준비",
+        steps: [
+          ["폰을 Wi-Fi에 연결한다.", "화면 위쪽에 부채꼴 Wi-Fi 표시가 보인다."],
+          ["폰 옆의 볼륨 위 버튼을 눌러 미디어 소리를 절반 이상으로 올린다.", "화면에 소리 막대가 나타나 올라간다."],
+          ["이어폰을 옆에 둔다. 아직 꽂지 않는다.", ""]
+        ],
+        ok: "Wi-Fi 연결, 소리 절반 이상, 이어폰 준비가 끝났다.", bad: "" }
+    ]},
+    { id: "A", title: "앱을 열고 로그인이 된다", note: "", items: [
+      { id: "A1", t: "Chrome에서 앱이 열린다", time: "1분", tag: "기본",
+        steps: [
+          ["폰에서 " + U("Chrome") + " 앱(빨강·노랑·초록·파랑 동그라미)을 연다.", ""],
+          ["맨 위 주소 칸을 누르고 앱 주소를 붙여 넣은 뒤 키보드의 이동(→) 키를 누른다.", "어두운 바탕의 로그인 화면이 나온다."]
+        ],
+        ok: U("Google 계정으로 로그인") + " 단추가 보인다. 글자가 화면 밖으로 잘리지 않는다.",
+        bad: "흰 화면만 나오거나 영어 오류 글만 보인다." },
+      { id: "A2", t: "Google 계정으로 로그인된다", time: "1분", tag: "기본",
+        steps: [
+          [U("Google 계정으로 로그인") + "을 누른다.", "Google 계정을 고르는 창이 뜬다."],
+          ["주인의 계정을 누른다.", "창이 닫히고 홈이 나온다."]
+        ],
+        ok: "「오늘 할 것」과 " + U("오늘 수업 통화 시작하기") + " 단추가 보인다.",
+        bad: "창이 안 뜨면 주소 칸 옆에 「팝업 차단」 안내가 있는지 본다. 한국어가 아닌 영어 오류 글이 보이면 그대로 적는다." },
+      { id: "A3", t: "로그인 창을 그냥 닫으면 한국어 안내가 나온다", time: "1분", tag: "이번 수정", optional: true,
+        pre: "A2에서 이미 로그인했다면: 홈 위쪽 " + U("로그아웃") + "을 먼저 누른다.",
+        steps: [
+          [U("Google 계정으로 로그인") + "을 누른다.", "계정 고르는 창이 뜬다."],
+          ["계정을 고르지 않고 폰의 뒤로 가기로 창을 닫는다.", "로그인 화면으로 돌아온다."],
+          ["확인이 끝나면 다시 눌러 정상 로그인한다.", "홈이 나온다."]
+        ],
+        ok: "「로그인 창이 닫혔어요. 다시 눌러 주세요.」처럼 한국어 안내가 나온다.",
+        bad: "「auth/popup-closed-by-user」 같은 영어 코드가 보인다." },
+      { id: "A4", t: "Gemini 키가 저장돼 있다", time: "2분", tag: "기본",
+        steps: [
+          ["홈 위쪽의 " + U("설정") + "을 누른다.", "설정 창이 열린다."],
+          ["탭 줄을 옆으로 밀어 " + U("Gemini 키") + "를 누른다.", "「현재 상태」 줄이 보인다."],
+          ["「현재 상태」 글을 읽는다.", ""]
+        ],
+        ok: "「여기 저장한 키로 통화하고 있어요.」 또는 「배포 서버 자체 키로 통화하고 있어요.」라고 나온다.",
+        bad: "「서버에 쓸 수 있는 키가 없어요」라고 나오면 주인이 키를 붙여 넣고 " + U("키 저장") + "을 눌러야 한다. 키가 없으면 아래 통화 항목은 모두 안 된다." }
+    ]},
+    { id: "B", title: "전화를 걸기 전에 마이크 점검이 된다", note: "", items: [
+      { id: "B1", t: "마이크 점검을 통과해야 전화 걸기가 켜진다", time: "2분", tag: "기본",
+        steps: [
+          ["홈에서 " + U("오늘 수업 통화 시작하기") + "를 누른다.", "「통화 준비」 화면이 나온다."],
+          ["아래쪽 " + U("전화 걸기") + " 자리를 본다.", "아직 흐리게 꺼져 있고 「마이크 점검 후 전화를 걸 수 있어요」라고 쓰여 있다."],
+          [U("마이크 점검하기") + "를 누른다.", "Chrome이 마이크를 써도 되는지 묻는다."],
+          [U("허용") + "(또는 「사이트 이용 중에만 허용」)을 누른다.", "「마이크가 연결됐어요. 말해 보면 막대가 움직여요.」가 나온다."],
+          ["폰에 대고 「Hello, hello」라고 말한다.", "막대가 목소리에 맞춰 움직인다."]
+        ],
+        ok: "막대가 움직이고 " + U("전화 걸기") + " 단추가 선명하게 켜진다.",
+        bad: "허용했는데도 「마이크 권한이 꺼져 있어요」가 나온다. 또는 말해도 막대가 안 움직인다." },
+      { id: "B2", t: "이어폰을 꽂아도 마이크 점검이 된다", time: "2분", tag: "기본",
+        steps: [
+          ["이어폰을 폰에 연결한다(블루투스는 귀에 꽂고 연결음이 날 때까지 기다린다).", ""],
+          [U("다시 점검") + "을 누른다.", "막대가 다시 나타난다."],
+          ["평소 목소리로 「Testing one two three」라고 말한다.", "막대가 움직인다."]
+        ],
+        ok: "이어폰을 낀 상태에서도 막대가 움직인다.",
+        bad: "「마이크를 찾지 못했어요」가 나온다." }
+    ]},
+    { id: "C", title: "3분 통화가 끊기지 않고 이어진다", note: "B2에 이어서 이어폰을 낀 채로 한다. 영어를 잘 못해도 된다. 「I like coffee」처럼 짧은 문장이면 충분하다.", items: [
+      { id: "C1", t: "튜터와 연결되고 서로 말이 들린다", time: "2분", tag: "기본",
+        steps: [
+          [U("전화 걸기") + "를 누른다.", "「튜터 연결 준비 중...」이 잠깐 보인다."],
+          ["10초쯤 기다린다.", "위쪽에 「연결 유지 중」이 보이고 튜터가 영어로 먼저 말을 건다."],
+          ["튜터 말이 끝나면 영어로 한 문장 대답한다. 예: 「I am fine. I went to work today.」", "잠시 뒤 튜터가 내 말에 맞는 대답을 한다."],
+          ["화면 가운데 글 영역을 본다.", "방금 나눈 말이 글자로 조금씩 나타난다."]
+        ],
+        ok: "튜터 목소리가 또렷하고, 내가 말하면 튜터가 알아듣고 대답한다.",
+        bad: "20초가 지나도 조용하다. 또는 「통화를 시작하지 못했어요」가 나온다." },
+      { id: "C2", t: "소리가 이어폰으로 나오고 볼륨 버튼이 듣는다", time: "1분", tag: "기본",
+        pre: "통화 중에 한다.",
+        steps: [
+          ["튜터가 말할 때 소리가 어디서 나는지 듣는다.", "이어폰에서 난다. 폰 스피커는 조용하다."],
+          ["폰 옆 볼륨 아래 버튼을 두 번 누른다.", "튜터 목소리가 작아진다."],
+          ["볼륨 위 버튼을 두 번 누른다.", "다시 커진다."]
+        ],
+        ok: "이어폰으로만 들리고 볼륨 버튼으로 크기가 바뀐다.",
+        bad: "이어폰을 꼈는데 폰 스피커로 나온다. 또는 볼륨 버튼이 벨소리 크기만 바꾼다." },
+      { id: "C3", t: "아래 단추 네 개가 듣는다", time: "2분", tag: "기본",
+        pre: "통화 중에 한다. 단추는 화면 아래에 한 줄로 있다.",
+        steps: [
+          ["영어로 한 문장 말한 뒤 " + U("피드백") + "을 누른다.", "「요청을 보냈어요」가 잠깐 뜨고 튜터가 방금 말을 고쳐 준다."],
+          [U("천천히") + "를 누른다.", "튜터가 느리게 또박또박 말한다."],
+          [U("모범답") + "을 누른다.", "튜터가 긴 예시 답을 들려준다."],
+          [U("잠깐") + "을 누른다.", "튜터가 멈추고 무엇이 필요한지 묻는다."]
+        ],
+        ok: "네 단추 모두 누른 뒤 튜터의 말이 그에 맞게 바뀐다.",
+        bad: "눌러도 아무 변화가 없는 단추가 있다(어느 단추인지 적는다)." },
+      { id: "C4", t: "통화 중에는 화면이 저절로 꺼지지 않는다", time: "3분", tag: "이번 수정",
+        pre: "통화 중에 한다. 화면을 손대지 않고 본다.",
+        steps: [
+          ["화면을 만지지 않고 튜터와 1분 넘게 말을 주고받는다.", "화면이 계속 켜져 있다."],
+          ["폰 아래 가운데 홈 버튼(또는 아래에서 위로 쓸기)으로 폰 바탕화면에 나간다.", "앱이 안 보인다."],
+          ["5초 센 뒤 최근 앱 목록에서 Chrome을 눌러 돌아온다.", "통화 화면이 그대로 있다."],
+          ["다시 화면을 만지지 않고 1분 넘게 말을 주고받는다.", "화면이 계속 켜져 있다."]
+        ],
+        ok: "나갔다 돌아온 뒤에도 화면이 저절로 꺼지지 않고 통화가 이어진다.",
+        bad: "돌아온 뒤 30초~1분쯤에 화면이 꺼진다. 또는 돌아왔더니 통화가 끊겨 있다. (폰의 화면 자동 꺼짐 시간이 몇 초로 돼 있는지도 적는다.)" },
+      { id: "C5", t: "통화 종료를 두 번 눌러도 한 번만 끝난다", time: "1분", tag: "이번 수정",
+        pre: "지금까지 3분 넘게 통화했으면 한다.",
+        steps: [
+          ["맨 아래 빨간 " + U("통화 종료") + "를 빠르게 두 번 연달아 누른다.", "단추 글자가 「통화를 마무리하는 중...」으로 바뀐다."],
+          ["기다린다.", "「통화 복기를 만들고 있어요」 화면이 한 번 나온다."]
+        ],
+        ok: "복기 만드는 화면이 한 번만 나온다. 화면이 깜박이며 두 번 나오지 않는다.",
+        bad: "오류 글이 뜨거나 복기 화면이 두 번 연달아 열린다." }
+    ]},
+    { id: "D", title: "통화가 끝나면 복기가 나오고 진도가 넘어간다", note: "C5에 이어서 한다.", items: [
+      { id: "D1", t: "복기가 2분 안에 나오고 내가 한 말이 맞게 적혀 있다", time: "3분", tag: "이번 수정",
+        steps: [
+          ["「통화 복기를 만들고 있어요」 화면에서 화면을 닫지 않고 기다린다.", "2분 안에 「통화 복기 & 실수 분석」 화면으로 바뀐다."],
+          ["「오늘의 총평」을 읽는다.", "방금 통화 내용에 맞는 평이다."],
+          ["아래로 내려 「내가 한 말」 칸들을 읽는다.", "내가 실제로 말한 문장이다."]
+        ],
+        ok: "내가 한 말이 실제와 같고, 말한 순서가 앞뒤로 뒤섞이지 않았다.",
+        bad: "「복기를 만들지 못했어요」가 나온다(아래 글자를 그대로 적는다). 또는 하지 않은 말이 많이 적혀 있다." },
+      { id: "D2", t: "발음 듣기가 된다", time: "1분", tag: "기본",
+        steps: [
+          ["실수 카드 하나에서 「원어민 자연스러운 표현」 옆 " + U("발음") + " 단추를 누른다.", "단추가 「재생 중」으로 바뀐다."],
+          ["듣는다.", "그 문장을 읽는 목소리가 이어폰으로 들린다."]
+        ],
+        ok: "문장이 끝까지 들린다.",
+        bad: "소리가 안 나거나 오류 글이 뜬다. (실수가 0개라 카드가 없으면 「오늘 꼭 외울 필수 표현」의 발음 단추로 확인한다.)" },
+      { id: "D3", t: "「이건 내가 한 말이 아니에요」를 누르면 복습 목록에서 빠진다", time: "2분", tag: "10월 이월",
+        pre: "실수 카드가 1개 이상 있을 때만 한다. 없으면 건너뛰고 비워 둔다.",
+        steps: [
+          ["복기 화면 맨 위에서 「오늘의 실수 교정 내역 (N개)」의 숫자를 기억한다.", ""],
+          ["실수 카드 하나에서 " + U("이건 내가 한 말이 아니에요") + "를 누른다.", "「항목을 복습 목록에서 뺐어요. 퀴즈·아침 강의에도 나오지 않아요.」가 나온다."],
+          ["복기를 닫은 뒤(D4에서 한다) 홈의 " + U("퀴즈 풀기 (N개)") + " 숫자를 본다.", ""]
+        ],
+        ok: "안내 글이 나오고, 홈의 퀴즈 개수에 그 실수가 들어가지 않는다(오늘 실수 수보다 1 적게 늘었다).",
+        bad: "「복습 목록에서 빼지 못했어요」가 나온다." },
+      { id: "D4", t: "복기를 닫으면 오늘 수업이 다음 과로 넘어가 있다", time: "1분", tag: "10월 이월",
+        pre: "통화를 걸기 전 홈에 쓰여 있던 과 번호를 기억해 둔다. 기억이 안 나면 복기 화면 위쪽의 「N과」를 본다.",
+        steps: [
+          ["복기 화면 맨 아래 「통화 후 할 일」을 읽는다.", "「오늘 실수 N개는 앱 복습 목록에 자동으로 저장됐어요.」가 보인다."],
+          ["위쪽 " + U("닫기") + "를 누른다.", "홈으로 돌아온다."],
+          [U("오늘 수업 통화 시작하기 (N과: …)") + " 단추의 과 번호를 본다.", "방금 통화한 과보다 1 큰 숫자다."]
+        ],
+        ok: "과 번호가 1 올라갔다. 예: 4과를 통화했으면 5과가 보인다.",
+        bad: "번호가 그대로다. 또는 2 이상 뛰었다." },
+      { id: "D5", t: "새로 고침 없이 다시 걸면 새 과로 시작한다", time: "3분", tag: "10월 이월",
+        pre: "D4 직후에 한다. Chrome의 새로 고침을 누르지 않는다.",
+        steps: [
+          [U("오늘 수업 통화 시작하기") + "를 누른다.", "「통화 준비」 화면에 「오늘 할 과」가 D4에서 본 새 번호로 나온다."],
+          [U("마이크 점검하기") + "를 누르고 " + U("전화 걸기") + "를 누른다.", "튜터가 말을 건다."],
+          ["튜터의 첫 말을 듣는다.", "새 과의 주제로 시작한다. 앞 통화와 같은 주제를 처음부터 되풀이하지 않는다."],
+          ["이 통화는 끊지 말고 E3로 바로 넘어간다.", ""]
+        ],
+        ok: "준비 화면과 통화 화면 위쪽의 과 번호가 모두 새 번호다.",
+        bad: "방금 끝낸 과가 다시 나온다." }
+    ]},
+    { id: "E", title: "중간에 일이 생겨도 통화 기록이 사라지지 않는다", note: "일부러 사고를 내 보는 구역이다. 이번 버전에서 가장 많이 고친 부분이라 꼭 확인한다.", items: [
+      { id: "E3", t: "통화 중 인터넷이 끊겨도 복기로 이어 갈 수 있다", time: "4분", tag: "이번 수정",
+        pre: "D5의 통화를 이어서 한다. 영어로 두세 문장은 이미 말한 상태여야 한다.",
+        steps: [
+          ["화면 맨 위를 아래로 쓸어내려 " + U("비행기 모드") + " 단추를 눌러 켠다.", "Wi-Fi 표시가 사라진다."],
+          ["쓸어내린 창을 닫고 통화 화면을 30초쯤 본다.", "「다시 연결하는 중...」이 보이다가 「통화 연결이 끊겼어요」 화면이 나온다."],
+          ["다시 쓸어내려 비행기 모드를 끄고 Wi-Fi 표시가 돌아올 때까지 기다린다.", "Wi-Fi 표시가 다시 보인다."],
+          [U("여기서 끝내고 복기 보기") + "를 누른다.", "「통화 복기를 만들고 있어요」가 나온다."],
+          ["기다린다.", "끊기기 전에 한 말이 담긴 복기가 나온다."]
+        ],
+        ok: "끊기기 전에 내가 한 말이 복기에 남아 있다.",
+        bad: "「통화 연결이 끊겼어요」 화면에 " + U("나가기") + "만 있고 복기 단추가 없다. 또는 복기에 내가 한 말이 하나도 없다." },
+      { id: "E1", t: "복기를 만드는 도중 앱을 닫아도 나중에 복기할 수 있다", time: "6분", tag: "이번 수정",
+        pre: "홈에서 새로 통화를 건다(마이크 점검 → 전화 걸기).",
+        steps: [
+          ["튜터와 1분쯤 통화하며 영어로 세 문장 이상 말한다.", ""],
+          [U("통화 종료") + "를 누른다.", "「통화 복기를 만들고 있어요」가 나온다."],
+          ["그 화면이 보이자마자 폰의 최근 앱 단추(네모 또는 세 줄)를 누르고 Chrome을 위로 밀어 꺼 버린다.", "Chrome이 닫힌다."],
+          ["Chrome을 다시 열고 앱 주소로 들어간다.", "홈이 나온다."],
+          ["「끝나지 않은 통화가 있어요. 복기할까요?」 창이 뜨는지, 아니면 화면 맨 아래에 " + U("끝나지 않은 통화 1개 · 복기하기") + " 단추가 있는지 본다.", "둘 중 하나가 보인다."],
+          ["단추가 보이면 누르고, 창에서 " + U("복기 시작") + "을 누른다.", "복기가 만들어져 나온다."],
+          ["복기를 닫고 홈 맨 아래를 본다.", "「끝나지 않은 통화」 단추가 사라졌다."]
+        ],
+        ok: "닫았던 통화의 복기가 나오고, 복기 뒤에는 「끝나지 않은 통화」 단추가 없어진다.",
+        bad: "다시 열었을 때 창도 단추도 없다(통화가 사라졌다)." },
+      { id: "E2", t: "한마디도 안 한 통화는 진도를 올리지 않는다", time: "3분", tag: "이번 수정",
+        pre: "홈의 과 번호를 먼저 기억한다.",
+        steps: [
+          ["통화를 건다(마이크 점검 → 전화 걸기).", "튜터가 말을 건다."],
+          ["아무 말도 하지 않고 15초 기다린 뒤 " + U("통화 종료") + "를 누른다.", "복기 만드는 화면이 잠깐 나온다."],
+          ["복기 화면의 총평을 읽는다.", "「이번 통화에서는 내가 말한 내용이 기록되지 않았어요. 그래서 진도는 그대로 두었어요.」가 보인다."],
+          [U("닫기") + "를 누르고 홈의 과 번호를 본다.", "통화 전과 같은 번호다."]
+        ],
+        ok: "안내 글이 나오고 과 번호가 그대로다.",
+        bad: "과 번호가 1 올라갔다. 또는 하지도 않은 말이 실수로 적혀 있다." }
+    ]},
+    { id: "F", title: "복습 퀴즈를 글과 말로 풀 수 있다", note: "앞 통화에서 실수가 1개 이상 저장돼 있어야 한다. 퀴즈가 0개면 이 구역은 다음 날 한다.", items: [
+      { id: "F1", t: "타이핑으로 풀고 채점된다", time: "2분", tag: "기본",
+        steps: [
+          ["홈에서 " + U("퀴즈 풀기 (N개)") + "를 누른다.", "「오늘의 복습 퀴즈」가 열리고 한국어 뜻이 보인다."],
+          [U("타이핑으로 풀기") + "를 누른다.", "글 입력 칸이 나온다."],
+          ["영어 문장을 적고 " + U("답안 제출 및 채점하기") + "를 누른다.", "「채점 중...」 뒤에 결과가 나온다."]
+        ],
+        ok: "「통과! 즉시 졸업」 또는 「아쉬워요!」와 함께 정답 문장이 보인다.",
+        bad: "「채점 실패」나 영어 오류 글이 나온다." },
+      { id: "F2", t: "말하기로 풀고 채점된다", time: "2분", tag: "기본",
+        pre: "다음 문제에서 한다.",
+        steps: [
+          [U("말하기로 풀기") + "를 누른다.", "마이크 단추가 나온다."],
+          ["마이크 단추를 누르고 영어 문장을 말한 뒤 정지를 누른다.", "「음성 받아쓰는 중...」이 나온다."],
+          ["「인식된 발화」를 읽는다.", "내가 말한 문장이 적혀 있고 채점 결과가 나온다."]
+        ],
+        ok: "내 말이 글로 맞게 바뀌고 채점된다.",
+        bad: "말했는데 「인식된 발화」가 비어 있다. 또는 마이크 오류가 나온다." },
+      { id: "F3", t: "X로 닫아도 홈의 퀴즈 숫자가 바로 바뀐다", time: "1분", tag: "이번 수정",
+        steps: [
+          ["퀴즈를 다 풀지 않은 상태에서 퀴즈 창의 X(닫기)를 누른다.", "홈으로 돌아온다."],
+          ["홈의 " + U("퀴즈 풀기 (N개)") + " 숫자를 본다.", "방금 통과한 개수만큼 줄어 있다."]
+        ],
+        ok: "새로 고침 없이 숫자가 줄어 있다.",
+        bad: "숫자가 퀴즈를 열기 전과 같다(통과한 문제가 있었는데도)." }
+    ]},
+    { id: "G", title: "AI 코치가 일정 변경을 제안하고 되돌릴 수 있다", note: "", items: [
+      { id: "G1", t: "코치에게 말하면 변경 제안이 나오고 승인된다", time: "3분", tag: "기본",
+        steps: [
+          ["홈 위쪽 " + U("AI 코치") + "를 누른다.", "코치 대화 창이 열린다."],
+          ["아래 입력 칸에 「다음 주 수요일은 출장이라 수업을 쉬고 싶어요」라고 적어 보낸다.", "「코치가 찬식님의 일정을 검토하는 중...」 뒤에 답이 온다."],
+          ["답 아래의 「계획 변경 제안」 카드를 읽는다.", "[현재 상태]와 [제안 변경안]이 나란히 보인다."],
+          [U("승인 (적용하기)") + "를 누른다.", "카드에 「승인됨」이 표시된다."]
+        ],
+        ok: "제안 카드가 나오고 승인 표시로 바뀐다.",
+        bad: "답이 영어 오류 글이다. 또는 제안 카드 없이 일정이 바로 바뀌었다." },
+      { id: "G2", t: "승인한 변경을 되돌릴 수 있다", time: "2분", tag: "기본",
+        steps: [
+          ["코치 창의 " + U("변경 이력") + " 탭을 누른다.", "방금 승인한 기록이 맨 위에 있다."],
+          [U("되돌리기 (직전 복구)") + "를 누른다.", "되돌릴지 묻는 창이 뜬다."],
+          [U("확인") + "을 누른다.", "기록에 「되돌려짐」이 표시된다."]
+        ],
+        ok: "「되돌려짐」으로 바뀌고 홈의 오늘 수업이 원래대로다.",
+        bad: "「되돌리기 오류」가 나온다." },
+      { id: "G3", t: "코치와 나눈 대화가 닫았다 열어도 남아 있다", time: "1분", tag: "10월 이월",
+        steps: [
+          ["코치 창을 닫는다.", "홈이 보인다."],
+          ["Chrome 주소 칸 옆의 새로 고침(둥근 화살표)을 누른다.", "홈이 다시 열린다."],
+          [U("AI 코치") + "를 다시 누른다.", "대화 창이 열린다."]
+        ],
+        ok: "G1에서 보낸 내 말과 코치의 답이 그대로 보인다.",
+        bad: "첫 인사말만 있고 대화가 비어 있다." }
+    ]},
+    { id: "H", title: "아침 강의가 만들어지고 로그인 없이 열린다", note: "", items: [
+      { id: "H1", t: "오늘 강의가 만들어지고 재생된다", time: "5분", tag: "기본",
+        steps: [
+          ["홈을 아래로 내려 " + U("더 보기 · 아침 강의 · 주간 루틴 · 트랙 바꾸기") + "를 누른다.", "「오늘 아침 강의」 카드가 펼쳐진다."],
+          ["카드에 " + U("오늘 강의 만들기") + "가 있으면 누른다. 「오늘 강의 준비 완료」면 다음 줄로 간다.", "「생성 중 (1~3분)」으로 바뀐다."],
+          ["화면을 켜 둔 채 3분까지 기다린다.", "「오늘 강의 준비 완료」와 " + U("재생") + " 단추가 나온다."],
+          [U("재생") + "을 누른다.", "오늘 틀린 표현을 설명하는 목소리가 들린다."]
+        ],
+        ok: "3분 안에 강의가 만들어지고 끝까지 재생된다.",
+        bad: "「강의를 만들지 못했어요」가 나온다. 또는 5분이 지나도 「생성 중」이다. (「새 실수·복습 대상이 없어요」는 문제가 아니다. 실수가 없어서 만들 것이 없다는 뜻이다.)" },
+      { id: "H2", t: "피드 주소가 로그인 없이 열린다", time: "3분", tag: "기본",
+        steps: [
+          ["홈 위쪽 " + U("설정") + " → " + U("그록봇 피드") + " 탭을 누른다.", "주소가 세 칸 보인다."],
+          ["「사람이 읽는 페이지」 옆 " + U("복사") + "를 누른다.", "「복사했어요.」가 나온다."],
+          ["Chrome 오른쪽 위 점 세 개 → " + U("새 시크릿 탭") + "을 누른다.", "어두운 빈 탭이 열린다."],
+          ["주소 칸을 길게 눌러 " + U("붙여넣기") + " 후 이동 키를 누른다.", "오늘 강의 페이지가 열린다."]
+        ],
+        ok: "로그인하지 않았는데도 오늘 날짜의 강의 글이 보인다. 「404」나 「Not Found」가 아니다.",
+        bad: "「404」가 나온다. 이 주소는 열쇠와 같으니 메모에 주소를 적지 말고 「404」라고만 적는다." },
+      { id: "H3", t: "다음 날 아침, 어제 통화의 실수가 강의에 들어 있다", time: "다음 날 · 3분", tag: "이번 수정",
+        pre: "오늘 통화를 끝낸 다음 날 아침에 한다. 앱을 열지 않은 상태에서 먼저 H2의 주소를 연다.",
+        steps: [
+          ["앱을 열기 전에 H2에서 복사한 피드 주소(또는 그록봇이 보낸 링크)를 Chrome에서 연다.", "강의 페이지가 열리거나 「만드는 중」 안내가 나온다."],
+          ["「만드는 중」이면 3분 뒤 새로 고침을 누른다.", "강의 글이 보인다."],
+          ["강의 속 표현을 읽는다.", "어제 복기에서 본 내 실수가 들어 있다."]
+        ],
+        ok: "앱을 열지 않았는데도 어제 실수가 담긴 강의가 열린다.",
+        bad: "「404」가 나온다. 또는 어제 실수는 없고 며칠 전 내용만 있다." },
+      { id: "H4", t: "다음 날 아침, 그록봇 알림의 링크가 열린다", time: "다음 날 · 1분", tag: "10월 이월", optional: true,
+        pre: "그록봇을 쓰는 주인만 한다.",
+        steps: [
+          ["아침에 그록봇이 보낸 강의 알림을 연다.", ""],
+          ["알림 속 링크를 누른다.", "강의 페이지가 열린다."]
+        ],
+        ok: "링크가 「404」 없이 열린다.",
+        bad: "알림이 안 왔다. 또는 링크가 「404」다." }
+    ]},
+    { id: "I", title: "사용량이 기록되고 오류 글에 내부 정보가 없다", note: "", items: [
+      { id: "I1", t: "오늘 통화 시간이 사용량에 잡힌다", time: "1분", tag: "기본",
+        steps: [
+          ["홈 위쪽 " + U("설정") + " → " + U("사용량·예상 비용") + " 탭을 누른다.", "표가 보인다."],
+          ["「통화」 줄의 「오늘」 칸을 본다.", "오늘 통화한 시간과 비슷한 분 수가 적혀 있다."]
+        ],
+        ok: "오늘 통화 분이 0이 아니고 실제와 비슷하다(1~2분 차이는 괜찮다).",
+        bad: "오늘 통화를 했는데 0분이다." },
+      { id: "I2", t: "예상 비용을 실제 청구액과 비교한다", time: "주인 · 5분", tag: "확인 필요", optional: true,
+        pre: "주인만 한다. 앱의 통화 1분 단가는 공식 가격으로 확인하지 못한 추정값이라 실제보다 적게 보일 수 있다.",
+        steps: [
+          ["앱 「사용량·예상 비용」의 「이번 달」 예상 비용을 적어 둔다.", ""],
+          ["PC나 폰에서 Google AI Studio의 결제(Billing) 화면을 열어 이번 달 Gemini 사용 금액을 본다.", ""],
+          ["두 숫자를 아래 메모에 나란히 적는다.", ""]
+        ],
+        ok: "두 금액의 차이가 20% 안쪽이다.",
+        bad: "실제 금액이 앱 숫자보다 훨씬 크다. 두 숫자를 적어 주면 단가표를 고친다." },
+      { id: "I3", t: "지금까지 본 오류 글에 영어 내부 문구가 없었다", time: "1분", tag: "이번 수정",
+        pre: "따로 할 일은 없다. 위 항목들을 하면서 본 오류 글을 떠올린다.",
+        steps: [
+          ["오류 글을 한 번이라도 봤는지 떠올린다.", ""],
+          ["봤다면 그 글이 한국어 안내였는지, 영어 기술 문구였는지 떠올린다.", ""]
+        ],
+        ok: "오류를 못 봤거나, 본 오류가 모두 「~해 주세요」 같은 한국어 안내였다.",
+        bad: "「TypeError」, 「at Object…」, 「/app/server…」, 「API key」처럼 영어 기술 문구나 파일 경로가 보였다. 보인 글자를 그대로 적는다." }
+    ]}
+  ];
+
+  var KEY = "oce-qc-v290";
+  var state = { items: {}, appUrl: "", device: "", ts: 0 };
+  var filter = "all";
+  var all = [];
+  SECTIONS.forEach(function (s) { s.items.forEach(function (it) { all.push(it); }); });
+
+  function readLocal() {
+    try { var r = JSON.parse(localStorage.getItem(KEY) || "null"); if (r && r.items) state = r; } catch (e) {}
+  }
+  function writeLocal() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
+
+  /* 계정 저장소(있을 때만). 없으면 이 기기에만 저장한다. */
+  var ref = null, dirty = false, writing = false, remoteReady = false;
+  var syncNote = document.getElementById("syncNote");
+  function setSync(t) { syncNote.textContent = t; }
+  function flush() {
+    if (!ref || writing || !remoteReady || !dirty) return;
+    writing = true; dirty = false;
+    ref.set(JSON.parse(JSON.stringify(state))).then(function () {
+      writing = false; setSync("저장됨 · 다른 기기에서도 보임"); flush();
+    }, function () { writing = false; ref = null; setSync("이 기기에 저장"); });
+  }
+  function save() { state.ts = Date.now(); writeLocal(); dirty = true; flush(); }
+
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  function st(id) { return (state.items[id] && state.items[id].s) || ""; }
+  function label(s) { return s === "pass" ? "통과" : s === "fail" ? "문제" : "확인 전"; }
+
+  function itemHtml(it, openFirst) {
+    var s = st(it.id), note = (state.items[it.id] && state.items[it.id].n) || "";
+    var steps = it.steps.map(function (p) {
+      return "<li><span>" + p[0] + (p[1] ? '<span class="see">보이는 것: ' + p[1] + "</span>" : "") + "</span></li>";
+    }).join("");
+    return '<details class="item" id="it-' + it.id + '" data-id="' + it.id + '" data-s="' + s + '"' + (openFirst ? " open" : "") + ">" +
+      '<summary><span class="num">' + it.id + '</span><span class="ttl">' + it.t +
+      '<span class="meta">' + it.tag + " · " + it.time + (it.optional ? " · 선택" : "") + "</span></span>" +
+      '<span class="badge">' + label(s) + "</span></summary>" +
+      '<div class="body">' +
+      (it.pre ? '<p class="pre">먼저: ' + it.pre + "</p>" : "") +
+      '<ol class="steps">' + steps + "</ol>" +
+      '<p class="ok"><b>통과 기준</b> ' + it.ok + "</p>" +
+      (it.bad ? '<p class="bad"><b>이러면 문제</b> ' + it.bad + "</p>" : "") +
+      '<div class="btns"><button type="button" data-set="pass" aria-pressed="' + (s === "pass") + '">통과</button>' +
+      '<button type="button" data-set="fail" aria-pressed="' + (s === "fail") + '">문제 있음</button></div>' +
+      '<label class="notelabel" for="n-' + it.id + '">메모 (문제가 있으면 화면에 보인 글자를 그대로)</label>' +
+      '<textarea id="n-' + it.id + '" data-note="' + it.id + '" placeholder="예: 통화 종료를 눌렀더니 「복기를 만들지 못했어요」가 나옴">' + esc(note) + "</textarea>" +
+      "</div></details>";
+  }
+
+  function visible(it) {
+    var s = st(it.id);
+    return filter === "all" || (filter === "todo" && !s) || (filter === "fail" && s === "fail");
+  }
+
+  function render() {
+    var firstTodo = null;
+    all.some(function (it) { if (!st(it.id)) { firstTodo = it.id; return true; } return false; });
+    var html = SECTIONS.map(function (sec) {
+      var items = sec.items.filter(visible);
+      if (!items.length) return "";
+      var done = sec.items.filter(function (it) { return st(it.id); }).length;
+      return '<section aria-labelledby="h-' + sec.id + '"><div class="sec-head"><h2 id="h-' + sec.id + '">' + sec.id + ". " + sec.title +
+        '</h2><span class="sec-count">' + done + " / " + sec.items.length + "</span></div>" +
+        (sec.note ? '<p class="sec-note">' + sec.note + "</p>" : "") +
+        items.map(function (it) { return itemHtml(it, filter !== "all" || it.id === firstTodo || st(it.id) === "fail"); }).join("") + "</section>";
+    }).join("");
+    document.getElementById("sections").innerHTML = html ||
+      '<p class="sec-note">' + (filter === "fail" ? "문제로 표시한 항목이 없다." : "남은 항목이 없다. 아래에서 결과를 복사한다.") + "</p>";
+    summary();
+  }
+
+  function summary() {
+    var pass = 0, fail = 0;
+    all.forEach(function (it) { var s = st(it.id); if (s === "pass") pass++; else if (s === "fail") fail++; });
+    var done = pass + fail, total = all.length;
+    document.getElementById("totalCount").textContent = total;
+    document.getElementById("progMain").textContent = done + " / " + total + " 확인";
+    document.getElementById("progSub").textContent = "통과 " + pass + " · 문제 " + fail + " · 남음 " + (total - done);
+    document.getElementById("progBar").style.width = (total ? (done / total) * 100 : 0) + "%";
+  }
+
+  function report() {
+    var pass = [], fail = [], todo = [];
+    all.forEach(function (it) {
+      var s = st(it.id), n = ((state.items[it.id] && state.items[it.id].n) || "").trim();
+      if (s === "fail") fail.push("- " + it.id + " " + it.t + (n ? "\n  메모: " + n : "\n  메모: (없음)"));
+      else if (s === "pass") pass.push(it.id + (n ? "(메모: " + n + ")" : ""));
+      else todo.push(it.id);
+    });
+    return "One Call English v2.9.0 실기기 QC 결과\n" +
+      (state.device ? "폰·사람: " + state.device + "\n" : "") +
+      "통과 " + pass.length + " · 문제 " + fail.length + " · 남음 " + todo.length + " (전체 " + all.length + ")\n\n" +
+      "[문제]\n" + (fail.length ? fail.join("\n") : "없음") + "\n\n" +
+      "[통과]\n" + (pass.length ? pass.join(", ") : "없음") + "\n\n" +
+      "[아직 안 한 것]\n" + (todo.length ? todo.join(", ") : "없음");
+  }
+
+  function applyUrl() {
+    var a = document.getElementById("appLink"), u = (state.appUrl || "").trim();
+    if (/^https:\/\/[^\s]+$/.test(u)) { a.href = u; a.hidden = false; } else { a.hidden = true; }
+  }
+
+  var root = document.getElementById("sections");
+  root.addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-set]"); if (!b) return;
+    var box = b.closest(".item"), id = box.dataset.id, v = b.dataset.set;
+    var cur = state.items[id] || {};
+    cur.s = cur.s === v ? "" : v;
+    state.items[id] = cur; save();
+    box.dataset.s = cur.s;
+    box.querySelector(".badge").textContent = label(cur.s);
+    box.querySelectorAll("button[data-set]").forEach(function (x) { x.setAttribute("aria-pressed", String(x.dataset.set === cur.s)); });
+    summary();
+    var sec = box.closest("section"), secData = SECTIONS.filter(function (s) { return "h-" + s.id === sec.getAttribute("aria-labelledby"); })[0];
+    if (secData) sec.querySelector(".sec-count").textContent = secData.items.filter(function (it) { return st(it.id); }).length + " / " + secData.items.length;
+    if (cur.s === "pass") {
+      box.open = false;
+      var next = box.nextElementSibling;
+      if (!next || !next.classList.contains("item")) { var ns = sec.nextElementSibling; next = ns ? ns.querySelector(".item") : null; }
+      if (next && !next.dataset.s) next.open = true;
+    } else if (cur.s === "fail") {
+      box.querySelector("textarea").focus();
+    }
+  });
+  var noteTimer = null;
+  root.addEventListener("input", function (e) {
+    var t = e.target; if (!t.dataset || !t.dataset.note) return;
+    var cur = state.items[t.dataset.note] || {}; cur.n = t.value; state.items[t.dataset.note] = cur;
+    clearTimeout(noteTimer); noteTimer = setTimeout(save, 900);
+  });
+  document.querySelector(".filters").addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-f]"); if (!b) return;
+    filter = b.dataset.f;
+    document.querySelectorAll(".filters button").forEach(function (x) { x.setAttribute("aria-pressed", String(x === b)); });
+    render();
+  });
+  var metaTimer = null;
+  ["appUrl", "device"].forEach(function (k) {
+    document.getElementById(k).addEventListener("input", function (e) {
+      state[k] = e.target.value; applyUrl();
+      clearTimeout(metaTimer); metaTimer = setTimeout(save, 900);
+    });
+  });
+  document.getElementById("copyBtn").addEventListener("click", function () {
+    var text = report(), out = document.getElementById("copyOut"), msg = document.getElementById("copyMsg");
+    out.value = text; out.hidden = false;
+    var fallback = function () { out.focus(); out.select(); msg.textContent = "아래 글을 길게 눌러 전체 선택한 뒤 복사한다."; };
+    try { navigator.clipboard.writeText(text).then(function () { msg.textContent = "복사했다. 대화창에 붙여 넣는다."; }, fallback); }
+    catch (e) { fallback(); }
+  });
+
+  function fillMeta() {
+    document.getElementById("appUrl").value = state.appUrl || "";
+    document.getElementById("device").value = state.device || "";
+    applyUrl();
+  }
+
+  readLocal(); fillMeta(); render();
+
+  if (window.claude && typeof window.claude.use === "function") {
+    window.claude.use("db").then(function (db) {
+      if (!db) return;
+      ref = db.doc("qc/v290");
+      setSync("불러오는 중…");
+      var timer = setTimeout(function () { if (!remoteReady) setSync("이 기기에 저장 · 계정 저장소 연결 안 됨"); }, 10000);
+      ref.onSnapshot(function (snap) {
+        if (snap.metadata.hasPendingWrites) return;
+        var data = snap.exists ? snap.data() : null;
+        if (!snap.metadata.fromCache) { clearTimeout(timer); }
+        if (data && data.items && (data.ts || 0) > (state.ts || 0) && !dirty && !writing) {
+          var active = document.activeElement;
+          var typing = active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT");
+          state = JSON.parse(JSON.stringify(data));
+          writeLocal();
+          if (!typing) { fillMeta(); render(); } else { summary(); }
+        }
+        if (!snap.metadata.fromCache && !remoteReady) {
+          remoteReady = true;
+          setSync("저장됨 · 다른 기기에서도 보임");
+          if ((state.ts || 0) > ((data && data.ts) || 0)) { dirty = true; flush(); }
+        }
+      }, function () { ref = null; setSync("이 기기에 저장"); });
+    }, function () {});
+  }
+})();
+</script>
+</body>
+</html>

@@ -40,6 +40,8 @@ import { SettingsModal } from "./ui/settings/SettingsModal";
 import { ReviewModal } from "./ui/review/ReviewModal";
 import { ReviewFlowScreen } from "./ui/review/ReviewFlowScreen";
 import { LiveTranscriptItem } from "./services/providers/types";
+import { syncFeed } from "./services/feed/feedService";
+import { friendlyError } from "./ui/common/friendlyError";
 import { Loader2 } from "lucide-react";
 
 /** Settings → 1분 임시 받아쓰기 switch (saved in this browser by SettingsModal). Default on. */
@@ -226,6 +228,12 @@ export const App: React.FC = () => {
     }
   };
 
+  // 끝나지 않은 통화 목록을 다시 읽음 (복기 실패·완료 뒤 홈의 안내 띠가 바로 맞게 보이도록).
+  const refreshUnfinished = async () => {
+    if (!user) return;
+    setUnfinishedSessions(await getUnfinishedSessions(user.uid));
+  };
+
   // Handle Goal Lesson Change
   const handleUpdateGoalProgress = async (goalId: string, nextLessonIndex: number) => {
     if (!user) return;
@@ -296,6 +304,10 @@ export const App: React.FC = () => {
           liveTranscript: transcripts,
           onProgress: (step) => setReviewProgressStep(step),
         });
+        // Send tonight's new mistakes to the morning-lecture feed now. Before, this only
+        // happened when the home screen was shown again, so closing the app on the review
+        // screen left the 6:40 bot with yesterday's list.
+        syncFeed(sessionUser.uid).catch((e) => console.warn("[App] feed sync after review failed:", e));
         await refreshGoals();
         setActiveReviewData({
           review: result.review,
@@ -308,9 +320,10 @@ export const App: React.FC = () => {
         });
       } catch (err: any) {
         console.error("[App] Post-call review generation failed:", err);
-        // Keep the session reopenable from 끝나지 않은 통화 (finalize marked it done).
-        markSessionPendingReview(sessionUser.uid, finalSessionId).catch(() => {});
-        setReviewFailure({ message: err?.message || "알 수 없는 오류", retry: run });
+        // Keep the session reopenable from 끝나지 않은 통화.
+        await markSessionPendingReview(sessionUser.uid, finalSessionId).catch(() => {});
+        refreshUnfinished().catch(() => {});
+        setReviewFailure({ message: friendlyError(err, "복기를 만드는 중 문제가 생겼어요."), retry: run });
       } finally {
         setIsGeneratingReview(false);
         setReviewProgressStep("");
@@ -369,6 +382,7 @@ export const App: React.FC = () => {
           liveTranscript: session.liveTranscript,
           onProgress: (step) => setReviewProgressStep(step),
         });
+        syncFeed(sessionUser.uid).catch((e) => console.warn("[App] feed sync after review failed:", e));
         await refreshGoals();
 
         setActiveReviewData({
@@ -385,7 +399,7 @@ export const App: React.FC = () => {
         setUnfinishedSessions(remaining);
       } catch (err: any) {
         console.error("[App] Unfinished session review failed:", err);
-        setReviewFailure({ message: err?.message || "알 수 없는 오류", retry: run });
+        setReviewFailure({ message: friendlyError(err, "복기를 만드는 중 문제가 생겼어요."), retry: run });
       } finally {
         setIsGeneratingReview(false);
         setReviewProgressStep("");
@@ -476,6 +490,16 @@ export const App: React.FC = () => {
         />
       )}
 
+      {/* 끝나지 않은 통화 안내 띠: 창을 닫았거나 복기를 나중으로 미뤘을 때 다시 여는 곳 */}
+      {unfinishedSessions.length > 0 && !showUnfinishedModal && !isGeneratingReview && !reviewFailure && !activeReviewData && (
+        <button
+          onClick={() => setShowUnfinishedModal(true)}
+          className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 px-4 py-2.5 rounded-full bg-amber-500 text-slate-950 text-xs font-bold shadow-xl shadow-amber-500/20 cursor-pointer"
+        >
+          끝나지 않은 통화 {unfinishedSessions.length}개 · 복기하기
+        </button>
+      )}
+
       {/* Review Modal Screen (B-4 requirement 3) */}
       {activeReviewData && (
         <ReviewModal
@@ -490,6 +514,7 @@ export const App: React.FC = () => {
           onClose={() => {
             setActiveReviewData(null);
             setHomeRefreshKey((prev) => prev + 1);
+            refreshUnfinished().catch(() => {});
           }}
         />
       )}

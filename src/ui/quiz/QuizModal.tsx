@@ -1,4 +1,5 @@
 import { authFetch } from "../../services/api/authFetch";
+import { friendlyError } from "../common/friendlyError";
 import React, { useState, useEffect, useRef } from "react";
 import { User } from "firebase/auth";
 import {
@@ -264,7 +265,7 @@ export const QuizModal: React.FC<QuizModalProps> = ({
         await handleGradeAnswer(text, "speak");
       }
     } catch (err: any) {
-      alert(`음성 인식 오류: ${err?.message || err}`);
+      alert(`음성 인식 오류: ${friendlyError(err)}`);
     } finally {
       setIsTranscribing(false);
     }
@@ -330,7 +331,7 @@ export const QuizModal: React.FC<QuizModalProps> = ({
         }
       }
     } catch (err: any) {
-      alert(`채점 중 오류가 발생했습니다: ${err?.message || err}`);
+      alert(`채점 중 오류가 발생했습니다: ${friendlyError(err)}`);
     } finally {
       setIsGrading(false);
     }
@@ -388,7 +389,7 @@ export const QuizModal: React.FC<QuizModalProps> = ({
               </span>
             )}
             <button
-              onClick={onClose}
+              onClick={handleFinishQuiz}
               className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
             >
               <X className="w-5 h-5" />

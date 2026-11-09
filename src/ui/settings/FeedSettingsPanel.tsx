@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { friendlyError } from "../common/friendlyError";
 import { Copy, RefreshCw, Rss, Loader2 } from "lucide-react";
 import { syncFeed, rotateFeedSecret, feedUrls, grokBotInstruction } from "../../services/feed/feedService";
 
@@ -12,7 +13,7 @@ export const FeedSettingsPanel: React.FC<{ userId?: string }> = ({ userId }) => 
     if (!userId) return;
     syncFeed(userId)
       .then(setSecret)
-      .catch((e) => setMsg(`피드 동기화 실패: ${e?.message || e}`));
+      .catch((e) => setMsg(`피드 동기화 실패: ${friendlyError(e)}`));
   }, [userId]);
 
   const copy = async (text: string) => {
@@ -31,7 +32,7 @@ export const FeedSettingsPanel: React.FC<{ userId?: string }> = ({ userId }) => 
       setSecret(await rotateFeedSecret(userId));
       setMsg("새 비밀키로 바꿨어요.");
     } catch (e: any) {
-      setMsg(`변경 실패: ${e?.message || e}`);
+      setMsg(`변경 실패: ${friendlyError(e)}`);
     } finally {
       setBusy(false);
     }

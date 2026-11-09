@@ -12,6 +12,10 @@ g.MediaRecorder = class {
   start() { this.state = 'recording'; }
   stop() { this.state = 'inactive'; setTimeout(() => { this.ondataavailable?.({ data: new Blob(['x']) }); this.onstop?.(); }, 50); }
 };
+g.FileReader = class {
+  result = ''; onloadend: any; onerror: any;
+  readAsDataURL() { this.result = 'data:audio/webm;base64,eA=='; realSetTimeout(() => this.onloadend?.(), 0); }
+};
 const realSetTimeout = globalThis.setTimeout;
 g.setTimeout = (fn: any, ms?: number, ...a: any[]) => realSetTimeout(fn, ms === 10000 ? 200 : ms, ...a);
 
@@ -50,4 +54,22 @@ test('restarting in the same call continues numbering; a new call starts over', 
   assert.equal(rec.getSessionRecordedBlobs().length, rec.getChunkCount());
   await rec.start(stream(), { ...opts, sessionId: 'call-2' }); await rec.stop();
   assert.equal(rec.getChunkCount(), 1);
+});
+
+test('1-minute backup batch keeps recording order even when an early upload is slow', async () => {
+  const batches: number[][] = [];
+  let first = true;
+  const rec = new ChunkRecorder({
+    ...deps,
+    // The first chunk's upload hangs longer than the whole test: it must not be pushed to the
+    // back of the minute, and must not hold the minute back.
+    uploadAudioFile: async () => { if (first) { first = false; await sleep(5000); } return 'https://storage.example/chunk'; },
+    authFetch: (async () => new Response(JSON.stringify({ ok: true, transcript: 'hi' }))) as any,
+    appendSessionSttPartial: async (_u: string, _s: string, item: any) => { batches.push(item.sourceChunkIndices); },
+  });
+  await rec.start(stream(), { userId: 'u', sessionId: 'call-slow' });
+  await sleep(1750); // 6 segments of ~250 ms and a little more
+  await rec.stop();
+  await sleep(100);
+  assert.deepEqual(batches[0], [0, 1, 2, 3, 4, 5]);
 });

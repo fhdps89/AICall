@@ -71,9 +71,14 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
 
   const handleCopyKeep = () => {
     const textToCopy = getKeepCopyText();
-    navigator.clipboard.writeText(textToCopy);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2500);
+    // Copy can be refused (permission, in-app browser); only show "복사됨" when it worked.
+    Promise.resolve()
+      .then(() => navigator.clipboard.writeText(textToCopy))
+      .then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2500);
+      })
+      .catch((err) => console.warn("[ReviewModal] copy failed:", err));
   };
 
   // B-4 Requirement 3: "이건 내가 한 말이 아니에요" button

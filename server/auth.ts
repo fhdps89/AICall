@@ -95,7 +95,8 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   try {
     res.locals.user = await verifyFirebaseIdToken(m[1].trim());
   } catch (err: any) {
-    res.status(401).json({ ok: false, error: '인증 실패', detail: err?.message });
+    console.warn('[auth] token rejected:', err?.message || err);
+    res.status(401).json({ ok: false, code: 'AUTH_FAILED', error: '로그인을 확인하지 못했어요. 다시 로그인해 주세요.' });
     return;
   }
   if (afterAuthHook) {

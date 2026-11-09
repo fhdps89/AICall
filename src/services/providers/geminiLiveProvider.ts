@@ -65,8 +65,14 @@ export class GeminiLiveProvider implements LiveProvider {
 
   // Reconnect timer
   private reconnectTimer: NodeJS.Timeout | null = null;
+  /** Disconnect still closing audio devices (see connect). */
+  private teardown: Promise<void> | null = null;
 
   public async connect(options: LiveSessionOptions): Promise<void> {
+    // "다시 시도" disconnects and connects again right away. Wait for that teardown first:
+    // otherwise the new call could adopt the old mic / speaker objects just before they are closed
+    // and end up connected with no sound in either direction.
+    if (this.teardown) await this.teardown.catch(() => {});
     this.options = options;
     this.activeSystemPrompt = options.systemPrompt;
     this.options.onStatusChange("connecting", "Gemini Live 연결 준비 중...");
@@ -865,7 +871,16 @@ export class GeminiLiveProvider implements LiveProvider {
     }
   }
 
-  public async disconnect(notifyClosed: boolean = true): Promise<void> {
+  public disconnect(notifyClosed: boolean = true): Promise<void> {
+    const run = this.runDisconnect(notifyClosed);
+    const tracked: Promise<void> = run.catch(() => {}).finally(() => {
+      if (this.teardown === tracked) this.teardown = null;
+    });
+    this.teardown = tracked;
+    return run;
+  }
+
+  private async runDisconnect(notifyClosed: boolean): Promise<void> {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.isConnected = false;
     this.isReconnecting = false;

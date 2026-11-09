@@ -14,6 +14,7 @@ import { DATA_DIR, startLectureJob, readLectureState, lectureAudioPath, kstToday
 import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive } from './server/sttBench.ts';
 import { LIVE_MODEL, TEXT_MODEL, GEMINI_STT_MODEL, GEMINI_TTS_LITE_MODEL } from './src/config/models.ts';
 import { userRecordingPath as userRecordingPathIn } from './server/recordingPath.ts';
+import { apiError, noKey, NO_KEY_MESSAGE } from './server/errors.ts';
 import { isValidFeedSecret, writeFeedSync, loadFeedForSecret, buildFeedToday, feedAudioFile, renderFeedHtml } from './server/feed.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -23,7 +24,15 @@ const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const isProd = process.env.NODE_ENV === 'production';
 
-// CORS: no cross-origin access needed (SPA is same-origin; feed is fetched server-to-server).
+// CORS: no cross-origin access needed (SPA is same-origin; feed is fetched server-to-server),
+// so no Access-Control-Allow-Origin header is ever sent.
+app.disable('x-powered-by');
+app.use((_req: Request, res: Response, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  // Feed URLs carry the secret in the path: never send them on as a referrer.
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
 app.use(express.json({ limit: '10mb' }));
 
 // Model names come from the single config file (Part B-1: src/config/models.ts).
@@ -282,7 +291,7 @@ app.post('/api/gemini/token', requireAuth, geminiLimit, async (req: Request, res
   try {
     const key = resolveGeminiApiKey();
     if (!key || key.startsWith('MY_')) {
-      res.status(500).json({ ok: false, error: 'GEMINI_API_KEY가 서버 환경에 설정되지 않았습니다.', fallback: true });
+      apiError(res, 503, 'NO_SERVER_KEY', NO_KEY_MESSAGE, { fallback: true });
       return;
     }
 
@@ -318,7 +327,7 @@ app.post('/api/gemini/token', requireAuth, geminiLimit, async (req: Request, res
     res.json({ ok: false, fallback: true, message: 'Direct ephemeral token not supported in this environment, using server proxy' });
   } catch (err: any) {
     console.warn('[Gemini Token] Ephemeral token creation failed, falling back to server proxy:', err?.message || err);
-    res.json({ ok: false, fallback: true, error: err?.message });
+    res.json({ ok: false, fallback: true, code: 'TOKEN_FAILED' });
   }
 });
 
@@ -336,7 +345,7 @@ app.post('/api/gemini/tts', requireAuth, geminiLimit, async (req: Request, res: 
 
   const ai = createGenAI();
   if (!ai) {
-    res.status(500).json({ error: 'Gemini 서버 연동이 준비되지 않았습니다.' });
+    noKey(res);
     return;
   }
 
@@ -382,7 +391,7 @@ app.post('/api/gemini/tts', requireAuth, geminiLimit, async (req: Request, res: 
     });
   } catch (error: any) {
     console.error('Gemini TTS error:', error);
-    res.status(500).json({ error: error?.message || 'TTS 음성 생성 실패' });
+    apiError(res, 500, 'TTS_FAILED', '발음 듣기 음성을 만들지 못했어요. 잠시 후 다시 시도해 주세요.');
   }
 });
 
@@ -406,7 +415,7 @@ app.post('/api/gemini/transcribe-partial', requireAuth, geminiLimit, async (req:
 
   const ai = createGenAI();
   if (!ai) {
-    res.status(500).json({ ok: false, error: 'Gemini 서버 연동이 준비되지 않았습니다.' });
+    noKey(res);
     return;
   }
 
@@ -442,10 +451,7 @@ app.post('/api/gemini/transcribe-partial', requireAuth, geminiLimit, async (req:
     });
   } catch (error: any) {
     console.warn('[TranscribePartial] gemini-3.5-transcribe error:', error?.message || error);
-    res.status(500).json({
-      ok: false,
-      error: error?.message || '부분 전사 실패',
-    });
+    apiError(res, 500, 'TRANSCRIBE_FAILED', '받아쓰기에 실패했어요.');
   }
 });
 
@@ -467,26 +473,28 @@ app.post('/api/recordings/upload-chunk', requireAuth, express.raw({ type: ['audi
       res.status(400).json({ ok: false, error: 'invalid path' });
       return;
     }
+    // An empty body (wrong Content-Type, cut-off upload) must not be reported as saved: the app
+    // would delete its local copy of the chunk.
+    if (!rawBuffer || rawBuffer.length === 0) {
+      apiError(res, 400, 'BAD_REQUEST', '녹음 조각이 비어 있어요.');
+      return;
+    }
     const safeDir = path.dirname(safePath);
-
     if (!fs.existsSync(safeDir)) {
       fs.mkdirSync(safeDir, { recursive: true });
     }
-
-    if (rawBuffer && rawBuffer.length > 0) {
-      fs.writeFileSync(safePath, rawBuffer);
-    }
+    fs.writeFileSync(safePath, rawBuffer);
 
     const fileUrl = `/api/recordings/file?path=${encodeURIComponent(relPath)}`;
     res.json({
       ok: true,
       url: fileUrl,
       path: relPath,
-      sizeBytes: rawBuffer?.length || 0,
+      sizeBytes: rawBuffer.length,
     });
   } catch (err: any) {
     console.error('[UploadChunk] Server chunk upload error:', err);
-    res.status(500).json({ ok: false, error: err?.message || 'Upload failed' });
+    apiError(res, 500, 'UPLOAD_FAILED', '녹음 조각을 저장하지 못했어요.');
   }
 });
 
@@ -520,7 +528,7 @@ app.post('/api/gemini/transcribe-final', requireAuth, geminiLimit, async (req: R
 
   const ai = createGenAI();
   if (!ai) {
-    res.status(500).json({ ok: false, error: 'Gemini 서버 연동이 준비되지 않았습니다.' });
+    noKey(res);
     return;
   }
 
@@ -552,10 +560,7 @@ app.post('/api/gemini/transcribe-final', requireAuth, geminiLimit, async (req: R
     });
   } catch (err: any) {
     console.warn('[TranscribeFinal] gemini-3.5-transcribe error:', err?.message || err);
-    res.status(500).json({
-      ok: false,
-      error: err?.message || '최종 음성 전사 실패',
-    });
+    apiError(res, 500, 'TRANSCRIBE_FAILED', '받아쓰기에 실패했어요.');
   }
 });
 
@@ -577,7 +582,7 @@ app.post('/api/review', requireAuth, geminiLimit, async (req: Request, res: Resp
 
   const ai = createGenAI();
   if (!ai) {
-    res.status(503).json({ ok: false, code: 'NO_SERVER_KEY', error: '서버에 Gemini 키가 없어요. AI Studio Secrets에 GEMINI_API_KEY를 넣어 주세요.' });
+    noKey(res);
     return;
   }
 
@@ -714,7 +719,7 @@ STRICT ANALYSIS RULES (Part B-4):
     });
   } catch (err: any) {
     console.error('Review generation error:', err);
-    res.status(500).json({ ok: false, error: err?.message || '복기 리포트 생성에 실패했습니다.' });
+    apiError(res, 500, 'REVIEW_FAILED', '복기 리포트를 만들지 못했어요. 잠시 후 다시 만들어 주세요.');
   }
 });
 
@@ -729,7 +734,7 @@ app.post('/api/quiz/grade', requireAuth, geminiLimit, async (req: Request, res: 
 
   const ai = createGenAI();
   if (!ai) {
-    res.status(500).json({ ok: false, error: 'Gemini API 연동이 준비되지 않았습니다.' });
+    noKey(res);
     return;
   }
 
@@ -783,7 +788,7 @@ app.post('/api/quiz/grade', requireAuth, geminiLimit, async (req: Request, res: 
     });
   } catch (err: any) {
     console.error('Quiz grading error:', err);
-    res.status(500).json({ ok: false, error: err?.message || '퀴즈 채점에 실패했습니다.' });
+    apiError(res, 500, 'QUIZ_FAILED', '퀴즈 채점에 실패했어요. 다시 시도해 주세요.');
   }
 });
 
@@ -798,7 +803,7 @@ app.post('/api/quiz/meaning-ko', requireAuth, geminiLimit, async (req: Request, 
 
   const ai = createGenAI();
   if (!ai) {
-    res.status(500).json({ ok: false, error: 'Gemini API 연동이 준비되지 않았습니다.' });
+    noKey(res);
     return;
   }
 
@@ -843,7 +848,7 @@ ${listStr}
     });
   } catch (err: any) {
     console.error('Quiz meaning generation error:', err);
-    res.status(500).json({ ok: false, error: err?.message || '한국어 뜻 생성에 실패했습니다.' });
+    apiError(res, 500, 'QUIZ_FAILED', '한국어 뜻을 만들지 못했어요.');
   }
 });
 
@@ -858,7 +863,7 @@ app.post('/api/coach/chat', requireAuth, geminiLimit, async (req: Request, res: 
 
   const ai = createGenAI();
   if (!ai) {
-    res.status(500).json({ ok: false, error: 'Gemini API 연동이 준비되지 않았습니다.' });
+    noKey(res);
     return;
   }
 
@@ -994,7 +999,7 @@ app.post('/api/coach/chat', requireAuth, geminiLimit, async (req: Request, res: 
     });
   } catch (err: any) {
     console.error('[CoachChat] error:', err);
-    res.status(500).json({ ok: false, error: err?.message || '코치 응답 생성에 실패했습니다.' });
+    apiError(res, 500, 'COACH_FAILED', '코치 답변을 만들지 못했어요. 잠시 후 다시 보내 주세요.');
   }
 });
 
@@ -1007,14 +1012,15 @@ app.post('/api/lecture/generate', requireAuth, geminiLimit, (req: Request, res: 
   const { date, newMistakes, reviewMistakes, force } = req.body || {};
   const ai = createGenAI();
   if (!ai) {
-    res.status(500).json({ ok: false, error: 'Gemini 서버 연동이 준비되지 않았습니다.' });
+    noKey(res);
     return;
   }
   try {
     const state = startLectureJob(ai, uid, typeof date === 'string' ? date : kstToday(), newMistakes || [], reviewMistakes || [], { force: Boolean(force) });
     res.json({ ok: true, lecture: state });
   } catch (err: any) {
-    res.status(400).json({ ok: false, error: err?.message || '강의 생성 시작 실패' });
+    console.warn('[Lecture] start failed:', err?.message || err);
+    apiError(res, 400, 'LECTURE_FAILED', '강의 만들기를 시작하지 못했어요.');
   }
 });
 
@@ -1024,7 +1030,7 @@ app.get('/api/lecture/status', requireAuth, (req: Request, res: Response) => {
     const date = typeof req.query.date === 'string' ? req.query.date : kstToday();
     res.json({ ok: true, lecture: readLectureState(uid, date) });
   } catch (err: any) {
-    res.status(400).json({ ok: false, error: err?.message });
+    apiError(res, 400, 'BAD_REQUEST', '날짜 형식이 올바르지 않아요.');
   }
 });
 
@@ -1039,7 +1045,7 @@ app.get('/api/lecture/audio', requireAuth, (req: Request, res: Response) => {
     }
     res.type('audio/wav').sendFile(file, SEND_DATA_FILE);
   } catch (err: any) {
-    res.status(400).json({ ok: false, error: err?.message });
+    apiError(res, 400, 'BAD_REQUEST', '날짜 형식이 올바르지 않아요.');
   }
 });
 
@@ -1126,7 +1132,7 @@ app.post('/api/keep/parse', requireAuth, geminiLimit, async (req: Request, res: 
   }
   const ai = createGenAI();
   if (!ai) {
-    res.status(500).json({ ok: false, error: 'Gemini 서버 연동이 준비되지 않았습니다.' });
+    noKey(res);
     return;
   }
   try {
@@ -1185,7 +1191,7 @@ ${text}`;
     });
   } catch (err: any) {
     console.error('[KeepParse] error:', err);
-    res.status(500).json({ ok: false, error: err?.message || 'Keep 텍스트 분석 실패' });
+    apiError(res, 500, 'KEEP_PARSE_FAILED', 'Keep 내용을 나누지 못했어요. 다시 시도해 주세요.');
   }
 });
 
@@ -1220,7 +1226,7 @@ app.post('/api/stt-bench/transcribe', requireAuth, geminiLimit, async (req: Requ
     res.json({ ok: true, engine, output, elapsedMs: Math.round(performance.now() - start) });
   } catch (err: any) {
     console.warn(`[SttBench] ${engine} error:`, err?.message || err);
-    res.status(500).json({ ok: false, engine, error: err?.message || '받아쓰기 실패' });
+    apiError(res, 500, 'STT_BENCH_FAILED', '받아쓰기에 실패했어요.', { engine });
   }
 });
 
@@ -1276,6 +1282,7 @@ async function startServer() {
 
   wss.on('connection', async (clientWs: WebSocket, req) => {
     let liveSession: any = null;
+    let initStarted = false;
     let isConnected = true;
 
     clientWs.on('close', () => {
@@ -1297,6 +1304,9 @@ async function startServer() {
 
         // Init message to start Native Audio session
         if (msg.type === 'init') {
+          // One Live session per socket: a repeated init would leave the first session open.
+          if (liveSession || initStarted) return;
+          initStarted = true;
           const validVoices = ['Kore', 'Puck', 'Charon', 'Fenrir', 'Zephyr'];
           let voiceName = 'Kore';
           if (typeof msg.voiceName === 'string') {
@@ -1383,7 +1393,7 @@ async function startServer() {
             onerror: (err: any) => {
               console.error('Gemini Live session error:', err);
               if (isConnected) {
-                clientWs.send(JSON.stringify({ type: 'error', error: err?.message || 'Live session error' }));
+                clientWs.send(JSON.stringify({ type: 'error', error: 'live_session_error' }));
               }
             },
             onclose: () => {
@@ -1492,7 +1502,7 @@ async function startServer() {
             console.error('Failed to establish Gemini Live session across all configurations:', connectError);
             clientWs.send(JSON.stringify({
               type: 'fallback_required',
-              error: connectError?.message || 'Live connect failed',
+              error: 'live_connect_failed',
               userMessage: /timeout/i.test(String(connectError?.message))
                 ? '튜터 연결이 너무 오래 걸려요. 잠시 후 다시 시도해 주세요.'
                 : '튜터 서버에 연결하지 못했어요. 잠시 후 다시 시도해 주세요.',
@@ -1548,7 +1558,7 @@ async function startServer() {
         console.error('WS message parse error:', parseErr);
         // Never leave the client waiting for 'ready' on an unexpected failure.
         if (!liveSession && clientWs.readyState === WebSocket.OPEN) {
-          clientWs.send(JSON.stringify({ type: 'fallback_required', error: parseErr?.message || 'init failed' }));
+          clientWs.send(JSON.stringify({ type: 'fallback_required', error: 'init_failed' }));
         }
       }
     });

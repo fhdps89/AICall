@@ -1,8 +1,8 @@
 # One Call English — AI 1:1 전화영어 (옛 이름: 오늘도 한 통)
 
-> **버전**: `v2.8.1` | **최종 갱신**: 2026-10-19 (KST)
+> **버전**: `v2.9.0` (빌드 표기 `20261110-multilingual-HHmm`, `server.ts` 수정 시각에서 자동 계산) | **최종 갱신**: 2026-11-10 (KST)
 > **기준 기획**: [`docs/plan/implementation_plan_v4.md`](./docs/plan/implementation_plan_v4.md) Part B · 진행 가이드 [`docs/plan/ai-studio-build-guide.md`](./docs/plan/ai-studio-build-guide.md)
-> 아키텍처와 버전 기록: [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) · 상세 변경 기록: [`docs/history/changelog.md`](./docs/history/changelog.md) · 최근 전체 코드 리뷰: [`docs/reviews/2026-10-full-code-review.md`](./docs/reviews/2026-10-full-code-review.md)
+> 아키텍처와 버전 기록: [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) · 상세 변경 기록: [`docs/history/changelog.md`](./docs/history/changelog.md) · 최근 전체 코드 리뷰: [`docs/reviews/2026-11-full-code-review.md`](./docs/reviews/2026-11-full-code-review.md) · 안드로이드 실기기 QC 체크리스트: [`docs/qc/2026-11-android-qc-checklist.html`](./docs/qc/2026-11-android-qc-checklist.html)
 
 AI 튜터와 영어로 통화하고, 통화에서 **틀린 말을 틀린 그대로 기록**한 뒤, 아침 강의·퀴즈로 복습하고, 다음 통화에서 맞게 쓰면 졸업시키는 "실수 루프" 앱입니다. 지금은 1인 테스트판(웹)입니다.
 
@@ -33,14 +33,27 @@ AI 튜터와 영어로 통화하고, 통화에서 **틀린 말을 틀린 그대�
 | 아침 강의 음성 | `gemini-3.8-flash-tts` |
 | 복기 화면 "발음 듣기" | `gemini-3.8-flash-lite-tts` |
 
+## v2.9.0에서 바뀐 것 (2026-11-10 KST, 전체 코드 리뷰 2차)
+- 통화를 끊으면 그 통화는 "복기 대기"로 남고, 복기가 저장돼야 "완료"가 됩니다. 복기 중에 앱을 닫아도 홈 아래 **「끝나지 않은 통화 N개 · 복기하기」** 버튼에서 다시 만들 수 있습니다.
+- 복기가 끝나면 바로 아침 강의(그록봇 피드) 후보를 서버로 보냅니다. 복기 화면에서 앱을 닫아도 그날 실수가 다음 날 강의에 들어갑니다.
+- 인터넷이 느려도 1분 임시 받아쓰기가 녹음 순서대로 만들어집니다. 기록용 받아쓰기는 실패한 분만 다시 시도하고, 그래도 안 되면 그 분만 임시 받아쓰기로 채웁니다.
+- 「통화 종료」 두 번 누름 방지, 통화 중 연결이 끊겼을 때 「여기서 끝내고 복기 보기」, 화면 꺼짐 방지 다시 걸기.
+- 내 말이 전혀 기록되지 않은 통화는 진도를 올리지 않고 AI 복기도 부르지 않습니다.
+- 오류 안내: 서버 응답과 화면에는 정해진 한국어 문구와 코드만 나갑니다(내부 오류 원문·계정 정보는 서버 로그/콘솔에만). 키가 없을 때 안내는 「설정 → Gemini 키」로 통일.
+- 코치 대화 50개 초과 시 새 메시지가 안 보이던 문제, 복기 AI가 돌려준 실수 id 검사, 빈 녹음 조각을 "저장됨"으로 답하던 서버 문제 수정.
+- 자세한 목록과 근거: [`docs/reviews/2026-11-full-code-review.md`](./docs/reviews/2026-11-full-code-review.md)
+
 ## 보안·한도
+- 오류 응답은 `server/errors.ts`의 `apiError()`만 사용합니다: `{ ok: false, code, error }`에서 `error`는 사용자용 한국어 문장, `code`는 `NO_SERVER_KEY`·`REVIEW_FAILED`·`TRANSCRIBE_FAILED` 등 정해진 값입니다. `err.message`를 응답에 넣으면 `npm test`가 실패합니다.
+- 응답 헤더: `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`. 다른 출처에는 CORS 허용 헤더를 보내지 않습니다(같은 출처 전용).
 - 모든 비용 발생 API와 Live 연결은 Firebase 로그인 토큰이 있어야 합니다(`server/auth.ts`). 서버는 자기 Gemini 키만 쓰고, 앱이 보낸 키는 받지 않습니다.
 - 1인당 한도: 1분 60회, 하루 1,500회 Gemini 호출, 하루 60번 통화 시작(`server/rateLimit.ts`, 서버 메모리 기준).
 
 ## 알아 둘 한계
 - 아침 강의 음성, 그록봇 피드 설정, 서버 예비 녹음은 서버 안 `.data/` 폴더에 저장됩니다. AI Studio 배포(Cloud Run)에서는 서버가 다시 켜지면 지워질 수 있습니다. 피드 설정과 설정에 저장한 Gemini 키는 Firestore `feeds/{id}`에 암호화 백업되어, 새로 켜진 서버가 그록봇 요청만으로 복원합니다(v2.8.1). 강의 음성·예비 녹음은 여전히 지워질 수 있습니다.
 - 허용 계정 이메일이 `firestore.rules`, `server/auth.ts`, `src/services/firebase/auth.ts`에 고정돼 있습니다(베타 전에 바꿔야 함).
-- `npm audit`에 high 4건이 나옵니다. Firebase가 쓰는 `@grpc/grpc-js`(서버용 통신 라이브러리)에서 나오며 브라우저 앱에서는 쓰이지 않는 부분으로 보고 있습니다(추정). 고치려면 Firebase 큰 버전 업그레이드가 필요합니다.
+- `npm audit`에 10건(high 8, moderate 2, 2026-11-10 기준)이 나옵니다. Firebase가 쓰는 `@grpc/grpc-js`(서버용 통신 라이브러리), 개발 서버용 `vite`·`esbuild`, `qs`·`re2js`·`source-map-js` 등입니다. `npm audit fix`는 Firebase SDK 버전을 올리므로 실기기 QC 뒤에 따로 적용하는 것을 권장합니다.
+- 설정 → 사용량의 "예상 비용"은 `src/config/models.ts`의 단가표로 계산한 추정치입니다. 통화 단가(`livePerMinute`)는 공식 단가로 확인되지 않은 값이라 실제 청구액보다 낮게 나올 수 있습니다.
 
 ## 실행
 
@@ -50,7 +63,7 @@ npm run dev        # 개발 서버 (포트 3000)
 npm run lint       # 앱 타입 검사
 npx tsc -p tsconfig.server.json --noEmit   # 서버 타입 검사
 npm run build      # 배포용 빌드
-npm test           # 자동 테스트 (tests/*.test.ts, 17개)
+npm test           # 자동 테스트 (tests/*.test.ts, 25개)
 npm start          # NODE_ENV=production 에서 dist/ 를 서빙 (NODE_ENV가 없어도 Vite가 없으면 dist/ 서빙)
 ```
 

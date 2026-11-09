@@ -4,6 +4,39 @@
 
 ---
 
+### [2026-11-10 KST] v2.9.0 — 전체 코드 리뷰 2차 반영 (GitHub 브랜치 `claude/full-review-2026-11`, Claude)
+- **배경**: 2026-11-10에 `main`(`24901cb`, v2.8.1) 전체 약 14,100줄을 다시 리뷰. 빌드·타입 검사·테스트 18개는 통과했지만, 약한 인터넷·앱을 중간에 닫음·버튼 두 번 누름 같은 실제 사용 상황에서 학습 기록이 빠지는 문제 9개(높음), 8개(중간), 6개(낮음)를 찾음. 전체 목록과 근거: [`docs/reviews/2026-11-full-code-review.md`](../reviews/2026-11-full-code-review.md).
+- **문제 원인과 적용된 수정 내역 — 높음**
+  - 복기 중 앱을 닫으면 통화가 복기 없이 "완료"로 남음: 통화 종료 때 바로 `status: "done"`으로 저장했기 때문 → `finalizeCallSession`이 `pending_review`로 저장하고 `saveSessionReview`만 `done`으로 바꿈. 「보관만 하기」는 `archive: true`.
+  - 밤 통화의 실수가 다음 날 아침 강의에 안 들어갈 수 있음: 피드 후보를 홈 화면이 뜰 때만 서버로 보냈기 때문 → 복기가 끝난 직후 `syncFeed`(`App.tsx`, 미완료 통화 복기 경로 포함).
+  - 느린 인터넷에서 1분 임시 받아쓰기 순서가 섞이거나 생기지 않음: 1분 묶음을 업로드가 끝난 순서로 쌓았기 때문 → `ChunkRecorder.processChunk`가 조각을 받자마자 녹음 순서로 묶음에 넣고, 6개가 되면 업로드와 무관하게 받아쓰기 요청. `processChunk`의 실패도 잡아서 기록.
+  - 1분만 실패해도 기록용 받아쓰기 전체를 버림 → 분마다 1회 재시도, 그래도 실패한 분만 같은 분의 임시 받아쓰기로 채움(`reviewRules.ts` `mergeMinuteTranscripts`). 받아쓰기 요청의 형식은 `;codecs=...`를 뗀 값으로 전송.
+  - 「통화 종료」 두 번 누름으로 같은 통화가 두 번 마무리·복기됨 → `hangingUpRef`로 한 번만, 버튼 비활성화와 "통화를 마무리하는 중..." 표시.
+  - 통화 중 연결이 완전히 끊긴 뒤 「나가기」를 누르면 그 통화가 복기 없이 버려짐 → 녹음이 있는 통화면 정상 종료 경로(저장 → 복기)로 보냄. 창 제목 「통화 연결이 끊겼어요」, 버튼 「여기서 끝내고 복기 보기」.
+  - 내 말이 전혀 없는 통화도 진도가 넘어가고 AI가 실수를 지어낼 수 있음 → 받아쓰기·임시 받아쓰기·대화 로그 모두 비면 `/api/review`를 부르지 않고 안내 복기만 저장(`sourceStt: "none"`, `lessonAdvanced: false`), `advanceGoalAfterCompletedCall` 호출 안 함.
+  - 코치 대화 50개 초과 시 새 메시지가 안 보임: `orderBy("at","asc").limit(50)`이 가장 오래된 50개를 돌려줌 → 최신 50개를 읽어 뒤집어 표시.
+  - 서버 예비 저장소가 빈 녹음 조각에 `ok: true`를 답해 앱이 기기 사본을 지움 → 빈 본문은 400.
+- **문제 원인과 적용된 수정 내역 — 중간**
+  - 내부 오류 문구 노출(프로젝트 지침 「내부 정보 은닉」): `/api/gemini/tts`, `/api/gemini/transcribe-partial`, `/api/gemini/transcribe-final`, `/api/recordings/upload-chunk`, `/api/review`, `/api/quiz/grade`, `/api/quiz/meaning-ko`, `/api/coach/chat`, `/api/lecture/generate|status|audio`, `/api/keep/parse`, `/api/stt-bench/transcribe`, `/api/gemini/token`의 실패 응답과 Live 중계의 `error`/`fallback_required` 메시지, 로그인 실패 응답의 `detail`, 강의 상태의 `error`(공개 피드 JSON에도 나감)에 `err.message`가 들어 있었음 → `server/errors.ts`(신규) `apiError()`/`noKey()`로 정해진 한국어 문구 + 코드만 응답. 원문은 `console`에만. 강의 실패는 `GENERATION_FAILED`.
+  - 화면의 `alert`/안내에 `err.message`를 그대로 표시(Firestore 도우미가 던지는 JSON에는 계정 이메일·문서 경로가 들어 있음) → `src/ui/common/friendlyError.ts`(신규)를 코치·퀴즈·강의·Keep·설정·홈·복기 실패 화면·로그인에 적용.
+  - 복기 AI가 준 실수 id를 검사 없이 반영 → `keepKnownIds`: 보낸 목록에 있는 id만, 복습 중인 것만 졸업, 졸업한 것만 재복습.
+  - 복기 요청에 모든 실수 문서를 통째로 실음 → id·내가 한 말·자연스러운 표현·이유만, 종류별 최신 150개.
+  - 화면 꺼짐 방지가 다른 앱에 다녀오면 풀림 → `visibilitychange`에서 다시 요청.
+  - 「다시 시도」 직후 소리가 안 날 수 있는 경합 → `GeminiLiveProvider.connect()`가 진행 중인 `disconnect()`를 기다림.
+  - 복기 실패 안내가 가리키는 "끝나지 않은 통화"가 홈에 없음 → 홈 아래 버튼 추가, 목록 갱신(`refreshUnfinished`).
+  - 키 없음 안내가 "AI Studio Secrets"를 가리킴 → 「설정 → Gemini 키」로 통일(서버 `NO_KEY_MESSAGE`, 복기 실패 화면).
+  - Live 중계 소켓의 중복 `init`으로 세션이 남음 → 소켓당 1회.
+- **낮음**: 첫 사용자에게 "이틀째 쉬었어요" 띠가 뜨던 것, 퀴즈를 X로 닫으면 홈 숫자가 그대로인 것, Keep 복사 실패에도 "복사됨" 표시, 로그인 실패 시 영어 SDK 오류 표시, 받아쓰기 출처 라벨(`liveTranscript_fallback`·`none` 추가) 수정. 응답 헤더 `X-Content-Type-Options: nosniff`·`Referrer-Policy: no-referrer` 추가, `X-Powered-By` 제거. `package.json` 버전 2.8.0 → 2.9.0(의존 패키지는 변경 없음).
+- **방어 조치 (Safeguards)**
+  - `tests/reviewRules.test.ts`(신규): id 검사, 분 단위 받아쓰기 합치기(성공·보충·누락), 화면 오류 문구에 내부 정보가 없는지.
+  - `tests/chunkRecorder.test.ts`: 첫 조각 업로드가 멈춰 있어도 1분 묶음이 `[0..5]` 순서로 나가는지(고치기 전 코드에서는 실패함을 확인).
+  - `tests/server.test.ts`: `apiError`/`noKey` 응답 모양, 그리고 `server.ts`의 어떤 응답에도 `err.message`가 들어가지 않는지 소스 검사.
+  - 유지: 일일 한도 카운터(`server/rateLimit.ts`), 로그인 확인, 녹음 경로 검사, 업로드 20MB·JSON 10MB 제한, 같은 출처 전용. 이번 수정에서 제거·완화한 보호 장치 없음.
+- **검증**: 앱·서버·테스트 타입 검사, 빌드, `npm test` 25/25 통과(`npm ci`로 새로 설치 후). 서버를 띄워 헤더·401·404·피드 404·모바일 크기 로그인 화면 확인. 로그인·마이크·Gemini 키가 필요한 통화·복기·강의는 실행하지 못함 → 실기기 확인 목록 [`docs/qc/2026-11-android-qc-checklist.html`](../qc/2026-11-android-qc-checklist.html).
+- **남은 것**: 통화 단가(`models.ts` `livePerMinute`)는 공식 단가를 확인하지 못해 그대로 둠(예상 비용이 실제보다 낮을 수 있음). `.data/`의 강의 음성·예비 녹음 보존, `npm audit` 10건(Firebase SDK 업그레이드 필요), 허용 계정 고정은 결정이 필요해 보류.
+
+---
+
 ### [2026-10-19 KST] v2.8.1 — 아침 피드 404 수정: 피드 설정·Gemini 키 Firestore 암호화 백업 (GitHub PR #8, Claude)
 - **문제 원인 (Root Cause)**: 피드 설정(비밀값·강의 후보 실수)을 서버의 `.data/feed.json`에만 저장했음. Cloud Run은 밤새 요청이 없으면 서버를 내렸다가 새로 띄우는데, 이때 `.data/`가 비어서 6:40 그록봇 요청이 404. 앱을 열면 설정이 다시 보내져서 정상으로 돌아왔음.
 - **적용된 수정 내역 (Changes)**:
