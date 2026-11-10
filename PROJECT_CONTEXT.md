@@ -1,7 +1,7 @@
 # 📖 프로젝트 컨텍스트 및 히스토리 (Project Context)
 
 > **프로젝트**: One Call English (옛 이름: 「오늘도 한 통」) — AI 1:1 전화영어  
-> **현재 버전**: `v2.9.0` (공식 빌드 표기: `getBuildVersion()`이 `server.ts` 수정 시각으로 계산하는 `20261110-multilingual-HHmm`) | **최종 갱신**: 2026-11-10 (KST)  
+> **현재 버전**: `v2.9.1` (공식 빌드 표기: `getBuildVersion()`이 `server.ts` 수정 시각으로 계산하는 `20261111-multilingual-HHmm`) | **최종 갱신**: 2026-11-11 (KST)  
 > **기준 기획**: [`docs/plan/implementation_plan_v4.md`](./docs/plan/implementation_plan_v4.md) Part B · 진행 가이드 [`docs/plan/ai-studio-build-guide.md`](./docs/plan/ai-studio-build-guide.md) · 현재 앱과의 차이 [`docs/plan/gap-v2.1.0-vs-plan-v4.md`](./docs/plan/gap-v2.1.0-vs-plan-v4.md)  
 > **관리 규칙**: `README.md` 변경 시 본 문서의 아키텍처 및 히스토리를 함께 최신화하며, 모든 일시는 한국 표준시(KST)를 기준으로 합니다.
 
@@ -120,7 +120,7 @@
 10. **B-7 아침 강의 · B-8 그록봇 피드 (`server/lecture.ts`, `server/feed.ts`, `src/ui/lecture/`)**:
    - 새 실수 최대 6개 + 복습 실수 최대 3개로 `gemini-3.8-flash` 대본 → `gemini-3.8-flash-tts` 2인 음성, 답 전 3초 무음, WAV 1개. 앱에서 재생·오프라인 보관.
    - 그록봇은 `/feed/{비밀키}/today(.json)`만 열면 됨. 앱이 홈 화면을 열 때마다 비밀키·후보 실수를 서버에 다시 보냄(`syncFeed`). 강의가 없으면 피드 요청 때 생성 시작, 실패한 강의는 30분에 한 번만 다시 시도.
-   - **한계**: 강의 음성·피드 설정은 서버의 `.data/` 폴더에 저장되어, Cloud Run 서버가 다시 켜지면 지워질 수 있음.
+   - **한계**: 강의 음성·피드 설정은 서버의 `.data/` 폴더에 저장되어, Cloud Run 서버가 다시 켜지면 지워질 수 있음. → v2.8.1 피드 설정 백업, v2.9.1 다 만든 강의를 계정에 저장(아래 4-2).
    - **만들던 중 서버가 다시 켜진 강의** (v2.8.0): 서버 기록이 "생성 중"인데 실제 작업이 없으면 `failed`/`INTERRUPTED`로 알려 줌. 서버 기록 자체가 지워졌으면 앱이 Firestore의 "생성 중"을 같은 상태로 바꿈. 홈 카드는 "서버가 다시 시작되어 만들던 강의가 멈췄어요"와 **오늘 강의 만들기** 버튼을 보여 주고, 그록봇 피드는 30분 기다리지 않고 바로 다시 만듦.
 11. **B-10 Keep 가져오기 · 사용량 · 1-F 받아쓰기 품질 시험**:
    - Keep "English mistake log" 붙여넣기 → `gemini-3.8-flash`로 [내가 한 말/자연스러운 표현/이유] 미리보기 → 저장(1일 단계부터).
@@ -150,9 +150,18 @@
 - **오류 응답 규칙**(`server/errors.ts`): 모든 실패 응답은 `apiError(res, status, code, 한국어 문구)`. 코드: `NO_SERVER_KEY`·`BAD_REQUEST`·`TTS_FAILED`·`TRANSCRIBE_FAILED`·`REVIEW_FAILED`·`QUIZ_FAILED`·`COACH_FAILED`·`LECTURE_FAILED`·`KEEP_PARSE_FAILED`·`STT_BENCH_FAILED`·`UPLOAD_FAILED`·`TOKEN_FAILED`, 로그인은 `AUTH_FAILED`, 한도는 `rate_limited`. 강의 실패 사유는 `NOTHING_TO_TEACH`·`INTERRUPTED`·`GENERATION_FAILED`. 화면은 `src/ui/common/friendlyError.ts`를 거쳐 표시. (프로젝트 지침의 `/api/analyze` 6종 코드는 이 저장소에 해당 경로가 없어 적용 대상 없음.)
 - **유지한 것**: 일일 한도(`server/rateLimit.ts`), 로그인 확인, 녹음 경로 검사, 업로드 20MB·JSON 10MB 크기 제한, 같은 출처 전용(CORS 허용 헤더 없음). 추가: `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`.
 
+## 4-2. v2.9.1 아침 강의 계정 저장 (2026-11-11 KST)
+- **문제**: 2026-11-11 07:15 그록봇 피드가 강의를 만들었으나 07:37 앱은 「아직 오늘 강의가 없어요」, 피드 음성 링크는 404. 강의 JSON·WAV가 그 Cloud Run 서버의 `.data/`에만 있었고, 피드 요청에는 로그인 토큰이 없어 Firestore에 쓸 수 없었음.
+- **흐름**: 앱 `syncFeed` → `/api/feed/sync`에 `refreshToken`(Firebase 새로 고침 토큰) 추가 → 서버 메모리(`server/lectureStore.ts`)와 `feeds/{id}` 암호화 백업(`FeedBackup.refreshToken`). 강의 작업이 `ready`가 되면 `setLectureReadyHook(saveLectureToAccount)`가 `securetoken.googleapis.com`에서 ID 토큰을 받아(응답의 `user_id`가 같은 사용자인지 확인) Storage REST로 WAV 업로드, Firestore REST로 `users/{uid}/lectures/{date}` 필드만 PATCH(`updateMask`, `listenedAt` 유지), 새 실수에 `lectureDate` 표시. 앱이 이미 복사해 둔 강의가 있으면 건드리지 않음. 로컬 상태에 `storageUrl` 기록.
+- **새로 켜진 서버**: `buildFeedToday`(이제 async)가 로컬 강의가 없거나 `INTERRUPTED`면 계정 저장본을 읽어 `ready`로 답함(두 번째 생성 없음). `/feed/{비밀키}/audio/{날짜}.wav`는 로컬 파일이 없으면 저장본 Storage URL로 302.
+- **사용량**: 서버 저장본은 `usageRecorded: false`. 앱 `getLecture`가 처음 볼 때 `recordUsage` 후 `true`로 바꿈. 앱이 직접 복사한 강의는 `usageRecorded: true`.
+- **보안 규칙**: 바꾸지 않음. 서버는 사용자 본인 ID 토큰으로 쓰므로 `users/{uid}/**` 규칙이 그대로 적용됨.
+- **위험(사용자 수락)**: 피드 비밀주소를 가진 사람은 백업에서 새로 고침 토큰을 꺼내 이 Firebase 프로젝트에 사용자로 접근 가능. 비밀키를 바꾸면 이전 백업은 지워지지만, 이미 꺼낸 토큰은 Google 계정에서 로그아웃 처리 전까지 유효할 수 있음.
+
 ---
 
 ## 5. 버전 히스토리
+- **v2.9.1 (2026-11-11 KST)**: [아침 강의 사라짐] 서버가 만든 아침 강의를 사용자 계정(Firestore·Storage)에 저장(`server/lectureStore.ts`). 새로 켜진 서버는 저장본으로 피드에 답하고 옛 음성 링크는 저장본으로 넘김. 앱이 피드 동기화 때 Firebase 새로 고침 토큰을 서버에 맡김(암호화 백업). 테스트 32개.
 - **v2.9.0 (2026-11-10 KST)**: [전체 코드 리뷰 2차 반영] 통화 종료는 `pending_review`, 복기 저장 시에만 `done`(복기 중 앱을 닫아도 다시 복기 가능, 홈 아래 「끝나지 않은 통화」 버튼). 복기 직후 피드 동기화. 1분 임시 받아쓰기 묶음을 녹음 순서대로(업로드와 무관). 기록용 받아쓰기는 분 단위 재시도 + 실패한 분만 임시 받아쓰기로 보충. 통화 종료 중복 방지, 연결 끊김 시 복기로 이어 가기, 화면 꺼짐 방지 재요청, 「다시 시도」 경합 방지. 내 말이 없는 통화는 진도 유지. 복기 AI가 준 실수 id 검사, 요청 크기 제한. 코치 메시지 최신 50개. 오류 응답 표준화(`server/errors.ts`, 내부 문구 비노출)와 화면용 `friendlyError`. 보안 헤더 2종. 테스트 25개. 기록: `docs/reviews/2026-11-full-code-review.md`, 실기기 QC: `docs/qc/2026-11-android-qc-checklist.html`.
 - **v2.8.1 (2026-10-19 KST)**: [피드 404] 피드 설정과 사용자 Gemini 키를 Firestore `feeds/{id}`에 암호화 백업, 새로 뜬 서버가 복원해 그록봇만으로 아침 강의 생성. `firestore.rules`에 feeds 규칙 추가(배포 필요).
 - **v2.8.0 (2026-10-19 KST)**: [전체 코드 리뷰 반영] 통화마다 새 Live 인스턴스(앞 통화 섞임 해결), 통화 마지막 말 복기 포함, "다시 시도" 시 녹음 번호 이어 가기, Firestore `ignoreUndefinedProperties`(코치 답장·업로드 실패 조각 기록 저장), 복기·코치 승인 뒤 목표 다시 불러오기, 코치 되돌리기는 바꾼 항목만, 오인식 신고 시 실수 삭제, 서버 재시작으로 멈춘 강의 복구, 다시 복기해도 중복·진도 후퇴 없음, 1분 받아쓰기 스위치 연결, 퀴즈 녹음 형식 자동 선택, 취약점 3개 저장(여행 치환 수정), 코치 제안 검사, 키 탐색 1분 캐시·부모 프로세스만, 상태 API 경로 비노출, 미완료 통화만 읽기, 안 쓰는 코드 삭제, 빌드 파일 나누기, 자동 테스트 17개. 상세: [`docs/reviews/2026-10-full-code-review.md`](./docs/reviews/2026-10-full-code-review.md).

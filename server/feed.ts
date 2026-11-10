@@ -12,6 +12,7 @@ import type { LectureMistakeInput } from './lecture.ts';
 import { safeEqual } from './auth.ts';
 import { loadFeedBackup } from './feedStore.ts';
 import { setUserKeyFromFeed } from './userKey.ts';
+import { setUserRefreshToken, loadLectureFromAccount } from './lectureStore.ts';
 
 const FEED_FILE = path.join(DATA_DIR, 'feed.json');
 const FAILED_RETRY_COOLDOWN_MS = 30 * 60 * 1000;
@@ -61,6 +62,7 @@ export async function loadFeedForSecret(secret: string): Promise<FeedSyncState |
     if (!backup) return null;
     writeFeedSync(backup.state);
     if (backup.apiKey) setUserKeyFromFeed(backup.state.uid, backup.apiKey);
+    if (backup.refreshToken) setUserRefreshToken(backup.state.uid, backup.refreshToken);
     console.log('[feed] restored feed state from Firestore backup');
     return backup.state;
   } catch (err: any) {
@@ -80,9 +82,35 @@ export interface FeedToday {
   error?: string;
 }
 
-export function buildFeedToday(ai: GoogleGenAI | null, st: FeedSyncState, baseUrl: string): FeedToday {
+/** A lecture saved in the account today (a fresh server has no .data/ copy), or null. */
+async function savedLecture(uid: string, date: string) {
+  try {
+    return await loadLectureFromAccount(uid, date);
+  } catch (err: any) {
+    console.warn('[feed] could not read saved lecture:', err?.message || err);
+    return null;
+  }
+}
+
+export async function buildFeedToday(ai: GoogleGenAI | null, st: FeedSyncState, baseUrl: string): Promise<FeedToday> {
   const date = kstToday();
   let lecture = readLectureState(st.uid, date);
+  if (!lecture || (lecture.status === 'failed' && lecture.error === 'INTERRUPTED')) {
+    // Made earlier on a server that has since been shut down: use the copy in the account
+    // instead of making (and paying for) a second lecture.
+    const saved = await savedLecture(st.uid, date);
+    if (saved) {
+      return {
+        date,
+        status: 'ready',
+        title: saved.title || null,
+        itemCount: saved.itemCount,
+        coachNote: saved.coachNote || null,
+        audioUrl: `${baseUrl}/feed/${st.secret}/audio/${date}.wav`,
+        quizCount: st.quizCount,
+      };
+    }
+  }
   const hasCandidates = st.newMistakes.length + st.reviewMistakes.length > 0;
   // Retry a failed lecture at most once per FAILED_RETRY_COOLDOWN_MS, so a feed that is
   // polled repeatedly does not restart a costly, failing generation on every request.
@@ -120,6 +148,14 @@ export function buildFeedToday(ai: GoogleGenAI | null, st: FeedSyncState, baseUr
 export function feedAudioFile(st: FeedSyncState, date: string): string | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
   return lectureAudioPath(st.uid, date);
+}
+
+/** Where to send a feed audio link whose file is not on this server: the account's Storage copy. */
+export async function feedAudioRedirect(st: FeedSyncState, date: string): Promise<string | null> {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  const local = readLectureState(st.uid, date);
+  if (local?.storageUrl) return local.storageUrl;
+  return (await savedLecture(st.uid, date))?.audioUrl || null;
 }
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));

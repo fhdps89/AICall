@@ -5,6 +5,7 @@
 import { getUserProfile, saveUserProfile, getDueMistakes } from "../firebase/db";
 import { authJson } from "../api/authFetch";
 import { pickLectureMistakes } from "../lecture/lectureService";
+import { auth } from "../firebase/config";
 
 export function generateFeedSecret(): string {
   const bytes = new Uint8Array(24);
@@ -29,6 +30,9 @@ export async function syncFeed(uid: string, secretOverride?: string, previousSec
     previousSecret,
     quizCount: Math.min(due.length, 10),
     ...picked,
+    // Lets the server save a lecture it makes in the morning into this account
+    // (kept encrypted in the feed backup; see server/lectureStore.ts).
+    refreshToken: auth.currentUser?.uid === uid ? auth.currentUser.refreshToken : undefined,
   });
   return secret;
 }
