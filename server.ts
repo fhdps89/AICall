@@ -10,12 +10,16 @@ import { requireAuth, verifyFirebaseIdToken, setAfterAuthHook } from './server/a
 import { ensureUserGeminiKey, getUserSuppliedKey } from './server/userKey.ts';
 import { saveFeedBackup, deleteFeedBackup } from './server/feedStore.ts';
 import { geminiLimit, checkLiveSessionStart } from './server/rateLimit.ts';
-import { DATA_DIR, startLectureJob, readLectureState, lectureAudioPath, kstToday } from './server/lecture.ts';
+import { DATA_DIR, startLectureJob, readLectureState, lectureAudioPath, kstToday, setLectureReadyHook } from './server/lecture.ts';
+
+// A finished lecture is also saved into the user's account (see server/lectureStore.ts).
+setLectureReadyHook(saveLectureToAccount);
 import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive } from './server/sttBench.ts';
 import { LIVE_MODEL, TEXT_MODEL, GEMINI_STT_MODEL, GEMINI_TTS_LITE_MODEL } from './src/config/models.ts';
 import { userRecordingPath as userRecordingPathIn } from './server/recordingPath.ts';
 import { apiError, noKey, NO_KEY_MESSAGE } from './server/errors.ts';
-import { isValidFeedSecret, writeFeedSync, loadFeedForSecret, buildFeedToday, feedAudioFile, renderFeedHtml } from './server/feed.ts';
+import { isValidFeedSecret, writeFeedSync, loadFeedForSecret, buildFeedToday, feedAudioFile, feedAudioRedirect, renderFeedHtml } from './server/feed.ts';
+import { setUserRefreshToken, getUserRefreshToken, isPlausibleRefreshToken, saveLectureToAccount } from './server/lectureStore.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1052,7 +1056,7 @@ app.get('/api/lecture/audio', requireAuth, (req: Request, res: Response) => {
 // B-8 Grok Bot feed: app syncs secret + candidates (auth), feed URLs need only the secret
 app.post('/api/feed/sync', requireAuth, async (req: Request, res: Response) => {
   const uid = res.locals.user.uid as string;
-  const { secret, previousSecret, quizCount, newMistakes, reviewMistakes } = req.body || {};
+  const { secret, previousSecret, quizCount, newMistakes, reviewMistakes, refreshToken } = req.body || {};
   if (!isValidFeedSecret(secret)) {
     res.status(400).json({ ok: false, error: 'feed secret 형식 오류' });
     return;
@@ -1073,13 +1077,14 @@ app.post('/api/feed/sync', requireAuth, async (req: Request, res: Response) => {
     syncedAt: new Date().toISOString(),
   };
   writeFeedSync(state);
+  if (isPlausibleRefreshToken(refreshToken)) setUserRefreshToken(uid, refreshToken, feedBaseUrl(req));
   // Firestore backup so the feed URL survives a fresh server (see server/feedStore.ts).
   const idToken = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
   let backedUp = false;
   try {
     // Back up the user's Settings key too, but only when it is the key this server runs on.
     const apiKey = resolveGeminiApiKey() && lastKeySource === 'firestore:user-settings' ? getUserSuppliedKey() : undefined;
-    await saveFeedBackup(idToken, { state, apiKey });
+    await saveFeedBackup(idToken, { state, apiKey, refreshToken: getUserRefreshToken(uid) });
     if (isValidFeedSecret(previousSecret) && previousSecret !== secret) await deleteFeedBackup(idToken, previousSecret);
     backedUp = true;
   } catch (err: any) {
@@ -1102,7 +1107,7 @@ app.get(['/feed/:secret/today', '/feed/:secret/today.json'], async (req: Request
     res.status(404).send('Not found');
     return;
   }
-  const today = buildFeedToday(createGenAI(), st, feedBaseUrl(req));
+  const today = await buildFeedToday(createGenAI(), st, feedBaseUrl(req));
   if (req.path.endsWith('.json')) res.json(today);
   else res.type('html').send(renderFeedHtml(today));
 });
@@ -1112,6 +1117,13 @@ app.get('/feed/:secret/audio/:file', async (req: Request, res: Response) => {
   const m = /^(\d{4}-\d{2}-\d{2})\.wav$/.exec(String(req.params.file));
   const file = st && m ? feedAudioFile(st, m[1]) : null;
   if (!file) {
+    // This server did not make it (or was restarted): send the player to the account's copy.
+    const saved = st && m ? await feedAudioRedirect(st, m[1]) : null;
+    if (saved) {
+      res.set('Cache-Control', 'no-store');
+      res.redirect(302, saved);
+      return;
+    }
     res.status(404).send('Not found');
     return;
   }

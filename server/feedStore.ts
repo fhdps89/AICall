@@ -13,6 +13,10 @@
  * The user's Gemini key from Settings rides along inside the ciphertext (user's choice,
  * 2026-10-19), so a fresh server can make the morning lecture before anyone signs in.
  * Whoever holds the feed secret can therefore recover that key.
+ * Since 2026-11-11 (user's choice) the app's Firebase refresh token rides along the same way,
+ * so a server that made the lecture can save it into the account. Whoever holds the secret
+ * can therefore also act as the user on this app's Firestore and Storage. Rotating the feed
+ * secret in Settings deletes the old backup.
  */
 import crypto from 'crypto';
 import { firestoreDocUrl } from './userKey.ts';
@@ -22,6 +26,8 @@ export interface FeedBackup {
   state: FeedSyncState;
   /** Gemini key the user saved in Settings, only when that is the key the server uses. */
   apiKey?: string;
+  /** App sign-in (Firebase refresh token) so the server can save lectures into the account (user's choice, 2026-11-11). */
+  refreshToken?: string;
 }
 
 const sha256 = (s: string) => crypto.createHash('sha256').update(s, 'utf8').digest();

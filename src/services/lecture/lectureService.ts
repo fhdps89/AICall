@@ -49,13 +49,29 @@ export interface LectureDoc {
   createdAt: string;
   updatedAt?: string;
   error?: string;
+  /** "server" when the server saved it into the account by itself (server/lectureStore.ts). */
+  savedBy?: string;
+  /** false until the app has added this lecture to the usage counters. */
+  usageRecorded?: boolean;
 }
 
 const lectureRef = (uid: string, date: string) => doc(db, "users", uid, "lectures", date);
 
 export async function getLecture(uid: string, date = getKSTToday()): Promise<LectureDoc | null> {
   const snap = await getDoc(lectureRef(uid, date));
-  return snap.exists() ? (snap.data() as LectureDoc) : null;
+  if (!snap.exists()) return null;
+  const l = snap.data() as LectureDoc;
+  if (l.status === "ready" && l.usageRecorded === false) {
+    // Saved by the server on its own: count its cost once, here.
+    try {
+      await updateDoc(lectureRef(uid, date), { usageRecorded: true });
+      recordUsage(uid, { textTokens: l.textTokens || 0, ttsChars: l.chars || 0, ttsEngine: "gemini" });
+      l.usageRecorded = true;
+    } catch (err) {
+      console.warn("[Lecture] usage record skipped:", err);
+    }
+  }
+  return l;
 }
 
 function toPayload(m: MistakeData) {
@@ -157,6 +173,7 @@ export async function syncLectureFromServer(uid: string, date = getKSTToday()): 
     textTokens: lecture.textTokens,
     durationSec: lecture.durationSec,
     listenedAt: current?.listenedAt || null,
+    usageRecorded: true,
     createdAt: lecture.createdAt,
     updatedAt: new Date().toISOString(),
   };

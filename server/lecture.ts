@@ -57,6 +57,8 @@ export interface LectureState {
   textTokens?: number;
   durationSec?: number;
   audioFile?: string; // relative file name inside LECTURE_DIR/{uid}
+  /** Cloud Storage URL once the lecture was saved into the user's account (server/lectureStore.ts). */
+  storageUrl?: string;
   error?: string;
   createdAt: string;
   updatedAt: string;
@@ -108,6 +110,14 @@ export function lectureAudioPath(uid: string, date: string): string | null {
 }
 
 const running = new Set<string>();
+
+type ReadyHook = (state: LectureState, wavFile: string) => Promise<string | null>;
+let onReady: ReadyHook | null = null;
+
+/** server.ts registers the account saver here (kept out of this file to avoid an import cycle). */
+export function setLectureReadyHook(hook: ReadyHook | null): void {
+  onReady = hook;
+}
 
 /**
  * Start (or return existing) lecture job. Never regenerates a ready lecture unless force=true.
@@ -458,4 +468,18 @@ async function runJob(
   state.status = 'ready';
   delete state.error;
   writeLectureState(state);
+
+  // Save into the user's account so a fresh server (empty .data/) and the app still have it.
+  if (onReady) {
+    try {
+      const url = await onReady(state, path.join(userDir(state.uid), fileName));
+      if (url) {
+        state.storageUrl = url;
+        writeLectureState(state);
+        console.log('[Lecture] saved to account');
+      }
+    } catch (err: any) {
+      console.warn('[Lecture] could not save to account:', err?.message || err);
+    }
+  }
 }

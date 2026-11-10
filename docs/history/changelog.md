@@ -4,6 +4,21 @@
 
 ---
 
+### [2026-11-11 KST] v2.9.1 — 피드가 만든 아침 강의를 계정에 저장 (GitHub 브랜치 `claude/lecture-persist`, Claude)
+- **증상**: 2026-11-11 07:15 그록봇이 텔레그램으로 「원콜 오늘 강의가 준비됐어요」와 `/feed/{비밀키}/audio/2026-11-11.wav` 링크를 보냄. 07:37 앱 홈 「오늘 아침 강의」는 「아직 오늘 강의가 없어요」. 사용자가 그 뒤 링크를 열자 「Not found」.
+- **원인**: 아침 강의 JSON·WAV는 `server/lecture.ts`가 서버 안 `.data/lectures/`에만 저장. AI Studio 배포(Cloud Run)는 조용하면 서버를 내리고 다음 요청에 빈 서버를 띄우므로, 07:15에 강의를 만든 서버가 사라진 뒤 앱(`/api/lecture/status`)과 피드 링크 모두 찾지 못함. 피드 요청은 로그인 토큰이 없어 서버가 계정(Firestore)에 쓸 수도 없었음. (서버 로그는 볼 수 없어 코드와 증상으로 판단. 링크가 「Not found」인 것으로 확인.)
+- **변경**
+  - `server/lectureStore.ts`(신규): 새로 고침 토큰 보관(메모리), ID 토큰 교환(사용자 일치 확인, 만료 5분 전 갱신), Firestore 값 변환, Storage 업로드, 강의 문서 PATCH(`updateMask`), 계정 저장본 읽기.
+  - `server/lecture.ts`: `LectureState.storageUrl`, `setLectureReadyHook`. 작업이 `ready`가 되면 저장 함수 호출, 실패해도 강의는 그대로(로그만).
+  - `server/feed.ts`: `buildFeedToday` async + 계정 저장본 사용, `feedAudioRedirect`. 백업 복원 시 토큰도 복원.
+  - `server/feedStore.ts`: `FeedBackup.refreshToken`(암호화 안에만).
+  - `server.ts`: `/api/feed/sync`가 `refreshToken` 받음, 백업에 포함. 피드 음성 링크는 로컬 파일이 없으면 저장본으로 302.
+  - 앱: `feedService.syncFeed`가 `auth.currentUser.refreshToken` 전송. `lectureService.getLecture`가 서버 저장본의 사용량을 한 번만 기록(`usageRecorded`). 앱이 복사한 강의는 `usageRecorded: true`.
+- **안전장치**: 토큰은 로그·URL·응답에 나오지 않음(테스트로 확인). 토큰 교환 결과의 `user_id`가 다르면 아무것도 쓰지 않음. 앱이 이미 저장한 강의는 덮어쓰지 않음. `listenedAt`(들음) 유지. 보안 규칙 변경 없음. 쿼터·RateLimit·CORS·크기 제한·오류 문구 규칙 그대로.
+- **사용자 결정**: 「서버가 계정에 직접 저장」 선택(2026-11-11). 위험: 피드 비밀주소가 새면 이 앱 계정 데이터 접근 가능. 대응: 설정 → 그록봇 피드 → 비밀키 새로 바꾸기.
+- **확인하지 못한 것**: 실제 Google 토큰·Storage·Firestore 호출은 이 환경에서 실행 불가(가짜 응답으로 테스트). Firebase 웹 키에 사이트 제한이 걸려 있으면 토큰 교환이 막힐 수 있음(앱 주소를 Referer로 보냄). 다음 날 아침 실기기 확인 필요.
+- **검증**: 타입 검사, 빌드, `npm test` 32/32(신규 7: 값 변환, 토큰 형식, 문서 모양, 업로드·저장 순서와 인증 헤더, 앱 복사본·다른 사용자 토큰이면 쓰지 않음, 새 서버가 저장본으로 피드 답변, 백업 암호화).
+
 ### [2026-11-10 KST] v2.9.0 — 전체 코드 리뷰 2차 반영 (GitHub 브랜치 `claude/full-review-2026-11`, Claude)
 - **배경**: 2026-11-10에 `main`(`24901cb`, v2.8.1) 전체 약 14,100줄을 다시 리뷰. 빌드·타입 검사·테스트 18개는 통과했지만, 약한 인터넷·앱을 중간에 닫음·버튼 두 번 누름 같은 실제 사용 상황에서 학습 기록이 빠지는 문제 9개(높음), 8개(중간), 6개(낮음)를 찾음. 전체 목록과 근거: [`docs/reviews/2026-11-full-code-review.md`](../reviews/2026-11-full-code-review.md).
 - **문제 원인과 적용된 수정 내역 — 높음**
