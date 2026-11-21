@@ -4,6 +4,28 @@
 
 ---
 
+### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — 마이크 점검 무한 로딩 해소: 제한 시간·실패 이유·다시 점검·건너뛰기, 통화 중 글로 답하기 (브랜치 `fix/qa-x1-mic-check-fallback`)
+- **배경**:
+  - 마이크가 없거나 브라우저 권한 안내 창이 응답하지 않는 환경에서 통화 준비 화면(`PreCallScreen`)의 「마이크 점검하기」가 무한 로딩에 빠져 「전화 걸기」가 영영 켜지지 않았음.
+  - 또한 마이크 없이 통화를 시작해 튜터 음성을 들으면서 글로 답하고, 그 답변을 대화 기록·통화 후 복기까지 남길 수 있는 경로가 없었음.
+- **원인**:
+  - `src/ui/call/PreCallScreen.tsx`의 `checkMic`이 `navigator.mediaDevices.getUserMedia`를 제한 시간 없이 `await`하여 Promise가 끝나지 않으면 `"checking"` 상태에 영원히 머물렀고, 실패 문구도 2종뿐이며 건너뛰기 경로가 없었음.
+  - `src/ui/call/NewCallScreen.tsx`는 마이크 실패 시 경고 배너만 띄우고 텍스트 입력/전송 UI가 없었으며, `LiveProvider`에도 사용자 텍스트 입력을 `transcriptItems`에 기록하는 공개 메서드가 없었음.
+- **수정**:
+  - `src/ui/call/micCheck.ts`(신규): React·DOM 전역 import 없는 순수 주입식 모듈로 `checkMicrophone(getUserMedia, timeoutMs = 8000)`, `mapMicErrorReason`, `stopStreamTracks`, `MIC_FAIL_MESSAGES`, 글 답변 정규화 순수 함수 `formatWrittenAnswer(text)`(`WRITTEN_ANSWER_MAX_LENGTH = 500`, `WRITTEN_ANSWER_PREFIX = "The learner answers in writing: "`)를 추가. 오류 `name`을 `unsupported`·`denied`·`not_found`·`in_use`·`timeout`·`unknown` 6종으로 매핑하고, 타임아웃 뒤 늦게 도착한 `MediaStream`은 즉시 모든 트랙을 `stop()` 처리함.
+  - `src/ui/call/PreCallScreen.tsx`: `checkMicrophone(..., 8000)`을 사용하도록 변경하고, 점검 중 「취소」 버튼, 실패 시 사유별 문구 + 「다시 점검」 + 「마이크 없이 진행 (글로 답하기)」 버튼을 추가했으며, 최초 `idle` 및 점검 취소 후 `idle` 상태에서도 「마이크 없이 진행 (글로 답하기)」 링크를 노출함. 건너뛰기 선택 시 「마이크 없이 전화 걸기 (글로 답해요)」가 활성화되며 `onStart({ micSkipped: true })`(성공 시 `false`)를 호출함.
+  - `src/App.tsx`: `activeCallTextOnly` 상태를 추가해 `handlePrepConfirmed({ micSkipped })`가 `NewCallScreen`에 `textOnly` prop을 전달하고 통화 종료/이탈 시 초기화함.
+  - `src/services/providers/types.ts` · `src/services/providers/geminiLiveProvider.ts`: `LiveSessionOptions`에 `skipMic?: boolean` 추가(지정 시 `initAudioCapture()` 건너뛰고 재생만 초기화), `sendTextPrompt(prompt)`가 소켓 전송 성공 여부(`boolean`)를 반환하도록 변경(소켓이 `OPEN`이 아니거나 전송 실패 시 `false`), `LiveProvider`에 `appendUserText(text)` 추가(기존 `appendTranscript("user", ...)` 재사용 및 `onTranscript`·`onTranscriptLogged` 호출).
+  - `src/ui/call/NewCallScreen.tsx`: `textOnly` 시 `skipMic: true` 전달 및 `onMicWarning` 비노출, 하단 고정 푸터(연결된 상태)에 `formatWrittenAnswer` 기반 500자 제한·공백 무시·IME 조합 중 Enter 무시(`!e.nativeEvent.isComposing`) 「글로 답하기」 입력창과 「보내기」 버튼을 추가. `sendTextPrompt`가 `true`일 때만 `ensureSessionCreated()`·`appendUserText`를 호출하고 입력을 비우며, `false`이면 기록에 남기지 않고 입력을 유지한 채 「연결이 끊겨 보내지 못했어요」 한 줄 안내를 표시함.
+- **방어 조치 (Safeguards)**:
+  - `PreCallScreen.tsx`에서 `checkSeqRef`·`mountedRef` 가드로 취소·재점검·언마운트 이후 늦게 도착한 스트림은 React 상태를 갱신하지 않고 트랙만 정지함.
+  - `NewCallScreen.tsx`에서 `ensureSessionCreated`와 `hasMicRecordingRef`로 텍스트 전용 통화에서도 첫 글 답변 전송 성공 시 세션 문서를 생성해 `liveTranscript` 저장 및 종료 복기(`liveTranscript_fallback`)가 누락되지 않게 하고, 이전 통화의 `ChunkRecorder` 녹음 조각이 섞이지 않도록 차단함. `tests/mobileShell.test.ts` 레이아웃 규칙(`h-screen`, `supports-[height:100dvh]:h-dvh`, `shrink-0`, `select-none`, `"끝내기"` 비포함)을 유지함.
+  - `tests/micCheck.test.ts`(신규): 성공, 무응답 타임아웃, 타임아웃 후 지연 스트림 `track.stop()`, 오류 `name`별 `reason` 매핑 전체, `mediaDevices` 부재 시 `unsupported`, 사유별 메시지 비어있지 않음·고유성, `formatWrittenAnswer` 공백/트림/500자 자르기/접두어, `GeminiLiveProvider`의 `skipMic: true` 시 가짜 `navigator.mediaDevices.getUserMedia` 0회 호출·`sendTextPrompt` 소켓 상태별 `boolean` 반환·`appendUserText` 기록 8개 테스트 추가.
+- **남은 리스크**:
+  - 통화 중 실시간 기록 저장 조건이 `sessionCreated` 이후로 바뀜(다음 저장에서 전체 복구).
+  - 글 답변이 서버에서 입력 전사로 다시 와 두 번 기록될 가능성은 [미확인].
+  - 모바일 키보드에서 입력창 가시성은 실기기 QA 필요 [미확인].
+- **검증**: `npm test` 45/45 통과, `npm run lint`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 오류 없음 (`package.json` 버전 `2.10.0` 유지).
 ### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA-3 통화 시작 침묵: 직접 연결 Blob 프레임 해석·연결 직후 튜터 첫 인사 트리거 (브랜치 `fix/qa-r3-live-blob-greeting`)
 - **배경**:
   - 통화를 연결해도 튜터가 13~40초 동안 먼저 말하지 않고, 콘솔에 `Direct parse message error: SyntaxError… [object Blob]` 와 `setupComplete timeout` 이 반복 기록되는 QA 버그가 발생함.

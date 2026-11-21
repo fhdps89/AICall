@@ -14,6 +14,7 @@ import { buildTodayLessonSystemPrompt } from "../../data/lessonPromptBuilder";
 import { createLiveProvider } from "../../services/providers";
 import { LiveCommand, LiveProvider, LiveTranscriptItem } from "../../services/providers/types";
 import { getChunkRecorder } from "../../services/recording/chunkRecorder";
+import { formatWrittenAnswer, WRITTEN_ANSWER_MAX_LENGTH } from "./micCheck";
 import {
   PhoneOff,
   Mic,
@@ -28,6 +29,7 @@ import {
   Smartphone,
   Disc3,
   FileAudio,
+  Send,
 } from "lucide-react";
 
 const COMMAND_LABELS: Record<string, string> = {
@@ -44,6 +46,7 @@ interface NewCallScreenProps {
   lessonIndex: number;
   placeholders: PromptPlaceholders;
   enablePartialTranscribe?: boolean;
+  textOnly?: boolean;
   onEndCall: (
     transcript: LiveTranscriptItem[],
     stats?: { connectionPath: "direct" | "proxy"; directFailCount: number },
@@ -60,6 +63,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
   lessonIndex,
   placeholders,
   enablePartialTranscribe = true,
+  textOnly = false,
   onEndCall,
   onExit,
 }) => {
@@ -78,10 +82,27 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
   const [connectError, setConnectError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState<number>(0);
   const [micWarning, setMicWarning] = useState<string | null>(null);
+  const [writtenText, setWrittenText] = useState<string>("");
+  const [writtenSendError, setWrittenSendError] = useState<string | null>(null);
   const sessionCreatedRef = useRef<boolean>(false);
+  const sessionCreatePromiseRef = useRef<Promise<void> | null>(null);
+  const hasMicRecordingRef = useRef<boolean>(false);
   // Guards 통화 종료 against a double tap (it would finalize and review the call twice).
   const hangingUpRef = useRef<boolean>(false);
   const [hangingUp, setHangingUp] = useState<boolean>(false);
+
+  const ensureSessionCreated = (): Promise<void> => {
+    if (!userId) return Promise.resolve();
+    if (!sessionCreatedRef.current) {
+      sessionCreatedRef.current = true;
+      sessionCreatePromiseRef.current = createCallSession(userId, sessionIdRef.current, {
+        goalId: goal.id,
+        lessonIndex,
+        connectionPath: "direct",
+      }).catch((err) => console.warn("[NewCallScreen] createCallSession error:", err));
+    }
+    return sessionCreatePromiseRef.current || Promise.resolve();
+  };
 
   const transcriptsEndRef = useRef<HTMLDivElement>(null);
   // One provider per call screen: "다시 시도" in the same call reuses it (keeps transcript and
@@ -133,6 +154,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
 
     setConnectError(null);
     setMicWarning(null);
+    setWrittenSendError(null);
 
     // B-2 req 4: up to 3 mistakes due for review go into the call so the tutor sets up chances
     // to use them (the post-call review then graduates ones used correctly). Never block the
@@ -154,18 +176,13 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
         return provider.connect({
         sessionId: currentSessionId,
         systemPrompt,
+        skipMic: textOnly,
         onMediaStreamReady: (stream) => {
           if (isCancelled || !userId) return;
-          // Create the Firestore session only once the mic works, so a failed
-          // mic attempt leaves no empty session behind.
-          if (!sessionCreatedRef.current) {
-            sessionCreatedRef.current = true;
-            createCallSession(userId, currentSessionId, {
-              goalId: goal.id,
-              lessonIndex,
-              connectionPath: "direct",
-            }).catch((err) => console.warn("[NewCallScreen] createCallSession error:", err));
-          }
+          // Create the Firestore session only once the mic works (or first written answer),
+          // so an unused attempt leaves no empty session behind.
+          ensureSessionCreated();
+          hasMicRecordingRef.current = true;
           console.log("[NewCallScreen] MediaStream ready, starting 10s chunk recorder...");
           const chunkRecorder = getChunkRecorder();
           chunkRecorder.start(stream, {
@@ -183,7 +200,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
           });
         },
         onMicWarning: (m) => {
-          if (isCancelled) return;
+          if (isCancelled || textOnly) return;
           setMicWarning(m);
         },
         onAudioData: () => {
@@ -210,8 +227,10 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
         },
         onTranscriptLogged: (_item, allTranscripts) => {
           // B-3 Requirement 3: Continuous live transcript saving to Firestore
-          if (userId && !isCancelled) {
-            updateSessionLiveTranscript(userId, currentSessionId, allTranscripts).catch(() => {});
+          if (userId && !isCancelled && sessionCreatedRef.current) {
+            (sessionCreatePromiseRef.current || Promise.resolve())
+              .then(() => updateSessionLiveTranscript(userId, currentSessionId, allTranscripts))
+              .catch(() => {});
           }
         },
         onStatusChange: (newStatus, msg) => {
@@ -227,10 +246,13 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
             getChunkRecorder().stop().catch(() => {});
           }
 
-          if (newStatus === "connected" && !timerRef.current) {
-            timerRef.current = setInterval(() => {
-              setCallDuration((prev) => prev + 1);
-            }, 1000);
+          if (newStatus === "connected") {
+            setWrittenSendError(null);
+            if (!timerRef.current) {
+              timerRef.current = setInterval(() => {
+                setCallDuration((prev) => prev + 1);
+              }, 1000);
+            }
           }
         },
         onInterrupted: () => {
@@ -257,7 +279,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
       getChunkRecorder().stop().catch(() => {});
       provider.disconnect().catch(() => {});
     };
-  }, [userId, goal, lessonIndex, placeholders, enablePartialTranscribe, attempt]);
+  }, [userId, goal, lessonIndex, placeholders, enablePartialTranscribe, attempt, textOnly]);
 
   // Auto-scroll transcripts
   useEffect(() => {
@@ -271,8 +293,23 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
     setTimeout(() => setLastAction(null), 2500);
   };
 
+  const handleSendWrittenText = () => {
+    const formatted = formatWrittenAnswer(writtenText);
+    if (!formatted || status !== "connected") return;
+    const sent = providerRef.current.sendTextPrompt(formatted.prompt);
+    if (!sent) {
+      setWrittenSendError("연결이 끊겨 보내지 못했어요");
+      return;
+    }
+    setWrittenSendError(null);
+    ensureSessionCreated();
+    providerRef.current.appendUserText(formatted.displayText);
+    setWrittenText("");
+  };
+
   const handleRetryConnect = () => {
     setConnectError(null);
+    setWrittenSendError(null);
     setStatus("connecting");
     setStatusMessage("다시 연결하는 중...");
     setAttempt((a) => a + 1);
@@ -290,15 +327,16 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
     if (hangingUpRef.current) return;
     hangingUpRef.current = true;
     setHangingUp(true);
-    // Nothing was recorded (mic never started): just leave, no review.
+    // Nothing was recorded and nothing was written: just leave, no review.
     if (!sessionCreatedRef.current) {
       await handleExitAfterError();
       return;
     }
+    await sessionCreatePromiseRef.current;
     const chunkRecorder = getChunkRecorder();
     // Stop first: stop() waits for the last (partial) chunk, so the final words are included.
     await chunkRecorder.stop();
-    const recordedBlobs = chunkRecorder.getSessionRecordedBlobs();
+    const recordedBlobs = hasMicRecordingRef.current ? chunkRecorder.getSessionRecordedBlobs() : [];
 
     const finalTranscripts = providerRef.current.getLiveTranscript();
     const stats = providerRef.current.getConnectionStats();
@@ -452,15 +490,19 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
           >
             {isSpeakingModel ? (
               <Volume2 className="w-12 h-12 text-slate-950 animate-pulse" />
+            ) : textOnly ? (
+              <MicOff className="w-12 h-12 text-slate-400" />
             ) : (
               <Mic className="w-12 h-12 text-slate-400" />
             )}
           </div>
-          <p className="text-xs text-slate-400 mt-3 font-medium">
+          <p className="text-xs text-slate-400 mt-3 font-medium text-center">
             {isSpeakingModel
               ? "튜터가 답변하는 중..."
               : status === "connected"
-              ? "자유롭게 영어로 말해 보세요 (다 말했으면 '답변 끝')"
+              ? textOnly
+                ? "마이크 없이 연결됨 · 아래 입력창에 영어로 답해 보세요"
+                : "자유롭게 영어로 말해 보세요 (다 말했으면 '답변 끝')"
               : statusMessage}
           </p>
         </div>
@@ -508,51 +550,91 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
               {status === "reconnecting" ? "다시 연결되면 버튼을 쓸 수 있어요." : "튜터와 연결되면 답변 끝·피드백·모범답 버튼이 나와요."}
             </p>
           ) : (
-          <div className="grid grid-cols-5 gap-2">
-            <button
-              onClick={() => handleCommand("Done")}
-              className="py-2.5 px-1 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 disabled:opacity-40 border border-amber-500/40 text-amber-300 font-bold text-xs flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95"
-              title="답변 종료 및 핵심 피드백 요청"
-            >
-              <CheckCircle2 className="w-4 h-4 text-amber-400" />
-              <span>답변 끝</span>
-            </button>
+          <div className="space-y-2.5">
+            <div className="grid grid-cols-5 gap-2">
+              <button
+                onClick={() => handleCommand("Done")}
+                className="py-2.5 px-1 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 disabled:opacity-40 border border-amber-500/40 text-amber-300 font-bold text-xs flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95"
+                title="답변 종료 및 핵심 피드백 요청"
+              >
+                <CheckCircle2 className="w-4 h-4 text-amber-400" />
+                <span>답변 끝</span>
+              </button>
 
-            <button
-              onClick={() => handleCommand("Feedback")}
-              className="py-2.5 px-1 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 disabled:opacity-40 border border-slate-700/60 text-slate-200 font-bold text-xs flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95"
-              title="방금 답변에 대한 피드백 요청"
-            >
-              <MessageSquare className="w-4 h-4 text-sky-400" />
-              <span>피드백</span>
-            </button>
+              <button
+                onClick={() => handleCommand("Feedback")}
+                className="py-2.5 px-1 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 disabled:opacity-40 border border-slate-700/60 text-slate-200 font-bold text-xs flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95"
+                title="방금 답변에 대한 피드백 요청"
+              >
+                <MessageSquare className="w-4 h-4 text-sky-400" />
+                <span>피드백</span>
+              </button>
 
-            <button
-              onClick={() => handleCommand("Model answer")}
-              className="py-2.5 px-1 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 disabled:opacity-40 border border-slate-700/60 text-slate-200 font-bold text-xs flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95"
-              title="60초 AL 모범 답안 청취"
-            >
-              <Sparkles className="w-4 h-4 text-purple-400" />
-              <span>모범답</span>
-            </button>
+              <button
+                onClick={() => handleCommand("Model answer")}
+                className="py-2.5 px-1 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 disabled:opacity-40 border border-slate-700/60 text-slate-200 font-bold text-xs flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95"
+                title="60초 AL 모범 답안 청취"
+              >
+                <Sparkles className="w-4 h-4 text-purple-400" />
+                <span>모범답</span>
+              </button>
 
-            <button
-              onClick={() => handleCommand("Pause")}
-              className="py-2.5 px-1 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 disabled:opacity-40 border border-slate-700/60 text-slate-200 font-bold text-xs flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95"
-              title="장면 일시정지 및 점검"
-            >
-              <Pause className="w-4 h-4 text-amber-400" />
-              <span>잠깐</span>
-            </button>
+              <button
+                onClick={() => handleCommand("Pause")}
+                className="py-2.5 px-1 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 disabled:opacity-40 border border-slate-700/60 text-slate-200 font-bold text-xs flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95"
+                title="장면 일시정지 및 점검"
+              >
+                <Pause className="w-4 h-4 text-amber-400" />
+                <span>잠깐</span>
+              </button>
 
-            <button
-              onClick={() => handleCommand("Slow")}
-              className="py-2.5 px-1 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 disabled:opacity-40 border border-slate-700/60 text-slate-200 font-bold text-xs flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95"
-              title="천천히 또박또박 말하기"
-            >
-              <Clock className="w-4 h-4 text-emerald-400" />
-              <span>천천히</span>
-            </button>
+              <button
+                onClick={() => handleCommand("Slow")}
+                className="py-2.5 px-1 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 disabled:opacity-40 border border-slate-700/60 text-slate-200 font-bold text-xs flex flex-col items-center justify-center gap-1 transition-all cursor-pointer active:scale-95"
+                title="천천히 또박또박 말하기"
+              >
+                <Clock className="w-4 h-4 text-emerald-400" />
+                <span>천천히</span>
+              </button>
+            </div>
+
+            {/* Written reply input (always available when connected, including mic-less/textOnly calls) */}
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={writtenText}
+                  maxLength={WRITTEN_ANSWER_MAX_LENGTH}
+                  onChange={(e) => {
+                    setWrittenText(e.target.value.slice(0, WRITTEN_ANSWER_MAX_LENGTH));
+                    if (writtenSendError) setWrittenSendError(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                      e.preventDefault();
+                      handleSendWrittenText();
+                    }
+                  }}
+                  placeholder="글로 답하기 (영어로 입력 후 Enter)"
+                  aria-label="글로 답하기"
+                  className="flex-1 min-w-0 px-3 py-2 rounded-xl bg-slate-900/90 border border-slate-700/80 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-400/70 select-text"
+                />
+                <button
+                  type="button"
+                  onClick={handleSendWrittenText}
+                  disabled={!formatWrittenAnswer(writtenText)}
+                  className="shrink-0 px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:bg-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-slate-950 font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>보내기</span>
+                </button>
+              </div>
+              {writtenSendError && (
+                <p className="text-[11px] text-rose-300 px-1 truncate" role="alert">
+                  {writtenSendError}
+                </p>
+              )}
+            </div>
           </div>
           )}
 
