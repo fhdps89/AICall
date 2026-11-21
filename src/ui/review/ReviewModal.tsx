@@ -171,7 +171,7 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
     }
   };
 
-  const emptyReview = isEmptyReview(review, sttFinal?.sourceStt);
+  const emptyReview = isEmptyReview(review, sttFinal?.sourceStt, sttFinal?.transcript);
   const badge = levelBadge(review?.estimatedLevel);
   const usedCorrectlyItems: Array<{ id: string; myPhrase: string; naturalPhrase: string }> =
     review?.usedCorrectlyItems || [];

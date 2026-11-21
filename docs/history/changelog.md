@@ -4,6 +4,28 @@
 
 ---
 
+### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — 빈 통화 복기 보강: 학습자 발화 유무 판정(hasLearnerSpeech) 도입 (브랜치 `fix/qa-x3-empty-call-speech-guard`)
+- **배경**:
+  - 녹음이 없거나 학습자 말이 사실상 없는 빈 통화(또는 튜터만 말한 통화)의 복기에서 진도가 넘어가고 레벨(`IM2`)과 「오늘 대화에서는 큰 문법적 실수가 발견되지 않았습니다. 훌륭합니다!」 문구가 노출되는 문제(QA 시트 7행)를 막기 위해 PR #13~#18의 빈 통화 분기를 점검하고 누락 경로를 보강함.
+  - **PR #13~#18 빈 통화 분기 검증 결과**:
+    - **이미 동작하던 부분**: 빈 복기 저장 분기(`sourceStt === "none"`일 때 `estimatedLevel: "-"`, `lessonAdvanced: false`, `mistakes: []` 저장으로 진도 유지)는 **v2.9.0(커밋 `93c520e`)**부터 있었음. PR #13(`reviewTiming.ts`, `reviewPipeline.ts`)은 `timing.outcome: "empty"` 계측만 추가했고, PR #14(`reviewView.ts`, `ReviewModal.tsx`)는 `isEmptyReview`와 「기록된 말이 없어 분석하지 않았어요」 문구·`—` 배지·「같은 과로 다시 걸어 주세요」를 추가했음. PR #15·#16·#18은 이 빈 통화 분기를 바꾸지 않았고, PR #17은 `ReviewModal.tsx`의 버튼 라벨 한 줄(「오늘 강의 보기」)만 바꿨음.
+    - **발견된 구멍**:
+      1. `reviewPipeline.ts`의 `sttPartial` fallback이 `transcript`가 빈 문자열이어도 `[00:00 - 01:00] ` 같은 시간 머리글을 붙여 비어 있지 않은 문자열로 만들어 `sourceStt`가 `"sttPartial_fallback"`이 되고 `"none"` 분기로 가지 못함.
+      2. 최종 받아쓰기·`sttPartial`·`liveTranscript`에 `"[noise]"`, `"(silence)"`, `"uh"`, 추임새 반복 같은 효과음 표기나 짧은 추임새만 있어도 문자열이 비어 있지 않다는 이유로 `/api/review`가 호출돼 모델이 레벨을 산출하고 `lessonAdvanced: true`로 진도를 올림.
+      3. `ReviewModal.tsx`가 `isEmptyReview(review, sttFinal?.sourceStt)`만 검사해, `sourceStt !== "none"`이고 `lessonAdvanced !== false`인 채 저장된 짧은/무발화 전사 복기에서 실수 0개일 때 「훌륭합니다!」 문구를 표시함.
+- **원인**:
+  - `reviewPipeline.ts`가 각 STT 소스의 유효성을 단순 truthy(`if (mergedStt.text)`, `if (!sttFinalText)`)로만 판정했고, `sttPartial`의 `[mm:ss - mm:ss]` 머리글·효과음 표기·추임새를 발화와 구분하지 못했음.
+- **수정**:
+  - `src/services/review/speechCheck.ts`(신규 순수 모듈): `stripTimeHeaders(text)`와 `hasLearnerSpeech(text)` 및 `decideSttSource({ finalText, finalSource, partials, liveTranscript })` 추가. `[mm:ss - mm:ss]` 시간 머리글, `[noise]`·`(silence)`·`[music]`·`<unk>` 등 괄호/대괄호/꺾쇠 효과음 표기, 구두점·공백과 짧은 추임새 목록(`FILLER_WORDS`: `uh`, `um`, `hmm`, `ah`, `er`, `oh`, `yeah`, `okay`, `음`, `어`, `아`, `으` 등)을 제외한 뒤 글자 단어(영문·한글 어절)가 `MIN_SPEECH_WORDS`(3개) 이상이고 총 글자 수가 `MIN_SPEECH_CHARS`(8자) 이상일 때만 `true`로 판정(상수화해 한 곳에서 조정 가능).
+  - `src/services/review/reviewPipeline.ts`: 최종 받아쓰기 결과(`finalText`, `finalSource`)와 fallback(`sttPartial` 머리글 제외 본문, `liveTranscript` `role === "user"` 발화) 모두를 `decideSttSource` 단일 경로로 판정해 실질 발화가 없는 소스는 건너뛰고 모두 `false`이면 `sourceStt: "none"`(빈 복기)으로 처리. 정상 발화 통화의 동작·반환값·단계별 계측은 그대로 유지.
+  - `src/services/review/reviewView.ts` · `src/ui/review/ReviewModal.tsx`: `isEmptyReview(review, sttSource, transcript?)`에 선택 인자 `transcript`를 추가해 `transcript`가 주어졌을 때 `!hasLearnerSpeech(transcript)`이면 `true`를 반환하도록 하고, `ReviewModal.tsx`에서 `sttFinal?.transcript`를 전달해 짧은 전사에서도 「훌륭합니다!」 대신 「기록된 말이 없어 분석하지 않았어요」를 표시.
+- **방어 조치 (Safeguards)**:
+  - `tests/speechCheck.test.ts`(신규): `stripTimeHeaders`, `hasLearnerSpeech` 경계값(빈 문자열, 공백, 시간 머리글만, `"[noise]"`, `"(silence)"`, `"[music] <unk>"`, `"uh"`, `"uh uh uh uh"`, `"um uh hmm yeah okay"`, `"음 어 음 어"`, 3단어 미만/8자 미만, 추임새+정상 문장, 영어 3단어 이상 문장, 한국어 문장, 머리글+빈 transcript, 머리글+정상 transcript), `decideSttSource` 분기(최종 정상 텍스트 및 `finalSource: "sttPartial_fallback"` 보존, 최종 없음+partial 빈 transcript→`none`, partial 정상, 잡음+liveTranscript user 줄, 튜터만 말한 통화→`none`), `isEmptyReview` 선택 인자 `transcript` 동작 및 기존 2인자 호출 호환을 테스트로 고정.
+  - Firebase·React 비의존 순수 모듈 분리 및 기존 `tests/reviewView.test.ts`·`tests/reviewRules.test.ts`·`reviewTiming.ts`·`package.json` 무변경 유지.
+- **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build` 모두 통과 확인.
+- **남은 리스크**:
+  - 이번 수정 전에 저장된 짧은 받아쓰기 복기는 `lessonAdvanced: true`·레벨이 남아 있어 화면이 빈 복기 문구와 어긋날 수 있음.
+  - 스피커폰에서 튜터 목소리가 마이크로 새면 튜터만 말한 통화도 발화로 판정될 수 있음 [미확인].
 ### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — 사용자 화면의 내부 용어 정리(개발자 모드로 이동) (브랜치 `fix/qa-x5-hide-internal-terms`)
 - **배경**:
   - 일반 학습자 화면(`src/ui/**/*.tsx`)에 기획 단계 번호(`B-3`, `B-9`, `3단계`), 소스 경로(`src/config/models.ts`), 상수·필드·키 이름(`PRICING_RATES`, `weekly`, `absence2d`, `deadline4w`, `deadline2w`, `coachNote`, `VERBATIM`, `Graduated`), 저장소·인프라 명칭(`IndexedDB`, `Cloud Storage`, `Firestore`, `AI Studio Publish`/`Secrets`, `chunk.path`, `connectionPath`) 등이 그대로 노출되고 있었음.

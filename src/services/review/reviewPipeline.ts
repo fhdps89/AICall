@@ -33,6 +33,7 @@ import {
   getKSTTomorrow,
   SessionReviewData,
   SttFinalData,
+  SttPartialItem,
   MistakeData,
   GoalData,
   advanceGoalAfterCompletedCall,
@@ -42,6 +43,7 @@ import { PromptPlaceholders } from "../../data/promptCustomizer";
 import { buildTodayLessonSystemPrompt } from "../../data/lessonPromptBuilder";
 import { mergeChunksToWav, groupChunks } from "../recording/audioMerge";
 import { keepKnownIds, mergeMinuteTranscripts, MinutePartial } from "./reviewRules";
+import { decideSttSource } from "./speechCheck";
 import { createStepTimer, ReviewTiming } from "./reviewTiming";
 import { outcomeItems } from "./reviewView";
 
@@ -149,7 +151,9 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
 
     // Step 2: Final Transcription (VERBATIM) via /api/gemini/transcribe-final, one minute at a time
     let sttFinalText = "";
-    let sourceStt: "sttFinal" | "sttPartial_fallback" | "liveTranscript_fallback" | "none" = "sttFinal";
+    let sourceStt: "sttFinal" | "sttPartial_fallback" | "liveTranscript_fallback" | "none" = "none";
+    let finalTextCandidate = "";
+    let finalSourceCandidate: "sttFinal" | "sttPartial_fallback" = "sttFinal";
 
     if (chunkBlobs.length > 0) {
       timer.start("transcribe");
@@ -201,9 +205,6 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
           console.warn(`[ReviewPipeline] ${mergedStt.missingMinutes.length}/${groups.length} minutes could not be transcribed`);
         }
         if (mergedStt.text) {
-          sttFinalText = mergedStt.text;
-          sourceStt = mergedStt.source;
-          knownSourceStt = sourceStt;
           // B-10 usage: verbatim transcription minutes (from session start/end)
           getSessionById(userId, sessionId)
             .then((sd) => {
@@ -212,7 +213,21 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
               if (mins > 0) return recordUsage(userId, { sttMinutes: mins, sttEngine: "gemini" });
             })
             .catch(() => {});
-          console.log(`[ReviewPipeline] Final transcribe done (${groups.length} min, ${sttFinalText.length} chars, source=${sourceStt})`);
+
+          finalTextCandidate = mergedStt.text;
+          finalSourceCandidate = mergedStt.source;
+          const decidedFinal = decideSttSource({
+            finalText: finalTextCandidate,
+            finalSource: finalSourceCandidate,
+          });
+          if (decidedFinal.source !== "none") {
+            sttFinalText = decidedFinal.text;
+            sourceStt = decidedFinal.source;
+            knownSourceStt = sourceStt;
+            console.log(`[ReviewPipeline] Final transcribe done (${groups.length} min, ${sttFinalText.length} chars, source=${sourceStt})`);
+          } else {
+            console.log(`[ReviewPipeline] Final transcribe had no meaningful learner speech (${mergedStt.text.length} chars); trying fallback`);
+          }
         }
       } finally {
         timer.end("transcribe");
@@ -223,35 +238,28 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
     if (!sttFinalText) {
       timer.start("fallback");
       try {
-        // Fallback 1: If final transcribe failed or no audio, use sttPartial
+        let fallbackPartials: SttPartialItem[] = [];
         try {
           const sessionDoc = await getSessionById(userId, sessionId);
           if (sessionDoc?.sttPartial && sessionDoc.sttPartial.length > 0) {
-            const sortedPartial = [...sessionDoc.sttPartial].sort((a, b) => a.minuteIndex - b.minuteIndex);
-            sttFinalText = sortedPartial
-              .map((p) => `[${p.timeRange}] ${p.transcript}`)
-              .join("\n\n");
-            sourceStt = "sttPartial_fallback";
-            console.log(`[ReviewPipeline] Using sttPartial fallback (${sortedPartial.length} segments)`);
+            fallbackPartials = sessionDoc.sttPartial;
           }
         } catch (partErr) {
           console.warn("[ReviewPipeline] Could not load sttPartial fallback:", partErr);
         }
 
-        // Fallback 2: If still no transcript, extract learner lines from liveTranscript
-        if (!sttFinalText) {
-          const userUtterances = liveTranscript
-            .filter((t) => t.role === "user")
-            .map((t) => t.text.trim())
-            .filter(Boolean);
-
-          if (userUtterances.length > 0) {
-            sttFinalText = userUtterances.join("\n");
-            sourceStt = "liveTranscript_fallback";
-            console.log(`[ReviewPipeline] Using liveTranscript fallback (${userUtterances.length} turns)`);
-          } else {
-            sourceStt = "none";
-          }
+        const decided = decideSttSource({
+          finalText: finalTextCandidate,
+          finalSource: finalSourceCandidate,
+          partials: fallbackPartials,
+          liveTranscript,
+        });
+        sttFinalText = decided.text;
+        sourceStt = decided.source;
+        if (sourceStt === "sttPartial_fallback") {
+          console.log(`[ReviewPipeline] Using sttPartial fallback (${fallbackPartials.length} segments)`);
+        } else if (sourceStt === "liveTranscript_fallback") {
+          console.log("[ReviewPipeline] Using liveTranscript fallback");
         }
         knownSourceStt = sourceStt;
       } finally {
