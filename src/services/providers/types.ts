@@ -27,6 +27,8 @@ export interface LiveSessionOptions {
   onMediaStreamReady?: (stream: MediaStream) => void;
   /** Mic failed; the session stays connected. Show guidance only. */
   onMicWarning?: (message: string) => void;
+  /** Skip microphone capture (text-only fallback mode; tutor audio still plays). */
+  skipMic?: boolean;
   onTranscriptLogged?: (item: LiveTranscriptItem, allTranscripts: LiveTranscriptItem[]) => void;
 }
 
@@ -34,7 +36,8 @@ export interface LiveProvider {
   name: string;
   connect(options: LiveSessionOptions): Promise<void>;
   sendAudioChunk(pcm16kChunk: ArrayBuffer): void;
-  sendTextPrompt(prompt: string): void;
+  sendTextPrompt(prompt: string): boolean;
+  appendUserText(text: string): void;
   sendControlCommand(command: LiveCommand): void;
   getLiveTranscript(): LiveTranscriptItem[];
   getResumeToken(): string | null;

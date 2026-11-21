@@ -171,7 +171,7 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
     }
   };
 
-  const emptyReview = isEmptyReview(review, sttFinal?.sourceStt);
+  const emptyReview = isEmptyReview(review, sttFinal?.sourceStt, sttFinal?.transcript);
   const badge = levelBadge(review?.estimatedLevel);
   const usedCorrectlyItems: Array<{ id: string; myPhrase: string; naturalPhrase: string }> =
     review?.usedCorrectlyItems || [];
@@ -373,7 +373,7 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
                           <button
                             onClick={() => handleReportNotMyWord(idx, m)}
                             className="text-[11px] text-slate-400 hover:text-rose-300 flex items-center gap-1 px-2 py-1 rounded bg-slate-900/60 hover:bg-rose-950/40 border border-slate-800 hover:border-rose-900/50 transition cursor-pointer"
-                            title="STT 오인식 등으로 내가 말하지 않은 문장인 경우 숨기고 품질 리포트에 기록합니다"
+                            title="음성 인식 오류 등으로 내가 말하지 않은 문장이면 목록에서 숨기고, 품질 개선을 위해 기록해요"
                           >
                             <AlertTriangle size={12} className="text-amber-400" />
                             <span>이건 내가 한 말이 아니에요</span>

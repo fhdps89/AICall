@@ -1,5 +1,6 @@
 import { authFetch } from "../../services/api/authFetch";
 import { friendlyError } from "../common/friendlyError";
+import { useDevMode } from "../../data/devMode";
 import React, { useState, useEffect, useRef } from "react";
 import { User } from "firebase/auth";
 import {
@@ -61,6 +62,7 @@ export const QuizModal: React.FC<QuizModalProps> = ({
   onClose,
   onFinished,
 }) => {
+  const devMode = useDevMode();
   // Queue & Progress
   const [queue, setQueue] = useState<QuizQueueItem[]>([]);
   const [currentIndex, setCurrentIndex] = useState<number>(0);
@@ -587,7 +589,7 @@ export const QuizModal: React.FC<QuizModalProps> = ({
                       {/* Display transcribed utterance verbatim */}
                       {spokenTranscript && (
                         <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 text-left text-xs space-y-1">
-                          <span className="text-[10px] font-bold text-slate-400 uppercase">인식된 발화 (VERBATIM):</span>
+                          <span className="text-[10px] font-bold text-slate-400 uppercase">인식된 발화{devMode ? " (VERBATIM)" : ""}:</span>
                           <div className="font-mono text-amber-300 font-semibold">"{spokenTranscript}"</div>
                         </div>
                       )}
@@ -623,7 +625,7 @@ export const QuizModal: React.FC<QuizModalProps> = ({
                             gradeResult.passed ? "text-emerald-400" : "text-red-400"
                           }`}
                         >
-                          {gradeResult.passed ? "통과! 즉시 졸업 (Graduated) 🎉" : "아쉬워요! 핵심 포인트를 다시 확인해 보세요"}
+                          {gradeResult.passed ? "통과! 즉시 졸업 🎉" : "아쉬워요! 핵심 포인트를 다시 확인해 보세요"}
                         </h4>
                         {gradeResult.passed && (
                           <span className="px-2 py-0.5 rounded-full bg-emerald-500 text-slate-950 text-[10px] font-black uppercase">
