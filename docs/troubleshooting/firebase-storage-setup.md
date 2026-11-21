@@ -64,34 +64,42 @@ service firebase.storage {
 
 ---
 
-## (d) Storage 시작 후에도 브라우저에서 CORS 오류가 날 때만 실행
+## (d) [선택] 버킷 CORS 설정 — 복기 다운로드는 서버 중계(/api/recordings/storage-file)로 CORS 없이 동작
 
-버킷을 새로 시작했는데도 브라우저 콘솔에 CORS 오류가 남는 경우에만 아래 `cors.json` 파일을 만들어 버킷 CORS 정책을 적용한다. (운영 도메인 `[미확인]` 및 로컬 개발 포트 `3000` 포함)
+브라우저가 Storage에서 직접 내려받을 때만 필요합니다. 공식 문서: *"To download data directly in the browser, you must configure your Cloud Storage bucket for cross-origin access (CORS)."*
 
-`cors.json` 예시:
+현재 복기 조각 다운로드는 서버 중계(`/api/recordings/storage-file`)를 사용하므로 이 설정 없이도 동작합니다. 브라우저 직접 다운로드를 허용하려는 경우에만 아래 절차를 실행하세요.
+
+`cors.json`:
 
 ```json
-[
-  {
-    "origin": [
-      "https://aicall.ai.studio",
-      "http://localhost:3000",
-      "http://127.0.0.1:3000"
-    ],
-    "method": ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"],
-    "responseHeader": ["Content-Type", "Authorization", "x-goog-resumable"],
-    "maxAgeSeconds": 3600
-  }
-]
+[{"origin":["https://aicall.ai.studio"],"method":["GET","HEAD"],"responseHeader":["Content-Type"],"maxAgeSeconds":3600}]
 ```
 
-적용 명령:
+- 운영 origin은 브라우저 콘솔 CORS 오류의 `from origin '…'` 값으로 확인해 맞추세요 (현재 `[미확인]`).
+- 버킷 이름은 `firebase-applet-config.json`의 `storageBucket`(`gen-lang-client-0592656565.firebasestorage.app`)을 기준으로 하며, 실제 생성된 버킷 이름이 다르면 `gs://<버킷>` 부분을 실제 이름으로 바꿉니다.
 
-```bash
-gcloud storage buckets update gs://gen-lang-client-0592656565.firebasestorage.app --cors-file=cors.json
-```
+### 휴대폰(브라우저)만으로 Cloud Shell에서 적용하는 단계
 
-(실제 생성된 버킷 이름이 다르면 `gs://<버킷>` 부분을 실제 이름으로 바꾼다.)
+1. `console.cloud.google.com` 로그인
+2. 오른쪽 위 Cloud Shell 활성화(`>_`)
+3. `cors.json` 생성:
+   ```bash
+   cat > cors.json <<'EOF'
+   [{"origin":["https://aicall.ai.studio"],"method":["GET","HEAD"],"responseHeader":["Content-Type"],"maxAgeSeconds":3600}]
+   EOF
+   ```
+4. 버킷 CORS 정책 적용:
+   ```bash
+   gcloud storage buckets update gs://gen-lang-client-0592656565.firebasestorage.app --cors-file=cors.json
+   ```
+5. 적용 결과 확인:
+   ```bash
+   gcloud storage buckets describe gs://gen-lang-client-0592656565.firebasestorage.app --format="default(cors_config)"
+   ```
+
+- 명령 출처: https://docs.cloud.google.com/storage/docs/using-cors
+- **적용 후 확인**: 버킷에 CORS를 걸면 SDK 업로드 응답에도 영향이 있는지 `[미확인]`입니다. 적용 뒤 통화 1회를 걸어 녹음 조각 업로드가 정상 동작하는지 확인하세요.
 
 ---
 

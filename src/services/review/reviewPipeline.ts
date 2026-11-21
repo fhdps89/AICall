@@ -34,6 +34,7 @@ import {
   SessionReviewData,
   SttFinalData,
   SttPartialItem,
+  RecordingChunkMeta,
   MistakeData,
   GoalData,
   advanceGoalAfterCompletedCall,
@@ -46,6 +47,13 @@ import { keepKnownIds, mergeMinuteTranscripts, MinutePartial } from "./reviewRul
 import { decideSttSource } from "./speechCheck";
 import { createStepTimer, ReviewTiming } from "./reviewTiming";
 import { outcomeItems } from "./reviewView";
+import {
+  createChunkDownloadTracker,
+  failureReasonForStatus,
+  formatChunkDownloadWarning,
+  planChunkSources,
+  shouldUseDownloadedChunks,
+} from "./chunkSource";
 
 /** Most existing mistakes listed for the model per group (newest first). */
 const MAX_LISTED_MISTAKES = 150;
@@ -61,6 +69,7 @@ export interface RunReviewParams {
   lessonIndex: number;
   placeholders: PromptPlaceholders;
   audioBlobs?: Blob[];
+  localChunks?: Array<{ index: number; blob: Blob }>;
   liveTranscript?: Array<{ role: "user" | "model"; text: string; timestamp?: number }>;
   onProgress?: (step: string) => void;
 }
@@ -96,6 +105,7 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
     lessonIndex,
     placeholders,
     audioBlobs = [],
+    localChunks = [],
     liveTranscript = [],
     onProgress,
   } = params;
@@ -118,31 +128,61 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
       chunkBlobs = audioBlobs.filter((b) => b && b.size > 0);
 
       if (chunkBlobs.length === 0) {
-        // Attempt to download chunks from Cloud Storage / server endpoint
+        const validLocal = localChunks.filter((c) => c && c.blob && c.blob.size > 0);
+        const localMap = new Map<number, Blob>(validLocal.map((c) => [c.index, c.blob]));
+        let remoteChunks: RecordingChunkMeta[] | undefined;
         try {
           const sessionDoc = await getSessionById(userId, sessionId);
-          if (sessionDoc && sessionDoc.recordingChunks && sessionDoc.recordingChunks.length > 0) {
-            const sortedChunks = [...sessionDoc.recordingChunks].sort((a, b) => a.index - b.index);
-            const downloaded: Blob[] = [];
-
-            for (const chunk of sortedChunks) {
-              try {
-                const url = chunk.storageUrl || `/api/recordings/file?path=${encodeURIComponent(chunk.path)}`;
-                // Server-stored fallback chunks need the auth token; Firebase Storage URLs do not.
-                const res = url.startsWith("/api/") ? await authFetch(url) : await fetch(url);
-                if (res.ok) {
-                  const b = await res.blob();
-                  downloaded.push(b);
-                }
-              } catch (dlErr) {
-                console.warn(`[ReviewPipeline] Could not download chunk #${chunk.index}:`, dlErr);
-              }
-            }
-
-            chunkBlobs = downloaded;
-          }
+          remoteChunks = sessionDoc?.recordingChunks;
         } catch (fetchErr) {
           console.warn("[ReviewPipeline] Failed to fetch session chunks:", fetchErr);
+        }
+
+        const sources = planChunkSources(remoteChunks, Array.from(localMap.keys()));
+        if (sources.length > 0) {
+          const tracker = createChunkDownloadTracker(sources.length);
+          const downloaded: Blob[] = [];
+
+          for (const item of sources) {
+            if (tracker.shouldStop()) break;
+            if (item.kind === "local") {
+              const localBlob = localMap.get(item.index);
+              if (localBlob && localBlob.size > 0) {
+                downloaded.push(localBlob);
+                tracker.success();
+              } else {
+                tracker.skip("not_uploaded");
+              }
+              continue;
+            }
+            if (item.kind === "skip") {
+              tracker.skip(item.reason);
+              continue;
+            }
+            try {
+              const res = await authFetch(item.url);
+              if (res.ok) {
+                const b = await res.blob();
+                if (b.size > 0) {
+                  downloaded.push(b);
+                  tracker.success();
+                } else {
+                  tracker.failure("http_error");
+                }
+              } else {
+                tracker.failure(failureReasonForStatus(res.status));
+              }
+            } catch {
+              tracker.failure("network");
+            }
+          }
+
+          const summary = tracker.finish();
+          const warning = formatChunkDownloadWarning(summary);
+          if (warning) {
+            console.warn(warning);
+          }
+          chunkBlobs = shouldUseDownloadedChunks(summary) ? downloaded : [];
         }
       }
     } finally {
