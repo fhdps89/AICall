@@ -14,6 +14,7 @@ import { PromptPlaceholders } from "../../data/promptCustomizer";
 import { buildTodayLessonSystemPrompt } from "../../data/lessonPromptBuilder";
 import { createLiveProvider } from "../../services/providers";
 import { LiveCommand, LiveProvider, LiveTranscriptItem } from "../../services/providers/types";
+import { LIVE_STATUS_TEXT } from "../../services/providers/liveStatusText";
 import { getChunkRecorder } from "../../services/recording/chunkRecorder";
 import { formatWrittenAnswer, WRITTEN_ANSWER_MAX_LENGTH } from "./micCheck";
 import {
@@ -71,7 +72,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
   const devMode = useDevMode();
   const sessionIdRef = useRef<string>(`call-${Date.now()}`);
   const [status, setStatus] = useState<"connecting" | "connected" | "reconnecting" | "closed" | "error">("connecting");
-  const [statusMessage, setStatusMessage] = useState<string>("튜터 연결 준비 중...");
+  const [statusMessage, setStatusMessage] = useState<string>(LIVE_STATUS_TEXT.preparing);
   const [transcripts, setTranscripts] = useState<LiveTranscriptItem[]>([]);
   const [callDuration, setCallDuration] = useState<number>(0);
   const [isSpeakingModel, setIsSpeakingModel] = useState<boolean>(false);

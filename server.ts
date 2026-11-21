@@ -1322,7 +1322,7 @@ async function startServer() {
             clientWs.send(JSON.stringify({
               type: 'fallback_required',
               error: 'API Key not configured',
-              userMessage: '서버가 Gemini 키를 찾지 못했어요. 설정 → Gemini 키에서 키를 저장한 뒤 다시 걸어 주세요.',
+              userMessage: NO_KEY_MESSAGE,
             }));
             setTimeout(() => { try { clientWs.close(1011, 'no api key'); } catch { /* ignore */ } }, 100);
             return;

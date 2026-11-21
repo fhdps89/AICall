@@ -4,6 +4,22 @@
 
 ---
 
+### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA 재확인 19행: 개발 용어 사용자 말로 교체·금지어 스캐너 확장 (브랜치 `fix/qa2-c`)
+- **배경**:
+  - QA 재확인 19행에서 통화 연결 상태, 설정, 아침 강의 알림, 사용량, 복기, 서버 키 미설정 안내 화면에 일반 사용자에게 낯선 개발 용어(`Gemini`, `Live`, `서버 중계`, `직접 연결`, `프롬프트`, `그록봇`, `토큰`, `TTS`, `Survey topics`, `My role in`, `전사`, `개발자 메뉴`, `JSON`)가 여전히 노출되는 문제가 보고됨.
+  - 또한 `server/errors.ts`의 `NO_KEY_MESSAGE`에 화살표(`→`)가 포함되어 `friendlyError.ts`의 `looksInternal`에 걸리면서 일반 오류 문구로 덮어씌워지는 버그가 확인됨.
+- **원인**:
+  - 기존 `tests/userFacingText.test.ts` 스캐너가 `src/ui/**/*.tsx`만 검사하고 금지어 목록이 7개뿐이어서, `geminiLiveProvider.ts`·`server.ts`·`server/*.ts`·`src/ui/**/*.ts` 경로와 `devOnly: true` 탭 구조를 검사하지 못했음.
+  - `SettingsModal.tsx`의 `geminiKey` 탭에 `devOnly` 가드가 없고 `models` 탭 본문(440행) 분기에도 긍정 `devMode` 조건이 없었으며, `FeedSettingsPanel.tsx`와 `UsagePanel.tsx` 일부 항목·`HomeScreen.tsx` 일부 모달 렌더에 `devMode` 가드가 빠져 있었음.
+- **수정**:
+  - **통화 상태 문구 (`src/services/providers/liveStatusText.ts` 신규, `src/services/providers/geminiLiveProvider.ts`, `src/ui/call/NewCallScreen.tsx`)**: 순수 상수 모듈 `LIVE_STATUS_TEXT`(`preparing: "튜터 연결 준비 중..."`, `connecting: "튜터에게 연결하는 중..."`, `connected: "튜터와 연결됐어요"`)를 신설해 `geminiLiveProvider.ts`의 `connecting`/`connected` 6곳(상태 문구 인자만 교체, 다른 줄 무변경)과 `NewCallScreen.tsx` 초기 상태값에 적용해 연결 경로(직접/서버 중계)와 모델명 비노출.
+  - **설정·진입점·개발자 가드 (`src/ui/settings/settingsText.ts` 신규, `src/ui/settings/SettingsModal.tsx`, `src/ui/settings/FeedSettingsPanel.tsx`, `src/ui/settings/UsagePanel.tsx`, `src/ui/home/HomeScreen.tsx`)**: `ADVANCED_TOGGLE_TEXT`(`고급 설정 보기`/`고급 설정 숨기기`)와 `KEY_TAB_LABEL`(`연결 키`)을 분리. `SettingsModal.tsx` 탭 라벨을 `내 정보 입력`·`아침 강의 알림`·`{ id: "geminiKey", label: KEY_TAB_LABEL, devOnly: true }`로 변경하고, 헤더·안내 상자(개발자 참고 문구는 `devMode` 분리)·직무/주제/역할 라벨을 사용자 말로 교체하며, `geminiKey`·`models`(440행) 본문에 `devMode` 가드 추가 및 하단 토글 해제 시 모든 `devOnly` 탭에서 `prompts`로 복귀하도록 수정(`GeminiKeyPanel.tsx` 본문은 `devOnly` 탭 전용으로 유지). `FeedSettingsPanel.tsx`에 `useDevMode()`를 추가해 알림 봇(AI 비서 앱) 안내 문구로 용어를 통일하고 `알림 주소`/`알림 봇`으로 교체하며 `JSON` 항목을 `devMode`로 감쌈. `UsagePanel.tsx`의 `텍스트 토큰`·`TTS 글자 수` 행을 `devMode`로 감싸고, `HomeScreen.tsx` 설정 툴팁을 `설정`으로 변경하며 `showPromptModal`·`showSttBench`에 `devMode &&` 가드를 추가.
+  - **복기·서버 키 안내 (`src/ui/review/ReviewModal.tsx`, `src/ui/review/reviewErrorText.ts` 신규, `src/ui/review/ReviewFlowScreen.tsx`, `server/errors.ts`, `server.ts`)**: `ReviewModal.tsx` 라벨을 `내가 한 말`로 통일. `friendlyReviewError`를 순수 모듈 `reviewErrorText.ts`로 분리하고 정규식·안내 문구를 `연결 키`/`고급 설정 보기` 기준으로 변경. `server/errors.ts` `NO_KEY_MESSAGE`와 `server.ts:1325` `userMessage`를 `NO_KEY_MESSAGE`(「고급 설정 보기」→「연결 키」 안내, `→` 제거)로 통일해 `friendlyError` 통과 및 개발 용어 제거를 동시에 해결.
+- **방어 조치 (Safeguards)**:
+  - `tests/userFacingText.test.ts` 확장: 금지어 13종 추가(`Gemini`, `Live`, `서버 중계`, `직접 연결`, `프롬프트`, `그록봇|Grok`, `토큰`, `TTS`, `Survey topics`, `My role in`, `전사`, `개발자`, `JSON`), `src/ui/**/*.{ts,tsx}` 및 `liveStatusText.ts` 스캔, `devOnly: true`·`console.*` 예외 처리, `DEV_ONLY_FILES`(`GeminiKeyPanel.tsx` `devOnly`·`activeTab === "geminiKey"` `devMode ?` 분기 사유 명시 및 기존 3건 `ALLOWLIST` 제거), `scanSinks`(`onStatusChange`, `onMicWarning`, `fail`, `apiError`, `userMessage` — 최소 탐색 건수 단언 포함), `LIVE_STATUS_TEXT`·`NO_KEY_MESSAGE`·`friendlyError` 회귀·`geminiKey` `devOnly`·`devMode ?` 렌더 가드 검증 신규 5개·기존 2개 확장(총 7개)으로 고정.
+  - `package.json` 버전 무변경, `geminiLiveProvider.ts`는 import 1줄과 상태 문구 인자 6곳 외 무변경.
+- **검증**: `npm test` 114/114 통과, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build` 모두 오류 없이 통과.
+
 ### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — 내 학습 기록: 날짜별 통화 횟수·분·연속 학습일 저장과 표시 (브랜치 `feat/self-usage-log`)
 - **배경**:
   - 기존 `users/{uid}/usage/{yyyy-mm}` 문서는 `liveMinutes`·토큰·예상 비용만 기록해 일별 통화 횟수와 연속 학습일(streak)을 파악할 수 없었음.
