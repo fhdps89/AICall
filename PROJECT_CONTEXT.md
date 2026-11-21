@@ -159,6 +159,9 @@
 ---
 
 ## 5. 버전 히스토리
+- **v2.10.0 이후 수정(미배포) — 빈 통화 복기 보강: 학습자 발화 유무 판정(`hasLearnerSpeech`) 도입 (2026-11-21 KST)**:
+  - **PR #13~#18 빈 통화 분기 검증 결과**: 빈 복기 저장 분기(`sourceStt === "none"`일 때 `estimatedLevel: "-"`, `lessonAdvanced: false`, `mistakes: []` 저장으로 진도 유지)는 **v2.9.0(커밋 `93c520e`)**부터 있었음. PR #13(`reviewTiming.ts`, `reviewPipeline.ts`)은 `timing.outcome: "empty"` 계측만 추가했고, PR #14(`reviewView.ts`, `ReviewModal.tsx`)는 `isEmptyReview`와 「기록된 말이 없어 분석하지 않았어요」 문구·`—` 배지·「같은 과로 다시 걸어 주세요」를 추가했음. PR #15·#16·#18은 이 빈 통화 분기를 바꾸지 않았고, PR #17은 `ReviewModal.tsx`의 버튼 라벨 한 줄(「오늘 강의 보기」)만 바꿨음. 다만 기존 분기에는 (a) `sttPartial` fallback이 빈 `transcript`에도 `[00:00 - 01:00] ` 시간 머리글을 붙여 비어 있지 않은 텍스트로 취급하는 구멍, (b) `"[noise]"`, `"uh"`, 추임새 반복 등 짧은 잡음·추임새만으로 `/api/review`가 호출돼 레벨·진도 이동·「훌륭합니다!」가 나오는 구멍, (c) `ReviewModal.tsx`가 `sourceStt !== "none"`인 짧은 전사 복기에 「훌륭합니다!」를 노출하는 구멍이 남아 있었음.
+  - **수정**: 순수 모듈 `src/services/review/speechCheck.ts`(`stripTimeHeaders`, `hasLearnerSpeech`, `decideSttSource`, `FILLER_WORDS` 추임새 상수 제외 및 단어 3개·8자 이상 상수 기준)를 신설해 `reviewPipeline.ts`가 최종 받아쓰기(`finalText`/`finalSource`)와 fallback(`sttPartial` 머리글 제외 본문, `liveTranscript` `role === "user"`) 모두를 `decideSttSource` 단일 경로로 판정하고 실질 발화가 없으면 `sourceStt: "none"`(빈 복기)으로 귀결되게 함. `reviewView.ts`의 `isEmptyReview`에 선택 인자 `transcript?`를 추가하고 `ReviewModal.tsx`에서 `sttFinal?.transcript`를 전달해 짧은 전사 시 「훌륭합니다!」 대신 빈 복기 문구를 표시. `tests/speechCheck.test.ts` 추가.
 - **v2.10.0 (P0-1~P0-6 묶음, 2026-11-21 KST)**: 승인된 P0 실기기 QC 후속 개선 묶음 (`README.md` 헤더·v2.10.0 요약 및 `package.json`/`package-lock.json` `2.10.0` 반영).
   - **P0-1**: 복기 단계별 소요 시간 계측.
   - **P0-2**: 복기 화면 「이번 통화 성과」 표시와 빈 통화 문구 정리.

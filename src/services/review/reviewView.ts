@@ -1,11 +1,19 @@
 import type { SessionReviewData } from "../firebase/db";
+import { hasLearnerSpeech } from "./speechCheck";
 
 /** Return true when no learner speech was captured or the lesson did not advance. */
 export function isEmptyReview(
   review: Pick<SessionReviewData, "lessonAdvanced"> | undefined | null,
-  sttSource?: string
+  sttSource?: string,
+  transcript?: string
 ): boolean {
-  return sttSource === "none" || review?.lessonAdvanced === false;
+  if (sttSource === "none" || review?.lessonAdvanced === false) {
+    return true;
+  }
+  if (transcript !== undefined && !hasLearnerSpeech(transcript)) {
+    return true;
+  }
+  return false;
 }
 
 /** Map an internal STT source key to a user-facing Korean label. */
