@@ -9,8 +9,9 @@ import { GoogleGenAI, Modality, Type } from '@google/genai';
 import { requireAuth, verifyFirebaseIdToken, setAfterAuthHook } from './server/auth.ts';
 import { ensureUserGeminiKey, getUserSuppliedKey } from './server/userKey.ts';
 import { saveFeedBackup, deleteFeedBackup } from './server/feedStore.ts';
-import { geminiLimit, checkLiveSessionStart } from './server/rateLimit.ts';
+import { geminiLimit, clusterLimit, checkLiveSessionStart } from './server/rateLimit.ts';
 import { DATA_DIR, startLectureJob, readLectureState, lectureAudioPath, kstToday } from './server/lecture.ts';
+import { computeMistakeClusters, validateClusterRequestBody } from './server/mistakeClusters.ts';
 import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive } from './server/sttBench.ts';
 import { LIVE_MODEL, TEXT_MODEL, GEMINI_STT_MODEL, GEMINI_TTS_LITE_MODEL } from './src/config/models.ts';
 import { userRecordingPath as userRecordingPathIn } from './server/recordingPath.ts';
@@ -1296,6 +1297,33 @@ app.post('/api/stt-bench/transcribe', requireAuth, geminiLimit, async (req: Requ
   } catch (err: any) {
     console.warn(`[SttBench] ${engine} error:`, err?.message || err);
     apiError(res, 500, 'STT_BENCH_FAILED', '받아쓰기에 실패했어요.', { engine });
+  }
+});
+
+app.post('/api/mistakes/clusters', requireAuth, clusterLimit, async (req: Request, res: Response) => {
+  const validated = validateClusterRequestBody(req.body);
+  if (!validated.ok) {
+    apiError(res, 400, 'BAD_REQUEST', '잘못된 요청이에요.');
+    return;
+  }
+
+  try {
+    const result = await computeMistakeClusters(
+      { getGenAI: createGenAI },
+      res.locals.user.uid,
+      validated.items
+    );
+    res.json(result);
+  } catch (err) {
+    const name = err instanceof Error ? err.name : 'Error';
+    console.warn(`[MistakeClusters] unexpected error name=${name}`);
+    res.json({
+      ok: true,
+      enabled: false,
+      clusters: [],
+      disabledReason: 'unavailable',
+      usage: { inputTokens: 0, outputTokens: 0, sieEmbeddingTokens: 0 },
+    });
   }
 });
 

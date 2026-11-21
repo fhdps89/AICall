@@ -46,6 +46,9 @@ import {
 } from "lucide-react";
 import { QuizModal } from "../quiz/QuizModal";
 import { MorningLectureCard } from "../lecture/MorningLectureCard";
+import { MistakeClustersCard } from "./MistakeClustersCard";
+import { fetchMistakeClusters } from "../../services/mistakes/clusterService";
+import type { MistakeCluster } from "../../services/mistakes/clusterRequest";
 import { syncFeed } from "../../services/feed/feedService";
 import { KeepImportModal } from "../keep/KeepImportModal";
 import { SttBenchmarkModal } from "../sttBench/SttBenchmarkModal";
@@ -109,6 +112,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const [learningSummary, setLearningSummary] = useState<LearningLogSummary | null>(null);
   const learningReqRef = useRef(0);
   const learningInFlightRef = useRef<Promise<void> | null>(null);
+  const [mistakeClusters, setMistakeClusters] = useState<MistakeCluster[] | null>(null);
+  const clusterReqRef = useRef(0);
+  const clusterAbortRef = useRef<AbortController | null>(null);
 
   const loadMistakes = async () => {
     try {
@@ -121,6 +127,19 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       setAllMistakes(all);
       // B-8: keep the Grok Bot feed's candidate list fresh (no scheduler server)
       syncFeed(user.uid).catch((e) => console.warn("[HomeScreen] feed sync failed:", e));
+
+      // Background mistake clustering (never blocks home render, call, or quiz)
+      clusterAbortRef.current?.abort();
+      const controller = new AbortController();
+      clusterAbortRef.current = controller;
+      const reqId = ++clusterReqRef.current;
+      void fetchMistakeClusters(user.uid, all, controller.signal)
+        .then((clusters) => {
+          if (reqId === clusterReqRef.current && !controller.signal.aborted) {
+            setMistakeClusters(clusters);
+          }
+        })
+        .catch(() => {});
     } catch (err) {
       console.warn("[HomeScreen] Failed to load mistakes:", err);
     } finally {
@@ -193,6 +212,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
     return () => {
       learningReqRef.current += 1;
       learningInFlightRef.current = null;
+      clusterReqRef.current += 1;
+      clusterAbortRef.current?.abort();
+      clusterAbortRef.current = null;
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener(USAGE_UPDATED_EVENT, handleUsageUpdated);
     };
@@ -728,6 +750,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
           )}
         </section>
 
+        <MistakeClustersCard clusters={mistakeClusters} mistakes={allMistakes} />
 
         {/* 나머지는 접어 둠 */}
         <section className="border border-slate-800 rounded-2xl">

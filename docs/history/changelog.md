@@ -4,6 +4,23 @@
 
 ---
 
+### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — 실수 노트 반복 패턴 묶기(SIE 임베딩) 추가 (브랜치 `englead/mistake-clusters`)
+- **배경**:
+  - 실수 노트가 쌓여도 사용자가 어떤 문법·표현 실수를 반복하는지 한눈에 파악하기 어려워, 홈 화면에 유사한 실수를 묶어 보여 주는 「반복되는 실수」 카드를 추가함.
+- **원인**:
+  - 기존에는 실수 목록을 개별 항목(`dueMistakes`/`allMistakes`)으로만 다루어 의미 기반 군집화와 패턴 요약이 없었음.
+- **수정**:
+  - **임베딩 모델·단가 (`src/config/models.ts`, `src/services/usage/usageService.ts`)**: Superlinked Serverless의 `Qwen/Qwen3-Embedding-4B`(`EMBEDDING_MODEL`, `SIE_EMBEDDING_URL = "https://api.superlinked.com/v1/embeddings"`, 단가 `sieEmbedPer1MTokens = 0.06` / 100만 토큰)를 추가함. 오픈웨이트 임베딩 전용 모델이라 한국어 문법 설명과 영어 발화 혼합 입력에 적합하고 단가가 낮아 채택함. `UsageDelta`/`estimateCostUsd`/`buildUsageFields`에 선택 필드 `sieEmbeddingTokens`를 추가해 `textTokens`와 분리 집계함.
+  - **순수 군집화 (`server/clusterMath.ts`)**: `cosine`(0벡터 방어), 단일 연결 union-find(`clusterBySimilarity`, 잠정 임계값 `CLUSTER_SIM_THRESHOLD = 0.80`, 입력 순서 무관·결정적 정렬), `Instruct/Query` 라벨링 + 공백 정리 + 200/200/300자 자르기(`buildEmbeddingText`, `EMBED_TEXT_VERSION = 1`), 정렬된 멤버 ID 해시 `clusterKey`, `Float32Array`↔base64 변환 구현.
+  - **SIE 클라이언트 & 캐시·이름 붙이기 (`server/sieEmbeddings.ts`, `server/mistakeClusters.ts`)**: 배치 32, 요청 12초·전체 20초 데드라인, 429/503 `Retry-After <= 2s`만 1회 재시도, 응답 `data`/`index`/유한 수치/차원 검증을 구현함. 사용자별 캐시(`${DATA_DIR}/mistake-clusters/<sha256(uid)>.json`)를 원자적(`tmp`+`rename`)으로 저장하고 요청에 없는 ID와 key를 정리함. 캐시에 없는 묶음(최대 8개, 크기 ≥ 2)만 `TEXT_MODEL` (`gemini-3.8-flash`, 기존 JSON `responseSchema` 패턴 일관성 유지 및 저지연·저비용 이유)로 한국어 이름을 붙이며, 실패 시 `"반복 실수 N"`으로 폴백(미캐시).
+  - **라우트·전용 한도 (`server/rateLimit.ts`, `server.ts`)**: `checkClusterCall`·`clusterLimit`(분당 10회, `geminiLimit`과 맵 분리)과 `POST /api/mistakes/clusters`(본문 검증 순수 함수 `validateClusterRequestBody`, `requireAuth`)를 등록함.
+  - **클라이언트 UI (`src/services/mistakes/clusterRequest.ts`, `src/services/mistakes/clusterService.ts`, `src/ui/home/MistakeClustersCard.tsx`, `src/ui/home/HomeScreen.tsx`)**: `HomeScreen`이 이미 불러온 `allMistakes`를 백그라운드로 전송(30초 abort, 세션 메모이즈, 사용량 > 0일 때만 `recordUsage`)하고 홈·통화·퀴즈를 대기시키지 않음. 카드는 크기 2 이상 상위 3개만 펼침/접힘으로 표시하며, `SIE_API_KEY` 미설정·장애·지연 시 HTTP 200 `enabled: false`로 숨김.
+  - **후속 범위**: 퀴즈·강의 우선순위 재정렬(`prioritizeByClusters`)은 SRS 기아 방지·제품 규칙 검토가 필요해 이번 변경에서 제외하고 후속 과제로 남김(`PROJECT_CONTEXT.md` §4·§5 반영).
+- **방어 조치 (Safeguards)**:
+  - `process.env.SIE_API_KEY`는 `server/` 내부에서만 읽고 로그·오류·응답에 키/Authorization 헤더/응답 본문을 남기지 않으며, 브라우저로 임베딩 벡터를 전송하지 않음.
+  - `tests/mistakeClusters.test.ts`(순수 군집화, 주입된 `fetch`/`sleep` 기반 SIE 클라이언트 재시도·타임아웃·오류 응답·배치, 임시 `DATA_DIR` 기반 캐시 무효화·손상 복구·부분 배치 보존·이름 폴백·비용 분리), `tests/server.test.ts`(요청 본문 검증·전용 리미터), `tests/clientUtils.test.ts`(`buildClusterRequest`·`pickDisplayClusters`·임베딩 단가 분리) 추가 및 `tests/userFacingText.test.ts`로 사용자 노출 문구 검사 통과 확인.
+- **검증**: `npm test`(229/229), `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build` 모두 통과 확인. 박스에서 Superlinked `POST /v1/embeddings` 실호출(샘플 10문장, `Qwen/Qwen3-Embedding-4B`)로 과거시제 3개·주어-동사 일치 3개·전치사 2개가 각각 묶이고, 성격이 다른 관사 실수 2개는 분리됨(교차 묶음 없음, 임계값 0.80은 이 샘플에서 타당).
+
 ### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA 재확인 21행: 무마이크 복구 통화 사용량 집계 누락·과소 집계 수정 (브랜치 `fix/qa4-r21`)
 - **배경**:
   - 마이크 없이 진행한 통화가 새로고침 등으로 끊긴 뒤 복구 복기를 진행하면 복기 토큰 비용은 기록되지만 학습 기록의 통화 횟수(`calls`)와 통화 분(`liveMinutes`)이 빠지거나 0.0x분으로 과소 집계되는 문제가 확인됨.
