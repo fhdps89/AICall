@@ -165,3 +165,18 @@ test("describeRecordingState: counts로 원격 0·로컬 2일 때 uploading 문�
     "녹음 조각 2개는 아직 올라가지 않았어요. 앱을 켜 둔 채 잠시 기다린 뒤 복기해 주세요."
   );
 });
+
+test("isInterruptedSession: lastTranscriptAt counts as activity for a live text-only call", () => {
+  const started = "2026-11-21T14:00:00.000Z";
+  const now = new Date("2026-11-21T14:03:00.000Z").getTime();
+  const session = {
+    status: "in-progress" as const,
+    startedAt: started,
+    lastChunkAt: started,
+    lastTranscriptAt: "2026-11-21T14:02:30.000Z",
+  };
+  // 3 minutes after start, but transcript heartbeat 30s ago → not stale
+  assert.equal(isInterruptedSession(session, now), false);
+  // 3 minutes after last transcript → stale
+  assert.equal(isInterruptedSession(session, now + 3 * 60 * 1000), true);
+});

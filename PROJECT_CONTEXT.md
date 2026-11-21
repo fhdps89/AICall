@@ -133,7 +133,7 @@
    - 그록봇은 `/feed/{비밀키}/today(.json)`만 열면 됨. 앱이 홈 화면을 열 때마다 비밀키·후보 실수를 서버에 다시 보냄(`syncFeed`). 강의가 없으면 피드 요청 때 생성 시작, 실패한 강의는 30분에 한 번만 다시 시도.
    - **한계**: 강의 음성·피드 설정은 서버의 `.data/` 폴더에 저장되어, Cloud Run/AI Studio 서버가 다시 켜지면 지워질 수 있음.
    - **만들던 중 서버가 다시 켜진 강의** (v2.8.0): 서버 기록이 "생성 중"인데 실제 작업이 없으면 `failed`/`INTERRUPTED`로 알려 줌. 서버 기록 자체가 지워졌으면 앱이 Firestore의 "생성 중"을 같은 상태로 바꿈. 홈 카드는 "서버가 다시 시작되어 만들던 강의가 멈췄어요"와 **오늘 강의 만들기** 버튼을 보여 주고, 그록봇 피드는 30분 기다리지 않고 바로 다시 만듦.
-   - **ready 강의의 오디오가 사라진 경우** (QA 5차 30행): Firestore에 대본이 남아 있으면 `POST /api/lecture/audio/rebuild`가 TTS만 다시 만들고 `status`는 `ready`로 유지함(`audioStatus: rebuilding`). 모달은 「오디오를 다시 만드는 중…」과 재시도를 보여 주며, 대본이 없으면 홈에서 강의를 다시 만들어야 함. WAV는 임시 파일 후 rename.
+   - **ready 강의의 오디오가 사라진 경우** (QA 5차 30행): Firestore에 대본이 남아 있으면 `POST /api/lecture/audio/rebuild`가 TTS만 다시 만들고 `status`는 `ready`로 유지함(`audioStatus: rebuilding`). 모달은 재생성 진행 개수와 재시도를 보여 주며, 대본이 없으면 홈에서 강의를 다시 만들어야 함. 오디오는 ffmpeg가 있으면 AAC/MP3(48kbps)로 저장하고 없으면 WAV. 클라이언트는 status를 폴링하며 재생성이 진행 중이면 3분 하드 타임아웃을 쓰지 않음. 홈 카드는 오디오 다운로드를 기다리지 않음.
    - **복기에서 오늘 강의로 연결** (P0-4): 복기 모달 「오늘 강의 보기」는 복기를 닫고 홈 강의 카드로 이동해 첫 `refresh()` 완료 후 스크롤하며, 이미 `ready`(오디오 포함)인 경우에만 `LectureModal`을 연다. 준비 전이면 `startLecture`를 부르지 않고 카드의 「오늘 강의 만들기」 버튼만 노출된 상태로 둔다.
 11. **B-10 Keep 가져오기 · 사용량 · 1-F 받아쓰기 품질 시험**:
    - Keep "English mistake log" 붙여넣기 → `gemini-3.8-flash`로 [내가 한 말/자연스러운 표현/이유] 미리보기 → 저장(1일 단계부터).
@@ -146,7 +146,7 @@
    - `NODE_ENV`가 없는 배포 서버에 개발 도구(Vite)가 없으면, 죽지 않고 빌드된 `dist/`를 내보냄(v2.8.0).
 
 13. **테스트·빌드 (v2.8.0)**:
-   - `npm test`: Node 내장 테스트(`node:test`) + `tsx`, `tests/*.test.ts`. 2026-11-21 기준 240개. 코치 제안 검사, 트랙별 취약점 치환, 복습 실수 3개 제한, 서버 재시작 강의 상태, 강의 오디오 재생성, 실수 묶음 필터·complete-linkage, 복기 알약 여백, 2인 음성 조각, 피드 비밀키 형식, 1분 호출 한도, 녹음 경로 차단, 잘못된 로그인 토큰 거부, 1분 묶음, KST 날짜 계산, 비용 계산, 녹음기(마지막 조각 포함·재시작 번호). 녹음기 테스트는 저장 함수를 가짜로 바꿔 끼워 실제 Firebase에 접속하지 않음(`ChunkRecorder` 생성자의 `deps`).
+   - `npm test`: Node 내장 테스트(`node:test`) + `tsx`, `tests/*.test.ts`. 2026-11-21 기준 249개. 코치 제안 검사, 트랙별 취약점 치환, 복습 실수 3개 제한, 서버 재시작 강의 상태, 강의 오디오 재생성, 실수 묶음 필터·complete-linkage, 복기 알약 여백, 2인 음성 조각, 피드 비밀키 형식, 1분 호출 한도, 녹음 경로 차단, 잘못된 로그인 토큰 거부, 1분 묶음, KST 날짜 계산, 비용 계산, 녹음기(마지막 조각 포함·재시작 번호). 녹음기 테스트는 저장 함수를 가짜로 바꿔 끼워 실제 Firebase에 접속하지 않음(`ChunkRecorder` 생성자의 `deps`).
    - CI(`.github/workflows/ci.yml`): 설치 → 앱 타입 검사 → 서버·테스트 타입 검사(`tsconfig.server.json`이 `tests/`도 포함) → 빌드 → `npm test`.
    - 빌드는 라이브러리를 `firebase`·`react`·`icons`·`vendor` 파일로 나눔(`vite.config.ts`). Firebase SDK 자체가 약 590KB(압축 140KB)라 경고 기준을 700KB로 둠.
    - `npm audit`는 10건(high 8, moderate 2, 2026-11-10 기준): Firebase가 쓰는 `@grpc/grpc-js` 계열, 개발 서버용 `vite`·`esbuild`, `qs`·`re2js`·`source-map-js` 등. `npm audit fix`가 Firebase SDK 버전을 올리므로 실기기 QC 뒤 별도 적용 권장.
@@ -155,7 +155,7 @@
 
 ## 4-1. v2.9.0 아키텍처 변경 요약 (2026-11-10 KST)
 - **통화 세션 상태**: `in-progress` → (통화 종료) `pending_review` → (복기 저장) `done`. 「보관만 하기」만 복기 없이 `done`(`finalizeCallSession(..., { archive: true })`). 코치의 최근 세션은 `done`만 셈.
-- **끝나지 않은 통화 다시 열기**: 앱을 열 때의 창 외에, `App.tsx`가 홈 아래에 고정 알약을 띄움. 알약이 보일 때는 `HomeScreen` `main` 끝에 같은 높이의 여백(`unfinished-pill-space`)을 넣어 카드·「더 보기」 행을 가리지 않음. 복기 실패·완료 뒤 `getUnfinishedSessions`로 목록 갱신.
+- **끝나지 않은 통화 다시 열기**: 앱을 열 때의 창 외에, `App.tsx`가 홈 아래에 고정 알약을 띄움. 알약이 보일 때는 `HomeScreen` `main` 맨 위에 일반 흐름 배너로 넣어 스크롤 중에도 카드·「더 보기」를 가리지 않음. 복기 실패·완료 뒤 `getUnfinishedSessions`로 목록 갱신.
 - **복기 파이프라인**(`reviewPipeline.ts` + 순수 규칙 `reviewRules.ts`): ① 분마다 받아쓰기(실패 시 1회 재시도) → ② 실패한 분은 같은 `minuteIndex`의 `sttPartial`로 보충(`mergeMinuteTranscripts`) → ③ 녹음이 없으면 `sttPartial` 전체 → ④ 그것도 없으면 Live 대화 로그의 학습자 발화 → ⑤ 아무것도 없으면 `sourceStt: "none"`: AI 복기를 부르지 않고 안내 문구만 저장, 진도 유지(`review.lessonAdvanced = false`). `usedCorrectly`/`repeatedMistakes`는 보낸 목록의 id만 반영(`keepKnownIds`). 기존 실수 목록은 4개 항목만, 종류별 최신 150개까지 전송.
 - **피드 동기화 시점**: 홈 화면 로드 + 복기 완료 직후(`App.tsx` → `syncFeed`).
 - **녹음기**(`chunkRecorder.ts`): 1분 묶음은 조각이 만들어진 즉시 녹음 순서로 쌓음(이전: 업로드·Firestore 기록 뒤). IndexedDB 저장 → 업로드 → 세션 문서 기록 순서는 그대로.
@@ -166,6 +166,13 @@
 ---
 
 ## 5. 버전 히스토리
+- **v2.10.0 이후 수정(미배포) — QA 6차 재확인 후속 (2026-11-21 KST, 브랜치 `englead/qa6-r30-28-24-29-track`)**:
+  - **30행**: status 폴링 + 압축 오디오(AAC/MP3, ffmpeg 없으면 WAV). 재생성 중 3분 하드 타임아웃 없음.
+  - **28행**: 홈 강의 카드가 오디오 다운로드를 기다리지 않음.
+  - **24행**: 끝나지 않은 통화 알약을 홈 상단 흐름 배너로 이동.
+  - **29/33행**: 묶음 이름 겹침 재사용.
+  - **보강**: 다른 탭 통화 오중단 방지, 목표 seed가 진도를 덮어쓰지 않음.
+  - **검증**: `npm test` 249/249, lint, server tsc, build 통과.
 - **v2.10.0 이후 수정(미배포) — QA 5차 30·29·24행 (2026-11-21 KST, 브랜치 `englead/qa5-r30-29-24`)**:
   - **30행**: 재배포 후 `.data/` WAV가 사라져도 Firestore 대본으로 TTS만 다시 만듦(`POST /api/lecture/audio/rebuild`, `status`는 `ready` 유지). 모달에 재생성·재시도 UI.
   - **29행**: 잘린 전사·짧은 비영어 원문 제외, complete-linkage, `EMBED_TEXT_VERSION = 2`.

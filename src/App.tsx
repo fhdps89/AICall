@@ -206,9 +206,10 @@ export const App: React.FC = () => {
           console.warn("[App] Auto retry failed chunks error:", retryErr);
         });
 
-        // 페이지가 새로 열린 시점에는 진행 중이던 통화를 이어 갈 수 없으므로 즉시 pending_review 로 전환한다.
+        // Only mark sessions that have gone stale (default 2 min). A 0ms threshold would also
+        // close a live call that is still running in another tab of the same account.
         try {
-          const interrupted = await checkAndMarkInterruptedSessions(user.uid, { staleAfterMs: 0 });
+          const interrupted = await checkAndMarkInterruptedSessions(user.uid);
           if (interrupted.length > 0) {
             setUnfinishedSessions(interrupted);
             setShowUnfinishedModal(true);
@@ -600,7 +601,8 @@ export const App: React.FC = () => {
         onStartCall={handleStartCall}
         onOpenSettings={() => setShowSettingsModal(true)}
         onLogout={handleLogout}
-        reserveBottomForPill={showUnfinishedPill}
+        unfinishedCount={showUnfinishedPill ? unfinishedSessions.length : 0}
+        onOpenUnfinished={() => setShowUnfinishedModal(true)}
       />
 
       {/* Dedicated post-call review flow: loading → (ReviewModal) | in-app failure card */}
@@ -617,17 +619,6 @@ export const App: React.FC = () => {
         />
       )}
 
-      {/* 끝나지 않은 통화 안내 띠: 창을 닫았거나 복기를 나중으로 미뤘을 때 다시 여는 곳 */}
-      {showUnfinishedPill && (
-        <button
-          type="button"
-          data-testid="unfinished-call-pill"
-          onClick={() => setShowUnfinishedModal(true)}
-          className="fixed bottom-safe left-1/2 -translate-x-1/2 z-40 px-4 py-2.5 rounded-full bg-amber-500 text-slate-950 text-xs font-bold shadow-xl shadow-amber-500/20 cursor-pointer whitespace-nowrap"
-        >
-          끝나지 않은 통화 {unfinishedSessions.length}개 · 복기하기
-        </button>
-      )}
 
       {/* Review Modal Screen (B-4 requirement 3) */}
       {activeReviewData && (

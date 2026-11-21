@@ -39,11 +39,15 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
   const refresh = async () => {
     try {
       let l = await getLecture(user.uid, today);
+      // Show Firestore state immediately so a missing audioUrl cannot leave the
+      // card on 「불러오는 중…」 while a large file downloads.
+      setLecture(l);
+      setLoading(false);
       if (!l || l.status !== "ready" || !l.audioUrl) {
         // Server may have generated it (e.g. via the Grok Bot feed) → sync
         l = (await syncLectureFromServer(user.uid, today).catch(() => l)) || l;
+        setLecture(l);
       }
-      setLecture(l);
       return l;
     } finally {
       setLoading(false);

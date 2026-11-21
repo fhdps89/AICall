@@ -111,7 +111,7 @@ export function buildFeedToday(ai: GoogleGenAI | null, st: FeedSyncState, baseUr
       title: lecture.title || null,
       itemCount: lecture.itemCount || 0,
       coachNote: lecture.coachNote || null,
-      audioUrl: `${baseUrl}/feed/${st.secret}/audio/${date}.wav`,
+      audioUrl: `${baseUrl}/feed/${st.secret}/audio/${lecture.audioFile || `${date}.wav`}`,
     };
   }
   return { ...base, ...(lecture.error && lecture.error !== 'NOTHING_TO_TEACH' ? { error: lecture.error } : {}) };

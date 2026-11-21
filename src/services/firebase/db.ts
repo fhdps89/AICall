@@ -235,13 +235,24 @@ export async function updateGoalProgress(
   }
 }
 
+/** Existing goal documents must never be overwritten by default seed values. */
+export function goalsToCreate(existingIds: Iterable<string>, goals: GoalData[]): GoalData[] {
+  const have = new Set(existingIds);
+  return goals.filter((g) => !have.has(g.id));
+}
+
 /**
- * Batch initialize default goals in Firestore for the first run
+ * Batch initialize default goals in Firestore for the first run.
+ * Skips any goal id that already exists, so a later call cannot reset nextLessonIndex.
  */
 export async function batchInitGoals(userId: string, goals: GoalData[]): Promise<void> {
   try {
+    const goalsCol = collection(db, "users", userId, "goals");
+    const snap = await getDocs(goalsCol);
+    const toCreate = goalsToCreate(snap.docs.map((d) => d.id), goals);
+    if (toCreate.length === 0) return;
     const batch = writeBatch(db);
-    for (const g of goals) {
+    for (const g of toCreate) {
       const gRef = doc(db, "users", userId, "goals", g.id);
       batch.set(gRef, { ...g, updatedAt: new Date().toISOString() });
     }

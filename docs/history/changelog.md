@@ -4,6 +4,16 @@
 
 ---
 
+### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA 6차 재확인 후속 (30·28·24·29/33행, 브랜치 `englead/qa6-r30-28-24-29-track`)
+- **배경**: QA봇이 #32 머지·배포(main `1c445d7`, 번들 `index-Bb2KsfTc.js`)를 다시 확인한 부분 실패·신규 이슈를 Draft PR로 고침. 머지·배포는 하지 않음.
+- **원인과 수정**:
+  - **30행(부분 실패)**: 클라이언트는 GET audio 404를 3분 동안만 폴링해 타임아웃했고, 완료된 WAV는 약 25MB라 다운로드·오프라인 저장이 실패함. 이제 status(`audioStatus`/`hasAudio`/`audioProgress`)를 폴링하고 재생성이 진행 중이면 3분 하드 타임아웃을 쓰지 않음(전체 15분, 정체 3분). ffmpeg가 있으면 AAC/MP3 48kbps로 저장하고 없으면 WAV로 폴백. 피드 URL도 실제 확장자를 씀. 모달은 진행 개수를 보여 주고, 인증 fetch blob도 Cache API에 저장함. 재생성 중 서버가 재시작하면 `missing`/`INTERRUPTED`로 정규화함.
+  - **28행**: 홈 카드가 `audioUrl` 없는 ready 강의에서 `syncLectureFromServer`의 전체 파일 다운로드를 await해 「불러오는 중…」에 80초 이상 멈춤. Firestore 문서를 먼저 보여 로딩을 해제하고, 서버에 파일이 있을 때만 백그라운드로 Storage에 올림.
+  - **24행**: 하단 `fixed` 알약이 스크롤 중 「더 보기」와 묶음 첫 줄을 가림. 홈 `<main>` 맨 위 일반 흐름 배너로 옮김.
+  - **29/33행**: 새로고침 때 묶음 이름이 한 번 다시 만들어짐. 정확 멤버 집합 캐시 + Jaccard ≥ 0.6 겹침 재사용, 비활성 이름 보관.
+  - **보강**: 같은 계정 다른 탭의 실시간 통화를 새로고침이 즉시 중단하지 않음(기본 2분 유휴 + `lastTranscriptAt`). `batchInitGoals`는 기존 목표 문서를 덮어쓰지 않음.
+- **검증**: `npm test` 249/249, lint, server tsc, build 통과. 레이아웃 스크린샷: `/workspace/collab/onecall_qa6_fix_20261121/shots/`.
+
 ### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA 5차 30·29·24행: 강의 오디오 404, 실수 묶음 혼입, 복기 알약 겹침 (브랜치 `englead/qa5-r30-29-24`)
 - **배경**:
   - QA봇이 라이브 main `7b1be51`에서 재현한 3건을 Draft PR로 고침. 머지·배포는 하지 않음.

@@ -32,6 +32,7 @@ export const LectureModal: React.FC<LectureModalProps> = ({ user, lecture, onClo
   const [toast, setToast] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [rebuilding, setRebuilding] = useState(false);
+  const [rebuildProgress, setRebuildProgress] = useState<{ completed: number; total: number } | null>(null);
   const [retryTick, setRetryTick] = useState(0);
 
   useEffect(() => {
@@ -41,20 +42,29 @@ export const LectureModal: React.FC<LectureModalProps> = ({ user, lecture, onClo
     setError(null);
     setSrc(null);
     setRebuilding(false);
+    setRebuildProgress(null);
     setOffline("loading");
     (async () => {
       try {
-        const url = await resolveLectureAudio(lecture, {
+        const resolved = await resolveLectureAudio(lecture, {
           signal: ac.signal,
           onRebuilding: () => {
             if (!cancelled) setRebuilding(true);
           },
+          onProgress: (st) => {
+            if (!cancelled && st?.audioProgress) setRebuildProgress(st.audioProgress);
+          },
         });
+        const url = resolved.url;
         if (cancelled) {
           if (url.startsWith("blob:")) URL.revokeObjectURL(url);
           return;
         }
-        const cached = await cacheLectureAudio(url);
+        const cached = await cacheLectureAudio(url, {
+          blob: resolved.blob,
+          mime: resolved.mime,
+          cacheKey: `/onecall/lectures/${lecture.date}?v=${lecture.updatedAt || lecture.createdAt || ""}`,
+        });
         if (cancelled) {
           if (cached) URL.revokeObjectURL(cached);
           else if (url.startsWith("blob:")) URL.revokeObjectURL(url);
@@ -154,7 +164,11 @@ export const LectureModal: React.FC<LectureModalProps> = ({ user, lecture, onClo
           {!src && !error && (
             <div className="flex items-center gap-2 text-slate-400 text-sm">
               <Loader2 className="w-4 h-4 animate-spin" />
-              {rebuilding ? "오디오를 다시 만드는 중… 1~3분 걸릴 수 있어요." : "오디오 미리 받는 중…"}
+              {rebuilding
+                ? rebuildProgress && rebuildProgress.total > 0
+                  ? `오디오를 다시 만드는 중… ${rebuildProgress.completed}/${rebuildProgress.total}`
+                  : "오디오를 다시 만드는 중… 몇 분 걸릴 수 있어요."
+                : "오디오 미리 받는 중…"}
             </div>
           )}
           {src && (

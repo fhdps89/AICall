@@ -2,7 +2,7 @@
  * B-7 Morning Lecture generator (server side).
  * - Script: gemini-3.8-flash with responseSchema
  * - Voice: gemini-3.8-flash-tts, 2 speakers (Coach / Partner), raw PCM per segment
- * - Concatenate PCM, insert 3s silence before each answer, save one WAV file
+ * - Concatenate PCM, insert 3s silence before each answer, encode AAC/MP3 when ffmpeg is available (WAV fallback)
  * - Jobs run in the background; state is persisted under .data/lectures/{uid}/{date}.json
  */
 import fs from 'fs';
@@ -10,6 +10,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
 import { TEXT_MODEL, GEMINI_TTS_MODEL } from '../src/config/models.ts';
+import { encodeLectureAudio, mimeForAudioFile, type LectureEncodeFn } from './lectureAudioEncode.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const DATA_DIR = path.resolve(__dirname, '..', '.data');
@@ -57,8 +58,10 @@ export interface LectureState {
   textTokens?: number;
   durationSec?: number;
   audioFile?: string; // relative file name inside LECTURE_DIR/{uid}
+  audioMime?: string;
   /** Audio generation only. Do not use status=generating for a TTS rebuild of a ready script. */
   audioStatus?: 'ready' | 'rebuilding' | 'missing';
+  audioProgress?: { completed: number; total: number };
   error?: string;
   createdAt: string;
   updatedAt: string;
@@ -94,6 +97,9 @@ export function readLectureState(uid: string, date: string): LectureState | null
   if (state.status === 'generating' && !running.has(`${uid}:${date}`)) {
     return { ...state, status: 'failed', error: 'INTERRUPTED' };
   }
+  if (state.status === 'ready' && state.audioStatus === 'rebuilding' && !running.has(`${uid}:${date}`)) {
+    return { ...state, audioStatus: 'missing', error: 'INTERRUPTED' };
+  }
   return state;
 }
 
@@ -112,6 +118,34 @@ export function lectureAudioPath(uid: string, date: string): string | null {
 export function lectureHasLocalScript(uid: string, date: string): boolean {
   const st = readLectureState(uid, date);
   return Array.isArray(st?.script) && st!.script!.length > 0;
+}
+
+export interface LectureStatusPayload extends LectureState {
+  hasAudio: boolean;
+  audioMime?: string;
+}
+
+/** Safe status for the client to poll during TTS rebuild (no audio bytes). */
+export function lectureStatusPayload(uid: string, date: string): LectureStatusPayload | null {
+  const st = readLectureState(uid, date);
+  if (!st) return null;
+  const file = lectureAudioPath(uid, date);
+  const audioStatus = st.audioStatus || (file ? 'ready' : st.status === 'ready' ? 'missing' : undefined);
+  return {
+    ...st,
+    audioStatus,
+    hasAudio: Boolean(file),
+    audioMime: st.audioMime || mimeForAudioFile(st.audioFile),
+  };
+}
+
+function removeLegacyAudioFiles(dir: string, date: string, keepName?: string): void {
+  for (const ext of ['wav', 'm4a', 'mp3']) {
+    const name = `${date}.${ext}`;
+    if (keepName && name === keepName) continue;
+    const fp = path.join(dir, name);
+    try { fs.unlinkSync(fp); } catch { /* ignore */ }
+  }
 }
 
 export const LECTURE_AUDIO_MISSING = 'LECTURE_AUDIO_MISSING';
@@ -215,7 +249,7 @@ export function startLectureAudioRebuild(
   uid: string,
   date: string,
   payload?: unknown,
-  opts: { synthesizeFn?: LectureSynthesizeFn } = {}
+  opts: { synthesizeFn?: LectureSynthesizeFn; encodeFn?: LectureEncodeFn } = {}
 ): LectureState {
   safeDate(date);
   const key = `${uid}:${date}`;
@@ -312,7 +346,7 @@ export function startLectureAudioRebuild(
   delete state.audioFile;
   writeLectureState(state);
   running.add(key);
-  const done = renderAndSaveAudio(ai, state, { title: state.title || '오늘 아침 강의', items: scriptItems, coachNote: state.coachNote || '' }, opts.synthesizeFn)
+  const done = renderAndSaveAudio(ai, state, { title: state.title || '오늘 아침 강의', items: scriptItems, coachNote: state.coachNote || '' }, opts.synthesizeFn, opts.encodeFn)
     .catch((err) => {
       console.error('[Lecture] audio rebuild failed:', err);
       state.audioStatus = 'missing';
@@ -600,24 +634,6 @@ function resample(p: Pcm, rate: number): Buffer {
   return out;
 }
 
-function wavFromPcm(pcm: Buffer, rate: number): Buffer {
-  const header = Buffer.alloc(44);
-  header.write('RIFF', 0);
-  header.writeUInt32LE(36 + pcm.length, 4);
-  header.write('WAVE', 8);
-  header.write('fmt ', 12);
-  header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20); // PCM
-  header.writeUInt16LE(1, 22); // mono
-  header.writeUInt32LE(rate, 24);
-  header.writeUInt32LE(rate * 2, 28);
-  header.writeUInt16LE(2, 32);
-  header.writeUInt16LE(16, 34);
-  header.write('data', 36);
-  header.writeUInt32LE(pcm.length, 40);
-  return Buffer.concat([header, pcm]);
-}
-
 async function runJob(
   ai: GoogleGenAI,
   state: LectureState,
@@ -638,29 +654,24 @@ async function renderAndSaveAudio(
   ai: GoogleGenAI,
   state: LectureState,
   script: { title: string; items: LectureScriptItem[]; coachNote: string },
-  synthesizeFn?: LectureSynthesizeFn
+  synthesizeFn?: LectureSynthesizeFn,
+  encodeFn?: LectureEncodeFn
 ): Promise<void> {
   const RATE = 24000;
-  const pieces: Buffer[] = [];
-  let totalBytes = 0;
-  let chars = 0;
   const synth = synthesizeFn || synthesize;
-  const push = (b: Buffer) => {
-    pieces.push(b);
-    totalBytes += b.length;
-  };
-  const say = async (text: string, two: boolean) => {
-    chars += text.length;
-    push(resample(await synth(ai, state.ttsEngine, text, two), RATE));
-  };
-  const silence = (sec: number) => push(Buffer.alloc(Math.round(sec * RATE) * 2));
-
-  await say(`Coach: 좋은 아침이에요. 오늘 아침 강의, ${script.title}. 모두 ${script.items.length}개 표현을 함께 볼게요.`, false);
-  silence(0.6);
+  type PlanSeg =
+    | { kind: 'speech'; text: string; two: boolean; itemIndex?: number }
+    | { kind: 'silence'; sec: number };
+  const plan: PlanSeg[] = [];
+  plan.push({
+    kind: 'speech',
+    text: `Coach: 좋은 아침이에요. 오늘 아침 강의, ${script.title}. 모두 ${script.items.length}개 표현을 함께 볼게요.`,
+    two: false,
+  });
+  plan.push({ kind: 'silence', sec: 0.6 });
 
   for (let i = 0; i < script.items.length; i++) {
     const it = script.items[i];
-    it.startSec = Math.round((totalBytes / 2 / RATE) * 10) / 10;
     const label = it.kind === 'review' ? '복습 표현' : '새 표현';
     const body = [
       `Coach: ${i + 1}번, ${label}이에요. 어젯밤 하신 말은 "${it.myPhrase}" 였어요.`,
@@ -669,33 +680,82 @@ async function renderAndSaveAudio(
       ...it.dialogue.map((d) => `${d.speaker === 'Partner' ? 'Partner' : 'Coach'}: ${d.line}`),
       `Coach: 한국어 뜻은 "${it.meaningKo}". 영어로 말해 보세요.`,
     ].join('\n');
-    await say(body, true);
-    silence(SILENCE_SEC);
-    await say(`Coach: ${it.answerEnglish}`, false);
-    silence(0.8);
+    plan.push({ kind: 'speech', text: body, two: true, itemIndex: i });
+    plan.push({ kind: 'silence', sec: SILENCE_SEC });
+    plan.push({ kind: 'speech', text: `Coach: ${it.answerEnglish}`, two: false });
+    plan.push({ kind: 'silence', sec: 0.8 });
   }
   if (script.coachNote) {
-    await say(`Coach: 오늘의 코치 한마디. ${script.coachNote}`, false);
+    plan.push({ kind: 'speech', text: `Coach: 오늘의 코치 한마디. ${script.coachNote}`, two: false });
   }
 
-  const pcm = Buffer.concat(pieces);
-  const fileName = `${state.date}.wav`;
+  const speechTotal = plan.filter((s) => s.kind === 'speech').length;
+  let speechDone = 0;
+  let chars = 0;
+  state.audioProgress = { completed: 0, total: speechTotal };
+  writeLectureState(state);
+
+  const pcmParts: Buffer[] = new Array(plan.length);
+  let cursor = 0;
+  let aborted = false;
+  const workers = Math.min(2, speechTotal || 1);
+  const worker = async () => {
+    while (!aborted) {
+      const i = cursor++;
+      if (i >= plan.length) return;
+      const seg = plan[i];
+      if (seg.kind === 'silence') {
+        pcmParts[i] = Buffer.alloc(Math.round(seg.sec * RATE) * 2);
+        continue;
+      }
+      chars += seg.text.length;
+      try {
+        pcmParts[i] = resample(await synth(ai, state.ttsEngine, seg.text, seg.two), RATE);
+      } catch (err) {
+        aborted = true;
+        throw err;
+      }
+      if (aborted) return;
+      speechDone += 1;
+      state.audioProgress = { completed: speechDone, total: speechTotal };
+      state.updatedAt = new Date().toISOString();
+      writeLectureState(state);
+    }
+  };
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+
+  let totalBytes = 0;
+  for (let i = 0; i < plan.length; i++) {
+    const seg = plan[i];
+    if (seg.kind === 'speech' && typeof seg.itemIndex === 'number') {
+      script.items[seg.itemIndex].startSec = Math.round((totalBytes / 2 / RATE) * 10) / 10;
+    }
+    totalBytes += pcmParts[i].length;
+  }
+
+  const pcm = Buffer.concat(pcmParts);
+  const encoded = await (encodeFn || encodeLectureAudio)(pcm, RATE);
+  const fileName = `${state.date}.${encoded.ext}`;
   const dir = userDir(state.uid);
   const finalPath = path.join(dir, fileName);
   const tmpPath = path.join(dir, `${fileName}.${process.pid}.tmp`);
   try {
-    fs.writeFileSync(tmpPath, wavFromPcm(pcm, RATE));
+    fs.writeFileSync(tmpPath, encoded.buffer);
     fs.renameSync(tmpPath, finalPath);
   } catch (err) {
     try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
     throw err;
   }
+  removeLegacyAudioFiles(dir, state.date, fileName);
   state.script = script.items;
   state.chars = chars;
   state.durationSec = Math.round(pcm.length / 2 / RATE);
   state.audioFile = fileName;
+  state.audioMime = encoded.mime;
   state.status = 'ready';
   state.audioStatus = 'ready';
+  state.audioProgress = { completed: speechTotal, total: speechTotal };
   delete state.error;
   writeLectureState(state);
 }
+
