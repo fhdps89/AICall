@@ -4,6 +4,38 @@
 
 ---
 
+### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA-4~6 뒤로가기 처리·설정 탭 한 줄 스크롤·통화 중 새로고침 경고와 끝나지 않은 통화 안내 정정 (브랜치 `fix/qa-r4-6-back-tabs-recovery`)
+- **배경**:
+  - 실기기 QA(시트 원콜 탭 4·5·6행)에서 3가지 문제가 보고됨.
+  - (4행) 통화 준비 화면(`PreCallScreen`)에서 브라우저 뒤로가기를 누르면 홈으로 돌아오지 않고 `about:blank`로 앱을 이탈함.
+  - (5행) 393px 모바일 폭에서 설정 모달(`SettingsModal`)의 탭 7개가 줄바꿈 없이 접혀 `녹/음/보/관/함`처럼 한 글자씩 세로로 깨짐.
+  - (6행) 통화 중 F5/창 닫기 시 확인 경고가 없고, 새로고침 직후 「끝나지 않은 통화」 창이 방금 끊긴 통화가 아니라 예전 통화만 보여 주며, 녹음 조각이 0개인데도 「녹음은 안전하게 저장돼 있어요.」와 `0분`을 표시함.
+- **원인**:
+  - (4행) 앱 전체에 `history.pushState`/`popstate` 처리가 없고 `App.tsx`의 React 상태(`prepCall`, `activeCallGoal`, 모달 상태)로만 화면을 전환해 브라우저 history가 항상 첫 항목 1개뿐이었음.
+  - (5행) `SettingsModal.tsx` 탭 줄(`flex border-b ... px-5`)이 줄바꿈·오버플로우 제어를 두지 않아 좁은 폭에서 버튼 텍스트가 강제 줄바꿈됨.
+  - (6행) `NewCallScreen.tsx`에 `beforeunload` 리스너가 없었고, `db.ts`의 `checkAndMarkInterruptedSessions`가 `lastChunkAt`이 2분을 넘긴 통화만 `pending_review`로 전환해 새로고침 직후 방금 끊긴 통화가 빠졌으며, `UnfinishedSessionModal.tsx`는 목록 첫 항목만 고정 표시하고 `Math.round(chunkCount * 10 / 60)`분 계산 및 고정 문구만 사용함.
+- **수정**:
+  - **4행 뒤로가기**: React·DOM 전역 의존 없이 history 유사 객체와 `popstate` 구독 함수를 주입받는 순수 모듈 `src/services/navigation/historySync.ts`(`HistoryDepthSync`)와 닫을 대상 우선순위 판정 순수 모듈 `src/services/navigation/backTarget.ts`(`pickBackTarget`, `getNavigationDepth`)를 신규 작성. 마운트 시 `replaceState({ onecallDepth: 0 })`로 정규화, `setDepth`로 0→1 `pushState`·1→0 `go(-1)`(프로그래밍적 `popstate` 무시)·1→1 무동작 처리, 사용자 뒤로가기 시 `onUserBack()` 호출 후 상태 변화로 깊이가 줄지 않으면 `pushState`로 복구. `src/App.tsx`에서 `depth`를 계산해 동기화하고 `pickBackTarget` 우선순위(통화 중/복기 로딩·실패 카드/초기 진도 모달은 닫지 않음 → 복구, `prepCall`, 복기 모달, 끝나지 않은 통화 모달, 설정 모달)로 1개씩 닫음.
+  - **5행 설정 탭**: `src/ui/settings/SettingsModal.tsx` 탭 줄에 `overflow-x-auto flex-nowrap [scrollbar-width:none] [&::-webkit-scrollbar]:hidden`을, 각 탭 버튼에 `whitespace-nowrap shrink-0`을 적용하고 `SETTINGS_TABS` 배열 `map`으로 정리(`devMode` 조건 및 라벨 유지). `activeTab` 변경 시 `scrollIntoView({ inline: "nearest", block: "nearest" })` 호출.
+  - **6행 통화 중 새로고침 및 미완료 통화 안내**:
+    - `src/ui/call/NewCallScreen.tsx`: `status`가 `connecting`/`connected`/`reconnecting`이고 종료 중(`hangingUp`)이 아닐 때 `window` `beforeunload` 리스너를 등록(`event.preventDefault(); event.returnValue = ""`)하고 종료 처리 시작·오류/종료·언마운트 시 해제.
+    - `src/services/session/interruptedSession.ts`(신규, 순수 모듈): `DEFAULT_STALE_SESSION_MS`, `isInterruptedSession`을 services 계층으로 분리(`services` → `ui` import 제거).
+    - `src/ui/call/unfinishedSessionSummary.ts`(신규, 순수 모듈): `describeRecordingState`, `formatRecordingChunksSummary`(반올림한 초 기준으로 60초 미만/이상 구분해 59.5~59.9초도 `1분` 표기), `formatSessionChipLabel` 구현.
+    - `src/services/firebase/db.ts` & `src/App.tsx`: `checkAndMarkInterruptedSessions(userId, options?: { staleAfterMs?: number })`는 기본 2분 임계값을 유지하되 `App.tsx` 로그인 직후 호출만 `staleAfterMs: 0`을 전달해 페이지 새로 열림 시 남은 `in-progress` 통화를 즉시 `pending_review`로 전환.
+    - `src/ui/call/UnfinishedSessionModal.tsx`: 2개 이상일 때 상단 선택 칩(`11/21 13:13 · 4과` 형식, 기본은 첫 항목)을 노출해 선택한 통화 기준으로 정보·「복기 시작」·「보관만 하기」를 수행하고, 60초 미만 `N개 (M초)`/이상 `N개 (M분)` 표기 및 4가지 상태(`empty`/`transcript_only`/`saved`/`uploading`) 안내 문구 적용.
+- **방어 조치**:
+  - `tests/historySync.test.ts`(신규): 7개 시나리오(0→1 `pushState`, 사용자 뒤로가기 `onUserBack`, 앱 닫기 `go(-1)` 시 `onUserBack` 미호출, 1→1 0회, 미변경 시 `pushState` 복구, 마운트 `replaceState` 정규화, `dispose` 후 무시) 검증.
+  - `tests/backTarget.test.ts`(신규): `pickBackTarget` 우선순위(통화 중·로딩·실패 카드·초기 진도 모달 보호 및 `prepCall`→복기→끝나지 않은 통화→설정 모달 순) 검증.
+  - `tests/mobileShell.test.ts`: `SettingsModal.tsx`의 `{/* Tab Navigation */}` ~ `{/* Body */}` 구간만 잘라 `overflow-x-auto`, `flex-nowrap`, `whitespace-nowrap`, `shrink-0`을 검사하고 `scrollIntoView` 호출을 함께 검증.
+  - `tests/unfinishedSessionSummary.test.ts`(신규): `describeRecordingState` 4가지 문구, `formatRecordingChunksSummary` 초/분 분기(59.4초 vs 59.5~59.9초 경계 포함), `isInterruptedSession` 2분·`staleAfterMs: 0` 임계값, 칩 라벨 검증.
+- **남은 리스크**:
+  - 실기기(Android Chrome·iOS Safari)에서 Chrome 의 history 개입 때문에 사용자 조작 없는 `pushState` 항목을 뒤로가기가 건너뛸 수 있음 [미확인]
+  - 새로고침 직후 뒤로가기가 한 번 반응 없을 수 있음(깊이 정규화)
+  - `staleAfterMs` 0 은 다른 탭·기기에서 진행 중인 통화도 끝난 통화로 표시함
+- **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build` 모두 통과.
+
+---
+
 ### [2026-11-21 KST] v2.10.0 — P0-6 줌·텍스트 선택·배경색 통일 및 P0 묶음 릴리즈 (브랜치 `fix/p0-6-zoom-select-color`, 설계 Claude CLI Opus 5.5 high, 구현 agy Gemini 4 Hydrogen high)
 - **배경**:
   - `index.html` 뷰포트의 `maximum-scale=1.0, user-scalable=no`가 모바일 핀치 줌을 차단하고 있었으며, `index.html` `<body>`와 `CoachModal.tsx`의 `select-none`이 복기·강의·코치 텍스트 선택/복사를 막고 있었음.

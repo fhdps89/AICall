@@ -91,6 +91,24 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const modelSpeakingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
+  // 통화 중(연결 중/연결됨/재연결 중) 실수로 F5·창 닫기를 누를 때 브라우저 경고를 띄운다.
+  const shouldWarnBeforeUnload =
+    !hangingUp &&
+    (status === "connecting" || status === "connected" || status === "reconnecting");
+
+  useEffect(() => {
+    if (!shouldWarnBeforeUnload || typeof window === "undefined") return;
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (hangingUpRef.current) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, [shouldWarnBeforeUnload]);
+
   const currentLesson = goal.lessons.find((l) => l.index === lessonIndex) || {
     index: lessonIndex,
     title: `${lessonIndex}과`,
