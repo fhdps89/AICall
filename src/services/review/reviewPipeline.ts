@@ -43,6 +43,7 @@ import { buildTodayLessonSystemPrompt } from "../../data/lessonPromptBuilder";
 import { mergeChunksToWav, groupChunks } from "../recording/audioMerge";
 import { keepKnownIds, mergeMinuteTranscripts, MinutePartial } from "./reviewRules";
 import { createStepTimer, ReviewTiming } from "./reviewTiming";
+import { outcomeItems } from "./reviewView";
 
 /** Most existing mistakes listed for the model per group (newest first). */
 const MAX_LISTED_MISTAKES = 150;
@@ -106,7 +107,7 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
   let pendingResult: ReviewPipelineResult | undefined;
 
   try {
-    onProgress?.("1/3 녹음 조각 병합 및 최종 받아쓰기(gemini-3.5-transcribe) 진행 중...");
+    onProgress?.("1/3 녹음 조각 병합 및 최종 받아쓰기 진행 중...");
 
     // Step 1: Obtain recording chunks in chronological order
     let chunkBlobs: Blob[] = [];
@@ -295,7 +296,7 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
       return pendingResult;
     }
 
-    onProgress?.("2/3 AI 튜터 복기 리포트 생성 중 (gemini-3.8-flash)...");
+    onProgress?.("2/3 AI 튜터 복기 리포트 생성 중...");
 
     // Step 3: Fetch existing mistakes for usedCorrectly / repeatedMistakes detection
     let reviewingMistakes: MistakeData[] = [];
@@ -406,6 +407,16 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
         const repeatedList = keepKnownIds(review.repeatedMistakes, graduatedMistakes.map((m) => m.id));
         review.usedCorrectly = usedList;
         review.repeatedMistakes = repeatedList;
+        review.usedCorrectlyItems = outcomeItems(usedList, reviewingMistakes).map((m) => ({
+          id: m.id || "",
+          myPhrase: m.myPhrase || "",
+          naturalPhrase: m.naturalPhrase || "",
+        }));
+        review.repeatedItems = outcomeItems(repeatedList, graduatedMistakes).map((m) => ({
+          id: m.id || "",
+          myPhrase: m.myPhrase || "",
+          naturalPhrase: m.naturalPhrase || "",
+        }));
         if (usedList.length > 0 || repeatedList.length > 0) {
           const updateResult = await applyCallMistakeUpdates(userId, usedList, repeatedList);
           console.log(`[ReviewPipeline] Applied B-5 mistake updates: ${updateResult.graduatedCount} graduated, ${updateResult.reopenedCount} reopened.`);

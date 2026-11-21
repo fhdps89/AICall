@@ -80,6 +80,7 @@
    - **mistakes 컬렉션 자동 저장**: stage 1, status reviewing, source call 메타데이터 저장.
    - **통화 마지막 말 포함** (v2.8.0): 통화 종료 시 녹음기가 마지막(10초 미만) 조각이 다 만들어질 때까지 기다린 뒤(최대 3초) 복기에 넘김.
    - **단계별 소요 시간 계측 (`reviewTiming.ts`, P0-1)**: `sessions` 문서에 `reviewTiming`(단계별 소요 ms·총합·1분 묶음 수·전사 요청 수·결과 `ok`/`empty`/`failed`·`sourceStt`)을 저장하며, 개발자 모드에서 `ReviewModal` 상단에 한 줄 요약을 표시함.
+   - **이번 통화 성과 및 빈 통화 문구 정리 (`reviewView.ts`, `ReviewModal.tsx`, P0-2)**: `reviewPipeline.ts`가 `usedCorrectlyItems`·`repeatedItems`를 채워 `ReviewModal`의 「이번 통화 성과」 섹션(맞게 써서 졸업·다시 복습·다음 수업 진행)을 표시함(예전 세션은 숨김). 빈 통화(`sourceStt: "none"` 또는 `lessonAdvanced: false`)에서는 모순되는 칭찬·할 일 문구 대신 재통화 안내를 표시하고, 레벨 미산출(`-`/빈 값)은 `—`로 표기하며, 출처 라벨 한국어화 및 개발자 전용 문구 분리를 적용함(`README.md` 1단계 복기 표도 함께 갱신).
 4. **B-3 통화 중 녹음 & 끊김 대비 이중 안전망 (`chunkIndexedDb.ts`, `chunkRecorder.ts`, `NewCallScreen.tsx`)**:
    - **10초 마이크 청크 녹음**: `MediaRecorder`로 10초 조각 생성 -> IndexedDB(`OneCallRecordingsDB`)에 선저장 -> Cloud Storage 즉시 업로드 -> 성공 시 IndexedDB 삭제.
    - **연결 독립성 보장**: Live 연결이 끊기거나(GoAway, 소켓 재연결, 프록시 전환) 불안정해도 마이크 녹음은 중단 없이 독립 백그라운드 구동.
@@ -154,6 +155,7 @@
 ---
 
 ## 5. 버전 히스토리
+- **2026-11-21 KST (P0-2, v2.10.0 묶음 — 버전 표기 유지)**: `reviewView.ts` 추가 및 `SessionReviewData`에 `usedCorrectlyItems`·`repeatedItems` 저장, `ReviewModal`에 「이번 통화 성과」(졸업·재복습·진도 반영)·빈 통화 안내·`—` 레벨 배지·한국어 출처 라벨·개발자 모드 전용 문구 분리·진행 문구 정리 적용 (`README.md` 1단계 복기 항목 함께 갱신).
 - **2026-11-21 KST (P0-1, v2.10.0 묶음 — 버전 표기 유지)**: `reviewTiming.ts` 추가 및 `reviewPipeline.ts` 단계별(`collectChunks`·`transcribe`·`fallback`·`review`·`save`) 소요 시간 계측, `sessions.reviewTiming` 저장(`saveReviewTiming`), 개발자 모드 `ReviewModal` 한 줄 소요 시간 표시.
 - **v2.9.0 (2026-11-10 KST)**: [전체 코드 리뷰 2차 반영] 통화 종료는 `pending_review`, 복기 저장 시에만 `done`(복기 중 앱을 닫아도 다시 복기 가능, 홈 아래 「끝나지 않은 통화」 버튼). 복기 직후 피드 동기화. 1분 임시 받아쓰기 묶음을 녹음 순서대로(업로드와 무관). 기록용 받아쓰기는 분 단위 재시도 + 실패한 분만 임시 받아쓰기로 보충. 통화 종료 중복 방지, 연결 끊김 시 복기로 이어 가기, 화면 꺼짐 방지 재요청, 「다시 시도」 경합 방지. 내 말이 없는 통화는 진도 유지. 복기 AI가 준 실수 id 검사, 요청 크기 제한. 코치 메시지 최신 50개. 오류 응답 표준화(`server/errors.ts`, 내부 문구 비노출)와 화면용 `friendlyError`. 보안 헤더 2종. 테스트 25개. 기록: `docs/reviews/2026-11-full-code-review.md`, 실기기 QC: `docs/qc/2026-11-android-qc-checklist.html`.
 - **v2.8.1 (2026-10-19 KST)**: [피드 404] 피드 설정과 사용자 Gemini 키를 Firestore `feeds/{id}`에 암호화 백업, 새로 뜬 서버가 복원해 그록봇만으로 아침 강의 생성. `firestore.rules`에 feeds 규칙 추가(배포 필요).
