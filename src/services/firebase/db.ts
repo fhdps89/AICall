@@ -21,6 +21,7 @@ import {
   DEFAULT_STALE_SESSION_MS,
   isInterruptedSession,
 } from "../session/interruptedSession";
+import { kstDateStr } from "../usage/learningLog";
 
 export { isInterruptedSession };
 
@@ -653,11 +654,7 @@ export async function saveReviewTiming(
  * Return today's date formatted as YYYY-MM-DD in KST (UTC+9)
  */
 export function getKSTToday(): string {
-  const nowKST = new Date(Date.now() + 9 * 3600000);
-  const Y = nowKST.getUTCFullYear();
-  const M = String(nowKST.getUTCMonth() + 1).padStart(2, "0");
-  const D = String(nowKST.getUTCDate()).padStart(2, "0");
-  return `${Y}-${M}-${D}`;
+  return kstDateStr(Date.now());
 }
 
 /**
@@ -1356,39 +1353,6 @@ export async function saveUserSettings(
     }, { merge: true });
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `users/${userId}/settings/general`);
-  }
-}
-
-/**
- * Check if the user was absent for two consecutive days (어제·그제 KST 기준 통화 done 세션 없음)
- */
-export async function checkTwoDayAbsence(userId: string): Promise<boolean> {
-  try {
-    const nowKst = new Date(Date.now() + 9 * 3600000);
-    const yesterday = new Date(nowKst.getTime() - 24 * 3600000).toISOString().slice(0, 10);
-    const twoDaysAgo = new Date(nowKst.getTime() - 48 * 3600000).toISOString().slice(0, 10);
-
-    const sessionsCol = collection(db, "users", userId, "sessions");
-    const q = query(sessionsCol, orderBy("startedAt", "desc"), limit(20));
-    const snap = await getDocs(q);
-
-    const doneDates = new Set<string>();
-    for (const d of snap.docs) {
-      const data = d.data() as any;
-      if (data.status === "done" && typeof data.startedAt === "string") {
-        // extract KST date
-        const sessKst = new Date(new Date(data.startedAt).getTime() + 9 * 3600000).toISOString().slice(0, 10);
-        doneDates.add(sessKst);
-      }
-    }
-
-    // No finished call at all yet (first days of use): nothing to nudge about.
-    if (doneDates.size === 0) return false;
-    // Two consecutive days absent: neither yesterday nor twoDaysAgo had a completed call
-    return !doneDates.has(yesterday) && !doneDates.has(twoDaysAgo);
-  } catch (error) {
-    console.warn("[checkTwoDayAbsence] check failed:", error);
-    return false;
   }
 }
 

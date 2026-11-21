@@ -33,7 +33,7 @@
   - **제안 검사** (`src/data/planValidation.ts`, v2.8.0): 코치가 만든 변경은 카드로 보여 주기 전과 승인해 적용하기 전에 검사. 있는 목표·있는 과 번호·실제 날짜(YYYY-MM-DD)·요일별 목표 id 목록·하루 5~240분만 남기고 나머지는 버림. 남는 게 없으면 카드를 만들지 않음.
   - **승인·되돌리기** (v2.8.0): 승인하는 순간의 실제 값을 `before`로, 실제로 적용한 값을 `after`로 저장. 되돌리기는 그 변경이 바꾼 항목만 복원(그 사이 다른 트랙의 진도는 그대로). 변경 전에 시험일이 없었으면 시험일을 지움. 승인·되돌리기 뒤에는 홈의 목표 목록을 다시 불러옴.
 - **먼저 말 걸기 (2일 결석 배너 & 일요일 주간 리뷰)**:
-  - 2일 연속 결석 시 홈 상단에 "이틀째 쉬었어요. 오늘 수업만 해도 좋아요" 배너 노출.
+  - usage 일별 기록(KST) 기준, 오늘 포함 2일 이상 학습 기록 없음(오늘 학습 시 숨김, 최근 3개월(usage 문서 3개) 안에 학습 기록이 없으면 숨김(장기 휴식 사용자는 배너가 안 뜸)) 시 홈 상단에 "이틀째 쉬었어요. 오늘 수업만 해도 좋아요"(3일 이상은 "N일째 쉬었어요. 오늘 수업만 해도 좋아요") 배너 노출.
   - 일요일 아침 강의 coachNote를 주간 리뷰 톤으로 자동 편성.
 
 ---
@@ -147,7 +147,7 @@
 ---
 
 ## 4-1. v2.9.0 아키텍처 변경 요약 (2026-11-10 KST)
-- **통화 세션 상태**: `in-progress` → (통화 종료) `pending_review` → (복기 저장) `done`. 「보관만 하기」만 복기 없이 `done`(`finalizeCallSession(..., { archive: true })`). 2일 결석 판단·코치의 최근 세션은 `done`만 셈. 끝낸 통화가 하나도 없으면 결석 띠를 띄우지 않음.
+- **통화 세션 상태**: `in-progress` → (통화 종료) `pending_review` → (복기 저장) `done`. 「보관만 하기」만 복기 없이 `done`(`finalizeCallSession(..., { archive: true })`). 코치의 최근 세션은 `done`만 셈.
 - **끝나지 않은 통화 다시 열기**: 앱을 열 때의 창 외에, `App.tsx`가 홈 아래에 버튼을 띄움. 복기 실패·완료 뒤 `getUnfinishedSessions`로 목록 갱신.
 - **복기 파이프라인**(`reviewPipeline.ts` + 순수 규칙 `reviewRules.ts`): ① 분마다 받아쓰기(실패 시 1회 재시도) → ② 실패한 분은 같은 `minuteIndex`의 `sttPartial`로 보충(`mergeMinuteTranscripts`) → ③ 녹음이 없으면 `sttPartial` 전체 → ④ 그것도 없으면 Live 대화 로그의 학습자 발화 → ⑤ 아무것도 없으면 `sourceStt: "none"`: AI 복기를 부르지 않고 안내 문구만 저장, 진도 유지(`review.lessonAdvanced = false`). `usedCorrectly`/`repeatedMistakes`는 보낸 목록의 id만 반영(`keepKnownIds`). 기존 실수 목록은 4개 항목만, 종류별 최신 150개까지 전송.
 - **피드 동기화 시점**: 홈 화면 로드 + 복기 완료 직후(`App.tsx` → `syncFeed`).
@@ -159,6 +159,10 @@
 ---
 
 ## 5. 버전 히스토리
+- **v2.10.0 이후 수정(미배포) — QA 재확인 20행: 연속 학습일·휴식 배너를 같은 일별 사용 기록(KST)에서 파생 (2026-11-21 KST)**:
+  - **배경**: 홈 화면에서 오늘 10초 이상 통화 직후 또는 복기를 닫고 돌아올 때 「연속 학습 N일」과 「이틀째 쉬었어요」 배너가 동시에 표시되거나 배너가 사라졌다가 다시 나타나는 불일치가 보고됨.
+  - **원인 및 수정**: 휴식 배너는 `checkTwoDayAbsence`(`users/{uid}/sessions` 최근 20개 `done` 세션의 `startedAt`, 오늘 제외)를, 연속 학습일은 `getUsageMonths` + `summarizeLearningLog`(`usage/{yyyy-mm}.days.{DD}`, 오늘 포함)를 각자 조회해 기준과 로딩 타이밍이 달랐음. `src/services/usage/learningLog.ts`에 `kstDateStr`·`REST_BANNER_MIN_DAYS`·`deriveHomeLearningStatus`·`restBannerTitle`을 추가하고 `summarizeLearningLog`에 `lastActiveDate`와 `restDays`를 계산해 두 표시를 같은 요약(`LearningLogSummary`)에서 파생하도록 통일. `src/services/firebase/db.ts`의 `getKSTToday`는 `kstDateStr(Date.now())`에 위임하고 `checkTwoDayAbsence`를 삭제. `src/services/usage/usageService.ts`는 `recordUsage` 성공 직후 `USAGE_UPDATED_EVENT`(`"aicall:usage-updated"`)를 디스패치하고, `src/ui/home/HomeScreen.tsx`는 `learningSummary` 단일 상태·`learningReqRef` 요청 가드·`learningInFlightRef` 진행 중 조회 재사용·마운트/`visibilitychange`/`USAGE_UPDATED_EVENT` 재조회로 교체.
+  - **방어 조치·검증**: `package.json` 버전 무변경. `tests/learningLog.test.ts`에 `kstDateStr`, `restDays`(당일/어제/이틀 이상/장기 휴식/빈 기록/월·연말·윤년 경계/10초 미만 통화/미래 날짜 무시), `deriveHomeLearningStatus(null)`, `restBannerTitle`, 10일 1,024조합 전수 속성 단언(`streakDays`·`restDays` 비공존) 추가. `npm test`·`npm run lint`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 통과.
 - **v2.10.0 이후 수정(미배포) — QA 2·21·23·5행: 복구 복기 조각 다운로드를 서버 중계로(CORS 우회)·복구 통화 사용량 집계·로컬 조각 합산·모달 접근성 (2026-11-21 KST, 브랜치 `fix/qa2-b`)**:
   - **배경 및 원인**: 복구 복기 시 `reviewPipeline.ts`가 `firebasestorage.googleapis.com`을 브라우저 `fetch`로 직접 호출해 버킷 CORS 설정 없이 실패·로그가 폭주했고(2행), 끊긴 통화는 `handleHangUp`을 거치지 않아 통화 횟수·분이 누락됐으며(21행), 끝나지 않은 통화 모달이 로컬 대기 조각을 합산하지 않았고(23행, 실제 0개 표시 원인은 `[미확인]`), 닫기(`X`) 버튼 `aria-label` 및 헤더 오른쪽 여백이 빠져 있었음(5행).
   - **수정**: `server/storageRelay.ts`·`server/errors.ts`·`server.ts`(`GET /api/recordings/storage-file`, 15초·10MB 스트림 누적 상한 `readStreamWithLimit`·고정 호스트/버킷/`users/{uid}/` 검증·로그 비노출)와 순수 모듈 `src/services/review/chunkSource.ts`(`storageRelay`·`serverFile`·`local` 계획, `403` 1회 또는 연속 3회 실패 시 조기 중단 및 요약 경고 1회)를 도입하고 `reviewPipeline.ts`의 브라우저 직접 `fetch`를 제거(`App.tsx`에서 `localChunks` 전달). `src/services/session/recoveredUsage.ts`(`recoveredCallUsage`, `createRecoveredUsageRecorder` 동시 실행 경합 방지)·`db.ts`(`usageRecordedAt`, `markSessionUsageRecorded`)·`App.tsx`로 오늘(KST) 복구 통화 사용량을 복기 시작 시 1회 기록. `unfinishedSessionSummary.ts`(`countSessionChunks`)·`UnfinishedSessionModal.tsx`(로컬 조각 합산, 헤더 `pr-8`) 및 7개 모달 닫기 버튼 `aria-label="닫기"` 적용, `docs/troubleshooting/firebase-storage-setup.md` `(d)`절 `[선택]` 정리.
