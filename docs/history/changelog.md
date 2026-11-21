@@ -40,6 +40,63 @@
 
 ---
 
+### [2026-11-21 KST] P0-4 복기에서 오늘 강의로 연결 (v2.10.0 묶음)
+- **브랜치**: `fix/p0-4-review-to-lecture` · **모델**: 계획 Claude CLI Opus 5.5 high · 구현 agy Gemini 4 Hydrogen high
+- **배경**: `ReviewModal`에 선택 콜백 `onOpenPodcast`와 하단 버튼(`🎧 아침 복습 오디오 듣기`)이 있었으나 `App.tsx`에서 콜백을 연결하지 않아 버튼이 보이지 않았음. 통화 복기를 마친 뒤 홈의 오늘 강의 카드로 바로 이어지고, 강의가 이미 준비된 경우에만 강의 창을 열며 준비 전에는 생성 요청을 자동으로 시작하지 않아야 했음.
+- **원인과 수정**:
+  - `src/App.tsx`: `HomeFocus = "lecture" | null`과 `pendingHomeFocus` 상태를 추가해 `ReviewModal`에 `onOpenPodcast={() => setPendingHomeFocus("lecture")}`를 전달하고(기존 `onClose`의 `homeRefreshKey` 증가·미완료 목록 갱신 유지), `HomeScreen`에 `focus={pendingHomeFocus}`와 `onFocusHandled={() => setPendingHomeFocus(null)}` 전달.
+  - `src/ui/home/HomeScreen.tsx`: `focus`·`onFocusHandled` prop을 받아 `focus === "lecture"`일 때 `MorningLectureCard`에 `autoOpen`과 `onAutoOpenHandled` 전달. 첫 `refresh()` 완료 후 `onAutoOpenHandled`가 불릴 때 `lectureCardRef`로 스크롤하고 `onFocusHandled`로 초점 신호를 초기화.
+  - `src/ui/lecture/MorningLectureCard.tsx`: `autoOpen`·`onAutoOpenHandled` prop 추가. 첫 `refresh()` 결과에서 `status === "ready"`이고 `audioUrl`이 있을 때만 `setOpen(true)`로 `LectureModal`을 열고, 준비되지 않았으면 열지 않음. `onAutoOpenHandled`는 ref 가드로 마운트당 1회만 호출하며 `startLecture`/`create()`는 호출하지 않음.
+  - `src/ui/review/ReviewModal.tsx`: 하단 왼쪽 버튼 라벨을 `오늘 강의 보기`로 변경하고 기존 `onClose()` → `onOpenPodcast()` 순서 유지.
+  - `tests/reviewLectureLink.test.ts`(신규) 및 `PROJECT_CONTEXT.md`(§4-3, §4-10, §5) 갱신.
+- **방어 조치**: `ReviewModal`과 `App.tsx`에서 `startLecture`를 호출하지 않음을 `tests/reviewLectureLink.test.ts`로 검사하고, `autoOpenHandledRef`·`firstRefreshDoneRef` 및 `onFocusHandled` 초기화로 StrictMode 이중 마운트, 퀴즈 모달 열기/닫기, 이후 홈 재마운트에서 스크롤·자동 열기가 재실행되지 않도록 차단. 미준비 시에는 기존 「오늘 강의 만들기」 수동 버튼만 유지.
+- **검증**: `npm test` 26/26 통과, `npm run lint`·`npx tsc --noEmit`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 오류 없음.
+
+---
+
+### [2026-11-21 KST] P0-3 홈 「오늘 할 것」 루프 재배치 (v2.10.0 묶음)
+- **브랜치**: `fix/p0-3-home-loop` · **모델**: 계획 Claude CLI Opus 5.5 high · 구현 agy Gemini 4 Hydrogen high
+- **배경**: 홈 화면의 아침 강의 카드가 「더 보기」 접힘 영역 안에 숨어 있어 하루 학습 루프(수업 → 강의 → 복습 퀴즈)가 한눈에 이어지지 않았고, 일요일 주간 복기 카드에 바로 실행할 행동 버튼이 없었음. 또한 오늘 수업 카드와 4대 트랙 카드의 인라인 `<select>`가 선택 즉시 Firestore 진도를 저장해 모바일 스크롤·터치 중 실수로 진도가 바뀔 위험이 있었고, 일반 사용자 헤더에도 계정 이메일이 노출되고 있었음.
+- **원인과 수정**:
+  - `src/ui/home/HomeScreen.tsx`: `<MorningLectureCard>`를 `showMore` 접힘 블록 밖으로 꺼내 오늘 수업 카드와 복습·퀴즈 카드 사이에 배치하고 `lectureCardRef`로 감싸 상시 마운트 유지. 「더 보기」 라벨을 `더 보기 · 주간 루틴 · 트랙 바꾸기 · 코치 소개`로 갱신.
+  - 일요일/주간 복기 카드(`isPlanReviewDay && !overrideGoalId`)에 「오늘 퀴즈」(복습 대상이 0개이면 비활성), 「오늘 강의」(`lectureCardRef` 스크롤), 「트랙 골라 통화」(`showMore` 펼친 뒤 `goalsSectionRef` 스크롤) 버튼 3개 추가.
+  - 헤더 이메일(`user.email`)을 `devMode`일 때만 표시하도록 제한.
+  - `src/ui/home/LessonChangeSheet.tsx`(신규): 모바일 하단/중앙 확인 시트(「진도 바꾸기」 / 「확인」 / 「취소」). `HomeScreen.tsx`의 오늘 수업 카드와 트랙 카드 인라인 `<select>` 두 곳을 「진도 바꾸기」 버튼으로 교체해, 시트에서 「확인」을 누를 때만 `handleLessonChange` 호출.
+  - 문서: `README.md` 1단계 홈 항목과 `PROJECT_CONTEXT.md`(홈 UI·§5 히스토리) 동기화.
+- **방어 조치**: `LessonChangeSheet`에서 현재 과(`currentIndex`)와 같은 과가 선택됐거나 저장 중(`saving`)일 때는 「확인」 버튼을 비활성화하고, 「취소」 또는 배경 클릭 시 `onConfirm`을 호출하지 않아 의도치 않은 진도 변경을 차단. 2일 결석 배너와 `App.tsx`의 미완료 통화 버튼은 기존 동작 그대로 유지.
+- **검증**: `npm test` 25/25 통과, `npm run lint`·`npx tsc --noEmit`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 오류 없음.
+
+---
+
+### [2026-11-21 KST] P0-2 복기 화면 정리와 이번 통화 성과 표시 (v2.10.0 묶음) (GitHub 브랜치 `fix/p0-2-review-outcomes`, 기획 Claude CLI Opus 5.5 high · 구현 agy Gemini 4 Hydrogen high)
+- **배경**: 통화 후 복기 모달(`ReviewModal`)에서 이번 통화로 인한 학습 성과(맞게 써서 졸업한 표현, 다시 복습으로 돌아간 표현, 다음 수업 진행 여부)가 드러나지 않고, 기록된 말이 없는 빈 통화에서도 "훌륭합니다!"·"오늘은 저장할 실수가 없어요." 및 아침 강의·퀴즈 할 일 목록이 모순되게 노출되거나, 레벨 미산출 시 임의의 `IH` 배지·영문 `sourceStt`·`mistakes 컬렉션 자동 저장됨·진행 문구 내 모델명 등 내부 구현 용어가 그대로 노출되는 문제가 있었음. 복기 채점·`keepKnownIds`·세션 상태 전이(`pending_review` → `done`)와 P0-1 계측 동작은 유지한 채 화면 표시와 문구만 정리함.
+- **원인과 수정**:
+  - `src/services/review/reviewView.ts`(신규): Firebase 값 import 없는 순수 모듈(`import type`만 사용)로 `isEmptyReview`, `sourceSttLabel`, `levelBadge`, `outcomeItems`를 추가.
+  - `src/services/firebase/db.ts`: `SessionReviewData`에 선택 필드 `usedCorrectlyItems?`, `repeatedItems?`(`{ id, myPhrase, naturalPhrase }[]`)를 추가(마이그레이션 없음).
+  - `src/services/review/reviewPipeline.ts`: B-5 `keepKnownIds` 적용 직후 `outcomeItems`로 `review.usedCorrectlyItems`·`review.repeatedItems`를 채워 `saveSessionReview` 전에 반영(리스트 할당 전 실패 시 미설정 유지). 진행 안내 문구 2곳(`1/3 녹음 조각 병합 및 최종 받아쓰기 진행 중...`, `2/3 AI 튜터 복기 리포트 생성 중...`)에서만 모델명을 제거하고, 주석·`engine` 필드·로그는 유지.
+  - `src/ui/review/ReviewModal.tsx`: `reviewView` 도우미와 `useDevMode()`를 연결해 레벨 배지(미산출/`-`/빈 값은 `—`), 「이번 통화 성과」 블록(해당 항목이 하나라도 있을 때만 표시, 예전 세션은 숨김), 빈 통화 시 실수 영역(`기록된 말이 없어 분석하지 않았어요`)·할 일 영역(`같은 과로 다시 걸어 주세요`, 아침 강의/퀴즈 2항목 숨김) 분기, 한국어 출처 라벨(`sourceSttLabel`, 개발자 모드에서만 원 코드 병기), `mistakes 컬렉션 자동 저장됨` 개발자 모드 전용화, 전문 보기 버튼 문구(`녹음 받아쓰기 전문 보기 (출처: …)`)를 적용.
+  - `README.md` · `PROJECT_CONTEXT.md`: 1단계 통화 후 복기 표 및 B-4·§5 히스토리에 P0-2 변경 반영(헤더 버전·날짜 `v2.9.0` 유지).
+- **방어 조치 (Safeguards)**:
+  - `tests/reviewView.test.ts`(신규): `sourceSttLabel` 4종 구분 및 기본값, `isEmptyReview` 판별(`none` 또는 `lessonAdvanced === false`), `levelBadge` 미정/`-`→`none`·`AL`→`good`, `outcomeItems` 미존재 ID 제거 및 순서 보존을 검증.
+  - `tests/reviewRules.test.ts`, `ReviewFlowScreen.tsx`, `server.ts`, `package.json` 버전 및 P0-1 소요 시간 계측 로직은 변경하지 않음.
+- **검증**: `npm test` 32/32 통과, `npm run lint`·`npx tsc --noEmit`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 오류 없음. 성과 영역은 졸업·재복습 항목이 하나라도 있을 때만 열리며, `lessonAdvanced`만으로는 열리지 않는다.
+
+---
+
+### [2026-11-21 KST] P0-1 복기 단계별 소요 시간 계측 (v2.10.0 묶음) (GitHub 브랜치 `fix/p0-1-review-timing`, 기획 Claude CLI Opus 5.5 high · 구현 agy Gemini 4 Hydrogen high)
+- **배경**: 통화 후 복기 파이프라인(`runPostCallReview`)에서 어느 단계(녹음 조각 수집·최종 받아쓰기·폴백·AI 복기·저장)가 얼마나 걸리는지 세션 단위로 관측할 수 있도록 계측을 추가함. 복기 동작·받아쓰기·세션 상태 전이(`pending_review` → `done`)는 변경하지 않는 순수 계측 PR.
+- **원인과 수정**:
+  - `src/services/review/reviewTiming.ts`(신규): Firebase 값 import 없는 순수 모듈로 `ReviewStep`, `ReviewTiming`, `createStepTimer(now?)` 추가. 테스트에서 가짜 시계를 주입할 수 있도록 `now` 기본값만 `() => Date.now()`로 두고, 종료되지 않은 단계는 `snapshot()`에서 제외하며, 동일 단계의 누적 합계로 `totalMs`를 계산.
+  - `src/services/firebase/db.ts`: `SessionData`에 선택 필드 `reviewTiming?: ReviewTiming` 추가. `saveSessionReview` 옆에 `saveReviewTiming(userId, sessionId, timing)` 추가(`reviewTiming`과 `updatedAt`만 갱신하고 `status`는 유지, 기존 오류 도우미 패턴 `handleFirestoreError` 사용).
+  - `src/services/review/reviewPipeline.ts`: `ReviewPipelineResult`에 `timing?: ReviewTiming` 추가. `runPostCallReview`의 5단계(`collectChunks`, `transcribe`, 실제 실행 시 `fallback`, `review`, `save`), 1분 묶음 수(`minutes`), 재시도 포함 전사 요청 횟수(`transcribeRequests`), 결과(`ok` / `empty` / `failed`), 확인된 `sourceStt`를 계측. 전체 본문을 `try/finally`로 감싸 성공·빈 통화·예외 전파(`failed`) 모든 경로에서 `saveReviewTiming`을 호출(저장 실패 시 `console.warn` 후 삼켜 복기 결과/예외 흐름에 영향 없음).
+  - `src/ui/review/ReviewModal.tsx` · `src/App.tsx`: `ReviewModalProps` 및 `ActiveReviewState`에 `timing?: ReviewTiming` 전달. `useDevMode()`가 켜져 있고 `timing`이 있을 때만 복기 모달 상단에 `복기 소요: 받아쓰기 n초 · AI n초`(없는 단계 생략) 한 줄을 표시.
+- **방어 조치 (Safeguards)**:
+  - `tests/reviewTiming.test.ts`(신규): 가짜 시계 기준 단계별 ms 및 `totalMs` 일치, `start` 후 `end` 없는 단계 제외, 동일 단계 2회 누적 합산 검증.
+  - 계측 저장 실패가 복기 완료·실패 전파나 세션 상태(`pending_review` → `done`)를 방해하지 않도록 `finally`에서 `saveReviewTiming`을 기다리지 않고 `.catch`로만 경고한다(오프라인 `updateDoc` 대기 방지). `package.json` 버전 및 `server.ts`·기존 테스트는 변경하지 않음.
+- **검증**: `npm test` 28/28 통과, `npx tsc --noEmit` 및 `npx tsc -p tsconfig.server.json --noEmit` 오류 없음.
+
+---
+
 ### [2026-11-10 KST] v2.9.0 — 전체 코드 리뷰 2차 반영 (GitHub 브랜치 `claude/full-review-2026-11`, Claude)
 - **배경**: 2026-11-10에 `main`(`24901cb`, v2.8.1) 전체 약 14,100줄을 다시 리뷰. 빌드·타입 검사·테스트 18개는 통과했지만, 약한 인터넷·앱을 중간에 닫음·버튼 두 번 누름 같은 실제 사용 상황에서 학습 기록이 빠지는 문제 9개(높음), 8개(중간), 6개(낮음)를 찾음. 전체 목록과 근거: [`docs/reviews/2026-11-full-code-review.md`](../reviews/2026-11-full-code-review.md).
 - **문제 원인과 적용된 수정 내역 — 높음**

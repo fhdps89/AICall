@@ -25,6 +25,7 @@ import {
 } from "./services/firebase/db";
 import { retryPendingUploads } from "./services/recording/chunkIndexedDb";
 import { runPostCallReview } from "./services/review/reviewPipeline";
+import type { ReviewTiming } from "./services/review/reviewTiming";
 import { DEFAULT_GOALS } from "./data/defaultGoals";
 import {
   DEFAULT_PROMPT_PLACEHOLDERS,
@@ -53,9 +54,12 @@ function isPartialTranscribeEnabled(): boolean {
   }
 }
 
+type HomeFocus = "lecture" | null;
+
 interface ActiveReviewState {
   review: SessionReviewData;
   sttFinal?: SttFinalData;
+  timing?: ReviewTiming;
   goalId: string;
   lessonIndex: number;
   goalTitle: string;
@@ -91,6 +95,7 @@ export const App: React.FC = () => {
     retry: () => void;
   } | null>(null);
   const [homeRefreshKey, setHomeRefreshKey] = useState<number>(0);
+  const [pendingHomeFocus, setPendingHomeFocus] = useState<HomeFocus>(null);
 
   // Placeholders for prompts
   const [placeholders, setPlaceholders] = useState<PromptPlaceholders>(DEFAULT_PROMPT_PLACEHOLDERS);
@@ -312,6 +317,7 @@ export const App: React.FC = () => {
         setActiveReviewData({
           review: result.review,
           sttFinal: result.sttFinal,
+          ...(result.timing ? { timing: result.timing } : {}),
           goalId: endedGoal.id,
           lessonIndex: endedLesson,
           goalTitle: endedGoal.title,
@@ -357,6 +363,7 @@ export const App: React.FC = () => {
       setActiveReviewData({
         review: session.review,
         sttFinal: session.sttFinal,
+        ...(session.reviewTiming ? { timing: session.reviewTiming } : {}),
         goalId: matchedGoal.id,
         lessonIndex: session.lessonIndex,
         goalTitle: matchedGoal.title,
@@ -388,6 +395,7 @@ export const App: React.FC = () => {
         setActiveReviewData({
           review: result.review,
           sttFinal: result.sttFinal,
+          ...(result.timing ? { timing: result.timing } : {}),
           goalId: matchedGoal.id,
           lessonIndex: session.lessonIndex,
           goalTitle: matchedGoal.title,
@@ -469,6 +477,8 @@ export const App: React.FC = () => {
         user={user}
         goals={goals}
         placeholders={placeholders}
+        focus={pendingHomeFocus}
+        onFocusHandled={() => setPendingHomeFocus(null)}
         onUpdateGoalProgress={handleUpdateGoalProgress}
         onGoalsChanged={refreshGoals}
         onStartCall={handleStartCall}
@@ -511,6 +521,8 @@ export const App: React.FC = () => {
           lessonTitle={activeReviewData.lessonTitle}
           review={activeReviewData.review}
           sttFinal={activeReviewData.sttFinal}
+          timing={activeReviewData.timing}
+          onOpenPodcast={() => setPendingHomeFocus("lecture")}
           onClose={() => {
             setActiveReviewData(null);
             setHomeRefreshKey((prev) => prev + 1);

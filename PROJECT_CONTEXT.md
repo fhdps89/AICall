@@ -77,8 +77,11 @@
    - **다시 복기해도 안전** (v2.8.0): 같은 통화를 다시 복기하면 이전 실행이 저장한 실수를 지우고 새 결과로 바꿈(중복 없음). 진도(`nextLessonIndex`)는 앞으로만 움직여서, 오래된 미완료 통화를 나중에 복기해도 진도가 뒤로 가지 않음. 복기가 끝나면 홈의 목표 목록을 다시 불러와 "오늘 수업"이 바로 다음 과로 바뀜.
    - **Keep 양식 복사**: `[내가 한 말] -> [자연스러운 표현]` 줄 단위 일괄 복사.
    - **미완료 통화 복기 연결**: 지시서 3의 "끝나지 않은 통화" 모달에서 "복기 시작" 클릭 시 즉시 복기 파이프라인 가동.
+   - **오늘 강의 연결 (`ReviewModal.tsx`, `App.tsx`, `HomeScreen.tsx`)**: 복기 모달 하단 왼쪽 버튼 「오늘 강의 보기」는 복기를 닫고 홈 강의 카드(`MorningLectureCard`)로 초점(`pendingHomeFocus="lecture"`)을 옮기며, 오늘 강의가 이미 `ready`(오디오 포함)일 때만 강의 창을 연다(미준비 시 생성 시작 없이 홈 강의 카드로만 스크롤).
    - **mistakes 컬렉션 자동 저장**: stage 1, status reviewing, source call 메타데이터 저장.
    - **통화 마지막 말 포함** (v2.8.0): 통화 종료 시 녹음기가 마지막(10초 미만) 조각이 다 만들어질 때까지 기다린 뒤(최대 3초) 복기에 넘김.
+   - **단계별 소요 시간 계측 (`reviewTiming.ts`, P0-1)**: `sessions` 문서에 `reviewTiming`(단계별 소요 ms·총합·1분 묶음 수·전사 요청 수·결과 `ok`/`empty`/`failed`·`sourceStt`)을 저장하며, 개발자 모드에서 `ReviewModal` 상단에 한 줄 요약을 표시함.
+   - **이번 통화 성과 및 빈 통화 문구 정리 (`reviewView.ts`, `ReviewModal.tsx`, P0-2)**: `reviewPipeline.ts`가 `usedCorrectlyItems`·`repeatedItems`를 채워 `ReviewModal`의 「이번 통화 성과」 섹션(맞게 써서 졸업·다시 복습·다음 수업 진행)을 표시함(예전 세션은 숨김). 빈 통화(`sourceStt: "none"` 또는 `lessonAdvanced: false`)에서는 모순되는 칭찬·할 일 문구 대신 재통화 안내를 표시하고, 레벨 미산출(`-`/빈 값)은 `—`로 표기하며, 출처 라벨 한국어화 및 개발자 전용 문구 분리를 적용함(`README.md` 1단계 복기 표도 함께 갱신).
 4. **B-3 통화 중 녹음 & 끊김 대비 이중 안전망 (`chunkIndexedDb.ts`, `chunkRecorder.ts`, `NewCallScreen.tsx`)**:
    - **10초 마이크 청크 녹음**: `MediaRecorder`로 10초 조각 생성 -> IndexedDB(`OneCallRecordingsDB`)에 선저장 -> Cloud Storage 즉시 업로드 -> 성공 시 IndexedDB 삭제.
    - **연결 독립성 보장**: Live 연결이 끊기거나(GoAway, 소켓 재연결, 프록시 전환) 불안정해도 마이크 녹음은 중단 없이 독립 백그라운드 구동.
@@ -114,7 +117,9 @@
    - 최근 취약점은 OPIc·필리·여행 3개를 따로 저장(`opicWeakPoints`, `phillyWeakPoints`, `travelWeakPoints`, v2.8.0 전에는 저장되지 않았음). 필리와 여행 원문 프롬프트가 같은 자리 표시(`[복기 프롬프트 결과 3줄 또는 "none yet"]`)를 써서, `hydrateTutorPrompt(prompt, placeholders, goalId)`가 트랙에 맞는 값을 넣음(예전엔 여행에도 필리 값이 들어갔음).
 9. **첫 실행 진도 설정 & 오늘 수업 카드 UI (`src/ui/onboarding/`, `src/ui/home/`)**:
    - 첫 실행 시 OPIc 10/10 1과, 10/11 2과, 10/12 3과 히스토리를 반영한 진도 설정 모달 제공.
-   - 홈 화면 요일별 루틴 뱃지, 오늘 요일에 해당하는 수업 카드 및 즉시 통화 시작 버튼.
+   - 홈 화면 「오늘 할 것」 메인 루프: 오늘 수업 카드 → 아침 강의 카드(`MorningLectureCard`) → 복습 & 퀴즈 카드 순서로 상시 노출(`showMore` 접힘 영역에서 아침 강의 분리). 헤더 이메일은 개발자 모드(`devMode`)일 때만 표시.
+   - 일요일(주간 복기일) 카드에는 「오늘 퀴즈」(복습 대상 0개 시 비활성)·「오늘 강의」(강의 카드로 스크롤)·「트랙 골라 통화」(더 보기 펼친 뒤 트랙 섹션으로 스크롤) 3개 액션 제공.
+   - 오늘 수업 카드와 4대 트랙 카드의 인라인 진도 `<select>`를 「진도 바꾸기」 버튼 + 확인 시트(`LessonChangeSheet.tsx`, 「확인」 누르기 전 미저장·동일 과 선택 시 비활성)로 교체. (`README.md` 1단계 홈 항목에도 반영)
 
 ---
 10. **B-7 아침 강의 · B-8 그록봇 피드 (`server/lecture.ts`, `server/feed.ts`, `src/ui/lecture/`)**:
@@ -122,6 +127,7 @@
    - 그록봇은 `/feed/{비밀키}/today(.json)`만 열면 됨. 앱이 홈 화면을 열 때마다 비밀키·후보 실수를 서버에 다시 보냄(`syncFeed`). 강의가 없으면 피드 요청 때 생성 시작, 실패한 강의는 30분에 한 번만 다시 시도.
    - **한계**: 강의 음성·피드 설정은 서버의 `.data/` 폴더에 저장되어, Cloud Run 서버가 다시 켜지면 지워질 수 있음.
    - **만들던 중 서버가 다시 켜진 강의** (v2.8.0): 서버 기록이 "생성 중"인데 실제 작업이 없으면 `failed`/`INTERRUPTED`로 알려 줌. 서버 기록 자체가 지워졌으면 앱이 Firestore의 "생성 중"을 같은 상태로 바꿈. 홈 카드는 "서버가 다시 시작되어 만들던 강의가 멈췄어요"와 **오늘 강의 만들기** 버튼을 보여 주고, 그록봇 피드는 30분 기다리지 않고 바로 다시 만듦.
+   - **복기에서 오늘 강의로 연결** (P0-4): 복기 모달 「오늘 강의 보기」는 복기를 닫고 홈 강의 카드로 이동해 첫 `refresh()` 완료 후 스크롤하며, 이미 `ready`(오디오 포함)인 경우에만 `LectureModal`을 연다. 준비 전이면 `startLecture`를 부르지 않고 카드의 「오늘 강의 만들기」 버튼만 노출된 상태로 둔다.
 11. **B-10 Keep 가져오기 · 사용량 · 1-F 받아쓰기 품질 시험**:
    - Keep "English mistake log" 붙여넣기 → `gemini-3.8-flash`로 [내가 한 말/자연스러운 표현/이유] 미리보기 → 저장(1일 단계부터).
    - 통화 분·받아쓰기 분·토큰·TTS 글자 수 기록, 설정에 이번 달 예상 비용(단가표 `models.ts` `PRICING_RATES`, 기획 v4 단가와 재확인 필요).
@@ -161,6 +167,10 @@
   - **P0-5**: 통화 화면 모바일 레이아웃 고정(`NewCallScreen.tsx` `supports-[height:100dvh]:h-dvh`·내부 스크롤·`block: "end"`, `index.html` `viewport-fit=cover`, `src/index.css` `.pt-safe`/`.pb-safe`/`.bottom-safe`, `App.tsx` 미완료 통화 버튼 safe-area 적용) 및 제어 버튼 라벨 「끝내기」→「답변 끝」 통일(「통화 종료」와 혼동 방지).
   - **P0-6**: 핀치 줌 허용(`index.html` `maximum-scale=1.0`·`user-scalable=no` 제거), 복기·강의·코치 텍스트 선택/복사 허용(`index.html` `body` 및 `CoachModal.tsx` `select-none` 제거, `NewCallScreen.tsx`만 `select-none` 유지), PWA 스플래시·오버스크롤 색상 `#0F141C` 통일(`index.html`, `src/index.css`, `public/manifest.json` 및 미사용 `--her-*`/orb CSS 정리), `tests/mobileShell.test.ts` 검증 보강.
 - **P0-5 (v2.10.0 묶음, 2026-11-21 KST)**: 통화 화면 모바일 레이아웃 고정(`NewCallScreen.tsx` `supports-[height:100dvh]:h-dvh`·내부 스크롤·`block: "end"`, `index.html` `viewport-fit=cover`, `src/index.css` `.pt-safe`/`.pb-safe`/`.bottom-safe`, `App.tsx` 미완료 통화 버튼 safe-area 적용) 및 제어 버튼 라벨 「끝내기」→「답변 끝」 통일(「통화 종료」와 혼동 방지).
+- **P0-4 (v2.10.0 묶음, 2026-11-21 KST)**: 복기 모달에서 오늘 강의로 연결(`ReviewModal.tsx`, `App.tsx`, `HomeScreen.tsx`, `MorningLectureCard.tsx`). 하단 「오늘 강의 보기」 버튼으로 복기를 닫고 홈 강의 카드로 스크롤하며, 첫 `refresh()` 결과가 이미 `ready`(오디오 포함)일 때만 `LectureModal`을 자동 열기(미준비 시 생성 시작 안 함, `pendingHomeFocus` 1회 처리 후 초기화). `tests/reviewLectureLink.test.ts` 추가.
+- **P0-3 (v2.10.0 묶음, 2026-11-21 KST)**: 홈 「오늘 할 것」 루프 재배치(`HomeScreen.tsx`, `LessonChangeSheet.tsx`). 아침 강의 카드를 「더 보기」 밖 메인 흐름(오늘 수업 카드 뒤·복습 퀴즈 카드 앞)으로 꺼내고, 일요일 주간 복기 카드에 「오늘 퀴즈」·「오늘 강의」·「트랙 골라 통화」 액션 3종 추가, 오늘 수업/트랙 카드의 인라인 진도 `<select>`를 확인 시트(`LessonChangeSheet`)로 교체해 오작동 방지, 헤더 이메일은 개발자 모드에만 노출. `README.md` 1단계 홈 설명 함께 갱신.
+- **2026-11-21 KST (P0-2, v2.10.0 묶음 — 버전 표기 유지)**: `reviewView.ts` 추가 및 `SessionReviewData`에 `usedCorrectlyItems`·`repeatedItems` 저장, `ReviewModal`에 「이번 통화 성과」(졸업·재복습·진도 반영)·빈 통화 안내·`—` 레벨 배지·한국어 출처 라벨·개발자 모드 전용 문구 분리·진행 문구 정리 적용 (`README.md` 1단계 복기 항목 함께 갱신).
+- **2026-11-21 KST (P0-1, v2.10.0 묶음 — 버전 표기 유지)**: `reviewTiming.ts` 추가 및 `reviewPipeline.ts` 단계별(`collectChunks`·`transcribe`·`fallback`·`review`·`save`) 소요 시간 계측, `sessions.reviewTiming` 저장(`saveReviewTiming`), 개발자 모드 `ReviewModal` 한 줄 소요 시간 표시.
 - **v2.9.0 (2026-11-10 KST)**: [전체 코드 리뷰 2차 반영] 통화 종료는 `pending_review`, 복기 저장 시에만 `done`(복기 중 앱을 닫아도 다시 복기 가능, 홈 아래 「끝나지 않은 통화」 버튼). 복기 직후 피드 동기화. 1분 임시 받아쓰기 묶음을 녹음 순서대로(업로드와 무관). 기록용 받아쓰기는 분 단위 재시도 + 실패한 분만 임시 받아쓰기로 보충. 통화 종료 중복 방지, 연결 끊김 시 복기로 이어 가기, 화면 꺼짐 방지 재요청, 「다시 시도」 경합 방지. 내 말이 없는 통화는 진도 유지. 복기 AI가 준 실수 id 검사, 요청 크기 제한. 코치 메시지 최신 50개. 오류 응답 표준화(`server/errors.ts`, 내부 문구 비노출)와 화면용 `friendlyError`. 보안 헤더 2종. 테스트 25개. 기록: `docs/reviews/2026-11-full-code-review.md`, 실기기 QC: `docs/qc/2026-11-android-qc-checklist.html`.
 - **v2.8.1 (2026-10-19 KST)**: [피드 404] 피드 설정과 사용자 Gemini 키를 Firestore `feeds/{id}`에 암호화 백업, 새로 뜬 서버가 복원해 그록봇만으로 아침 강의 생성. `firestore.rules`에 feeds 규칙 추가(배포 필요).
 - **v2.8.0 (2026-10-19 KST)**: [전체 코드 리뷰 반영] 통화마다 새 Live 인스턴스(앞 통화 섞임 해결), 통화 마지막 말 복기 포함, "다시 시도" 시 녹음 번호 이어 가기, Firestore `ignoreUndefinedProperties`(코치 답장·업로드 실패 조각 기록 저장), 복기·코치 승인 뒤 목표 다시 불러오기, 코치 되돌리기는 바꾼 항목만, 오인식 신고 시 실수 삭제, 서버 재시작으로 멈춘 강의 복구, 다시 복기해도 중복·진도 후퇴 없음, 1분 받아쓰기 스위치 연결, 퀴즈 녹음 형식 자동 선택, 취약점 3개 저장(여행 치환 수정), 코치 제안 검사, 키 탐색 1분 캐시·부모 프로세스만, 상태 API 경로 비노출, 미완료 통화만 읽기, 안 쓰는 코드 삭제, 빌드 파일 나누기, 자동 테스트 17개. 상세: [`docs/reviews/2026-10-full-code-review.md`](./docs/reviews/2026-10-full-code-review.md).
