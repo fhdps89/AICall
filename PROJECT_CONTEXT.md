@@ -159,6 +159,7 @@
 ---
 
 ## 5. 버전 히스토리
+- **v2.10.0 이후 수정(미배포) (2026-11-21 KST) — 사용자 화면의 내부 용어 정리(개발자 모드로 이동)**: `UsagePanel.tsx` 하단 단가표·파일 경로(`src/config/models.ts`, `PRICING_RATES`), `SettingsModal.tsx` 헤더 부제(`모델 구성`→`학습 설정`)·녹음 보관함(`B-3`, `IndexedDB`, `Cloud Storage`, `1분 전사`→`1분 받아쓰기`, `로컬 대기`→`대기 중`, `connectionPath`, `chunk.path`) 및 코치 알림 설정(`B-9`, `weekly`·`absence2d`·`deadline4w`·`deadline2w`, `coachNote`), `GeminiKeyPanel.tsx`(`AI Studio Publish`/`Secrets`/`Firestore`), `HomeScreen.tsx`(`3단계`, `맞춤 Plan`), `QuizModal.tsx`(`VERBATIM`, `Graduated`), `ReviewModal.tsx`(`STT 오인식`→`음성 인식 오류` 및 품질 리포트 기록 안내), `UnfinishedSessionModal.tsx`(`1분 단위 전사`→`1분 단위 받아쓰기`)에서 내부·개발 용어를 사용자 친화적 한국어 문구로 바꾸거나 `useDevMode()` 조건 안으로 이동함. `tests/userFacingText.test.ts`로 `src/ui/**/*.tsx`의 `devMode` 조건 밖 `B-\d`, `src/config`, `PRICING_RATES`, `IndexedDB`, `Cloud Storage`, `Firestore`, `컬렉션` 비노출 검증(`models` 탭 303행 가드 영역 3건 `ALLOWLIST` 등록 및 `scanFile` 자체 테스트 포함) 추가.
 - **v2.10.0 (P0-1~P0-6 묶음, 2026-11-21 KST)**: 승인된 P0 실기기 QC 후속 개선 묶음 (`README.md` 헤더·v2.10.0 요약 및 `package.json`/`package-lock.json` `2.10.0` 반영).
   - **P0-1**: 복기 단계별 소요 시간 계측.
   - **P0-2**: 복기 화면 「이번 통화 성과」 표시와 빈 통화 문구 정리.

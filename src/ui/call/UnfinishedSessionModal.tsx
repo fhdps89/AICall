@@ -122,7 +122,7 @@ export const UnfinishedSessionModal: React.FC<UnfinishedSessionModalProps> = ({
               </span>
             </div>
             <div className="bg-slate-800/40 p-2 rounded-lg">
-              <span className="block text-[10px] text-slate-400">1분 단위 전사</span>
+              <span className="block text-[10px] text-slate-400">1분 단위 받아쓰기</span>
               <span className="text-xs font-bold text-purple-400 mt-0.5 block font-mono">
                 {partialSttCount}구간
               </span>

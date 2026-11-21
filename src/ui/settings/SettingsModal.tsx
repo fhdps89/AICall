@@ -136,7 +136,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
             <div>
               <h2 className="text-base font-bold text-white">환경 설정 & 프롬프트 변수</h2>
-              <p className="text-xs text-slate-400">튜터 프롬프트 슬롯 채우기 및 모델 구성</p>
+              <p className="text-xs text-slate-400">튜터 프롬프트 슬롯 채우기 및 학습 설정</p>
             </div>
           </div>
           <button
@@ -237,7 +237,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs">
                 <span className="font-bold flex items-center gap-1.5 mb-1">
                   <Sparkles className="w-4 h-4 text-amber-400" />
-                  B-9 AI 코치 먼저 말 걸기 설정:
+                  AI 코치 먼저 말 걸기 설정:
                 </span>
                 <p className="text-[11px] text-amber-300/80 leading-relaxed">
                   학습자가 꾸준히 통화를 이어갈 수 있도록 상황에 맞춰 홈 화면 배너나 주간 리뷰로 부드럽게 넛지를 제공합니다.
@@ -247,8 +247,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div className="space-y-3">
                 <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex items-center justify-between">
                   <div className="pr-4">
-                    <h4 className="text-xs font-bold text-white">일요일 주간 리뷰 알림 (`weekly`)</h4>
-                    <p className="text-[11px] text-slate-400 mt-0.5">일요일 아침 강의 coachNote를 한 주 성과와 격려 중심의 주간 리뷰 톤으로 생성합니다.</p>
+                    <h4 className="text-xs font-bold text-white">일요일 주간 리뷰 알림{devMode && " (weekly)"}</h4>
+                    <p className="text-[11px] text-slate-400 mt-0.5">일요일 아침 강의의 코치 한마디를 한 주 성과와 격려 중심의 주간 리뷰 톤으로 생성합니다.</p>
                   </div>
                   <input
                     type="checkbox"
@@ -260,7 +260,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                 <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex items-center justify-between">
                   <div className="pr-4">
-                    <h4 className="text-xs font-bold text-white">2일 연속 결석 알림 (`absence2d`)</h4>
+                    <h4 className="text-xs font-bold text-white">2일 연속 결석 알림{devMode && " (absence2d)"}</h4>
                     <p className="text-[11px] text-slate-400 mt-0.5">한국시간 기준 어제와 그제 통화가 없으면 홈 상단에 가벼운 복귀 응원 배너를 노출합니다.</p>
                   </div>
                   <input
@@ -273,7 +273,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                 <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex items-center justify-between">
                   <div className="pr-4">
-                    <h4 className="text-xs font-bold text-white">시험/목표 마감 4주 전 알림 (`deadline4w`)</h4>
+                    <h4 className="text-xs font-bold text-white">시험/목표 마감 4주 전 알림{devMode && " (deadline4w)"}</h4>
                     <p className="text-[11px] text-slate-400 mt-0.5">OPIc 등 설정된 시험일 4주 전부터 홈 상단에 D-day 배너를 표시합니다. (기본 OFF)</p>
                   </div>
                   <input
@@ -286,7 +286,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                 <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex items-center justify-between">
                   <div className="pr-4">
-                    <h4 className="text-xs font-bold text-white">시험/목표 마감 2주 전 알림 (`deadline2w`)</h4>
+                    <h4 className="text-xs font-bold text-white">시험/목표 마감 2주 전 알림{devMode && " (deadline2w)"}</h4>
                     <p className="text-[11px] text-slate-400 mt-0.5">시험일 2주 전부터 실전 모의고사 집중 배치를 제안하는 배너를 표시합니다. (기본 OFF)</p>
                   </div>
                   <input
@@ -482,19 +482,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2 text-slate-200 text-xs font-bold">
                     <FileAudio className="w-4 h-4 text-emerald-400" />
-                    <span>B-3 10초 분할 녹음 파일 (Cloud Storage & IndexedDB)</span>
+                    <span>통화 녹음 (10초 단위로 저장)</span>
                   </div>
                   <span className="text-[11px] text-slate-400 font-mono">
                     최근 {sessionsList.length}개 세션 보존됨
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-400 leading-relaxed">
-                  통화 중 마이크 소리가 10초 단위로 나뉘어 IndexedDB에 임시 기록된 후, 즉시 Cloud Storage로 업로드됩니다.
+                  통화 중 소리는 10초씩 나뉘어 이 기기에 먼저 저장된 뒤 서버에 올라가요.
                 </p>
+                {devMode && (
+                  <p className="text-[11px] text-slate-500 font-mono">
+                    개발자 참고: B-3 · IndexedDB 임시 기록 후 Cloud Storage 업로드
+                  </p>
+                )}
                 {pendingLocalChunks.length > 0 && (
                   <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center gap-2">
                     <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
-                    <span>업로드 대기 중인 로컬 조각: {pendingLocalChunks.length}개</span>
+                    <span>아직 올라가지 못한 녹음 조각: {pendingLocalChunks.length}개</span>
                   </div>
                 )}
               </div>
@@ -532,8 +537,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       {/* Chunks summary */}
                       <div className="text-[11px] text-slate-300 flex items-center justify-between">
                         <span>10초 녹음 조각: <strong>{sess.recordingChunks?.length || 0}개</strong></span>
-                        <span>1분 전사: <strong>{sess.sttPartial?.length || 0}건</strong></span>
-                        <span className="text-slate-400 font-mono text-[10px]">{sess.connectionPath || "direct"}</span>
+                        <span>1분 받아쓰기: <strong>{sess.sttPartial?.length || 0}건</strong></span>
+                        {devMode && (
+                          <span className="text-slate-400 font-mono text-[10px]">{sess.connectionPath || "direct"}</span>
+                        )}
                       </div>
 
                       {/* Chunks list details */}
@@ -546,11 +553,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                                 <span className="font-mono text-slate-300">
                                   #{chunk.index} ({chunk.durationSeconds || 10}초)
                                 </span>
-                                <span className="truncate max-w-[180px] text-slate-400 font-mono">
-                                  {chunk.path}
-                                </span>
+                                {devMode && (
+                                  <span className="truncate max-w-[180px] text-slate-400 font-mono">
+                                    {chunk.path}
+                                  </span>
+                                )}
                                 <span className="text-emerald-400 font-bold">
-                                  {chunk.uploaded ? "업로드 완료" : "로컬 대기"}
+                                  {chunk.uploaded ? "업로드 완료" : "대기 중"}
                                 </span>
                               </div>
                             ))}

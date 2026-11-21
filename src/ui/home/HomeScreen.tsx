@@ -284,7 +284,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
             <button
               onClick={() => setShowCoachModal(true)}
               className="p-2 px-3 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-amber-300 font-bold transition-all cursor-pointer flex items-center gap-1.5 text-xs shadow-sm shadow-amber-500/10 active:scale-95"
-              title="3단계 AI 전담 학습 코치"
+              title="AI 전담 학습 코치"
             >
               <Sparkles className="w-4 h-4 text-amber-400" />
               <span>AI 코치</span>
@@ -686,7 +686,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="text-xs font-bold text-amber-400 uppercase tracking-wider">3단계 AI 전담 코치</span>
+                <span className="text-xs font-bold text-amber-400 uppercase tracking-wider">AI 전담 코치</span>
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">스케줄 & 목표 자동화</span>
               </div>
               <h4 className="text-sm font-bold text-white mt-0.5">"다음 주 출장이야", "시험일 잡혔어"</h4>
@@ -707,7 +707,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
               <Calendar className="w-4 h-4 text-amber-400" />
-              <span>요일별 집중 루틴 {userPlan ? "(맞춤 Plan 반영)" : ""}</span>
+              <span>요일별 집중 루틴 {userPlan ? "(맞춤 계획 반영)" : ""}</span>
             </div>
             <span className="text-[11px] text-slate-400">
               오늘: <strong className="text-amber-400">{todayRoutine.dayName}</strong> ({isPlanReviewDay ? "주간 복기" : (todayGoal?.title || todayRoutine.title)})
