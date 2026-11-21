@@ -1,7 +1,7 @@
 # 📖 프로젝트 컨텍스트 및 히스토리 (Project Context)
 
 > **프로젝트**: One Call English (옛 이름: 「오늘도 한 통」) — AI 1:1 전화영어  
-> **현재 버전**: `v2.9.0` (공식 빌드 표기: `getBuildVersion()`이 `server.ts` 수정 시각으로 계산하는 `20261110-multilingual-HHmm`) | **최종 갱신**: 2026-11-10 (KST)  
+> **현재 버전**: `v2.10.0` (공식 빌드 표기: `getBuildVersion()`이 `server.ts` 수정 시각으로 계산하는 `20261110-multilingual-HHmm`) | **최종 갱신**: 2026-11-21 (KST)  
 > **기준 기획**: [`docs/plan/implementation_plan_v4.md`](./docs/plan/implementation_plan_v4.md) Part B · 진행 가이드 [`docs/plan/ai-studio-build-guide.md`](./docs/plan/ai-studio-build-guide.md) · 현재 앱과의 차이 [`docs/plan/gap-v2.1.0-vs-plan-v4.md`](./docs/plan/gap-v2.1.0-vs-plan-v4.md)  
 > **관리 규칙**: `README.md` 변경 시 본 문서의 아키텍처 및 히스토리를 함께 최신화하며, 모든 일시는 한국 표준시(KST)를 기준으로 합니다.
 
@@ -40,7 +40,7 @@
 
 ## 2. 프로젝트 비전 및 디자인
 - **정체성**: 4개 특화 트랙(OPIc AL, 한화 필리 조선소 비즈니스, 미국·호주 여행, Bluey 호주 리스닝)의 일자별 커리큘럼에 맞춰 AI와 실시간 음성 통화를 나누고, 통화 종료 후 즉시 정밀 복기 리포트와 실수 노트를 자동 추출하며, 아침 출근길용 1:1 맞춤형 복습 오디오 강의까지 제공하는 완성형 AI 전화영어 애플리케이션.
-- **디자인 무드**: 심야 서재의 차분한 다크 슬레이트 캔버스(`bg-[#0F141C]`), 정갈한 카드 서피스(`bg-[#161D2A]`), 웜 골드/앰버 액센트(`text-amber-400`), 모바일 반응형 터치 인터페이스.
+- **디자인 무드**: 심야 서재의 차분한 다크 슬레이트 캔버스(`bg-[#0F141C]`, `index.html`·`src/index.css`·`public/manifest.json` 스플래시 및 오버스크롤 배경색까지 `#0F141C`로 통일), 정갈한 카드 서피스(`bg-[#161D2A]`), 웜 골드/앰버 액센트(`text-amber-400`), 모바일 반응형 터치 인터페이스(핀치 줌 및 복기·강의·코치 텍스트 선택/복사 허용, 통화 화면 `NewCallScreen.tsx`만 `select-none` 유지).
 
 ---
 
@@ -99,7 +99,7 @@
      - 재연결 시 신규 토큰 발급 및 `resumeHandle` 지속 유지.
      - 연결 경로 콘솔 로깅(`[Live] path=direct` / `[Live] path=proxy`) 및 Firestore `sessions` 문서에 `connectionPath`, `directFailCount` 저장.
    - 오늘 수업 지시서 주입 (`src/data/lessonPromptBuilder.ts`): 목표, 과 내용, 복습 대상 실수 최대 3개.
-   - 5대 제어 버튼: Done(화면 표시 「답변 끝」, `LiveCommand` 값은 `"Done"` 유지) / Feedback / Model answer / Pause / Slow. 통화 화면은 고정 뷰포트 높이(`h-dvh`) 내부 스크롤과 상·하단 safe-area 여백(`pt-safe`/`pb-safe`)으로 대화창이 길어져도 하단 명령·「통화 종료」 바가 화면에 고정 유지됨.
+   - 5대 제어 버튼: Done(화면 표시 「답변 끝」, `LiveCommand` 값은 `"Done"` 유지) / Feedback / Model answer / Pause / Slow. 통화 화면은 고정 뷰포트 높이(`h-screen`, dvh 지원 시 `h-dvh`) 내부 스크롤과 상·하단 safe-area 여백(`pt-safe`/`pb-safe`)으로 대화창이 길어져도 하단 명령·「통화 종료」 바가 화면에 고정 유지됨.
    - Live 자체 받아쓰기 실시간 화면 롤링 표시 및 `sessions.liveTranscript`에 보조 저장.
 6. **Firebase 1인 전용 보안 및 클라우드 동기화**:
    - `episode.kim@gmail.com` 단일 계정 엄격 화이트리스트 검증 (`src/services/firebase/auth.ts`).
@@ -153,7 +153,14 @@
 ---
 
 ## 5. 버전 히스토리
-- **P0-5 (v2.10.0 묶음, 2026-11-21 KST)**: 통화 화면 모바일 레이아웃 고정(`NewCallScreen.tsx` `h-dvh`·내부 스크롤·`block: "end"`, `index.html` `viewport-fit=cover`, `src/index.css` `.pt-safe`/`.pb-safe`/`.bottom-safe`, `App.tsx` 미완료 통화 버튼 safe-area 적용) 및 제어 버튼 라벨 「끝내기」→「답변 끝」 통일(「통화 종료」와 혼동 방지).
+- **v2.10.0 (P0-1~P0-6 묶음, 2026-11-21 KST)**: 승인된 P0 실기기 QC 후속 개선 묶음 (`README.md` 헤더·v2.10.0 요약 및 `package.json`/`package-lock.json` `2.10.0` 반영).
+  - **P0-1**: 복기 단계별 소요 시간 계측.
+  - **P0-2**: 복기 화면 「이번 통화 성과」 표시와 빈 통화 문구 정리.
+  - **P0-3**: 홈 「오늘 할 것」 루프 재배치와 진도 확인 시트.
+  - **P0-4**: 복기에서 오늘 강의로 연결(준비된 강의만 자동으로 염).
+  - **P0-5**: 통화 화면 모바일 레이아웃 고정(`NewCallScreen.tsx` `supports-[height:100dvh]:h-dvh`·내부 스크롤·`block: "end"`, `index.html` `viewport-fit=cover`, `src/index.css` `.pt-safe`/`.pb-safe`/`.bottom-safe`, `App.tsx` 미완료 통화 버튼 safe-area 적용) 및 제어 버튼 라벨 「끝내기」→「답변 끝」 통일(「통화 종료」와 혼동 방지).
+  - **P0-6**: 핀치 줌 허용(`index.html` `maximum-scale=1.0`·`user-scalable=no` 제거), 복기·강의·코치 텍스트 선택/복사 허용(`index.html` `body` 및 `CoachModal.tsx` `select-none` 제거, `NewCallScreen.tsx`만 `select-none` 유지), PWA 스플래시·오버스크롤 색상 `#0F141C` 통일(`index.html`, `src/index.css`, `public/manifest.json` 및 미사용 `--her-*`/orb CSS 정리), `tests/mobileShell.test.ts` 검증 보강.
+- **P0-5 (v2.10.0 묶음, 2026-11-21 KST)**: 통화 화면 모바일 레이아웃 고정(`NewCallScreen.tsx` `supports-[height:100dvh]:h-dvh`·내부 스크롤·`block: "end"`, `index.html` `viewport-fit=cover`, `src/index.css` `.pt-safe`/`.pb-safe`/`.bottom-safe`, `App.tsx` 미완료 통화 버튼 safe-area 적용) 및 제어 버튼 라벨 「끝내기」→「답변 끝」 통일(「통화 종료」와 혼동 방지).
 - **v2.9.0 (2026-11-10 KST)**: [전체 코드 리뷰 2차 반영] 통화 종료는 `pending_review`, 복기 저장 시에만 `done`(복기 중 앱을 닫아도 다시 복기 가능, 홈 아래 「끝나지 않은 통화」 버튼). 복기 직후 피드 동기화. 1분 임시 받아쓰기 묶음을 녹음 순서대로(업로드와 무관). 기록용 받아쓰기는 분 단위 재시도 + 실패한 분만 임시 받아쓰기로 보충. 통화 종료 중복 방지, 연결 끊김 시 복기로 이어 가기, 화면 꺼짐 방지 재요청, 「다시 시도」 경합 방지. 내 말이 없는 통화는 진도 유지. 복기 AI가 준 실수 id 검사, 요청 크기 제한. 코치 메시지 최신 50개. 오류 응답 표준화(`server/errors.ts`, 내부 문구 비노출)와 화면용 `friendlyError`. 보안 헤더 2종. 테스트 25개. 기록: `docs/reviews/2026-11-full-code-review.md`, 실기기 QC: `docs/qc/2026-11-android-qc-checklist.html`.
 - **v2.8.1 (2026-10-19 KST)**: [피드 404] 피드 설정과 사용자 Gemini 키를 Firestore `feeds/{id}`에 암호화 백업, 새로 뜬 서버가 복원해 그록봇만으로 아침 강의 생성. `firestore.rules`에 feeds 규칙 추가(배포 필요).
 - **v2.8.0 (2026-10-19 KST)**: [전체 코드 리뷰 반영] 통화마다 새 Live 인스턴스(앞 통화 섞임 해결), 통화 마지막 말 복기 포함, "다시 시도" 시 녹음 번호 이어 가기, Firestore `ignoreUndefinedProperties`(코치 답장·업로드 실패 조각 기록 저장), 복기·코치 승인 뒤 목표 다시 불러오기, 코치 되돌리기는 바꾼 항목만, 오인식 신고 시 실수 삭제, 서버 재시작으로 멈춘 강의 복구, 다시 복기해도 중복·진도 후퇴 없음, 1분 받아쓰기 스위치 연결, 퀴즈 녹음 형식 자동 선택, 취약점 3개 저장(여행 치환 수정), 코치 제안 검사, 키 탐색 1분 캐시·부모 프로세스만, 상태 API 경로 비노출, 미완료 통화만 읽기, 안 쓰는 코드 삭제, 빌드 파일 나누기, 자동 테스트 17개. 상세: [`docs/reviews/2026-10-full-code-review.md`](./docs/reviews/2026-10-full-code-review.md).

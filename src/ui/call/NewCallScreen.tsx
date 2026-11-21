@@ -324,7 +324,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
   };
 
   return (
-    <div className="min-h-screen h-screen h-dvh supports-[height:100dvh]:min-h-0 overflow-hidden bg-[#0F141C] text-slate-100 flex flex-col select-none">
+    <div className="h-screen supports-[height:100dvh]:h-dvh overflow-hidden bg-[#0F141C] text-slate-100 flex flex-col select-none">
       {/* Mic / connection failure: stop the call UI and offer retry or exit */}
       {connectError && (
         <div className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-6">
