@@ -85,14 +85,16 @@ export class GeminiLiveProvider implements LiveProvider {
 
     // Mic is decoupled from the session: start it in parallel and never let it
     // block or fail the connection. On failure we only show guidance.
-    const micPromise = this.initAudioCapture()
-      .then(() => console.log("[Live] stage=mic_ready"))
-      .catch((err: any) => {
-        console.warn("[Live] stage=mic_failed", err?.cause || err);
-        this.options?.onMicWarning?.(
-          err?.message || "마이크를 쓸 수 없어요. 튜터 목소리는 들을 수 있지만 말하려면 마이크를 확인해 주세요."
-        );
-      });
+    const micPromise = options.skipMic
+      ? Promise.resolve()
+      : this.initAudioCapture()
+          .then(() => console.log("[Live] stage=mic_ready"))
+          .catch((err: any) => {
+            console.warn("[Live] stage=mic_failed", err?.cause || err);
+            this.options?.onMicWarning?.(
+              err?.message || "마이크를 쓸 수 없어요. 튜터 목소리는 들을 수 있지만 말하려면 마이크를 확인해 주세요."
+            );
+          });
 
     try {
       await this.initAudioPlayback().catch((err) => {
@@ -647,30 +649,42 @@ export class GeminiLiveProvider implements LiveProvider {
     }
   }
 
-  public sendTextPrompt(prompt: string): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+  public appendUserText(text: string): void {
+    const trimmed = text?.trim();
+    if (!trimmed) return;
+    this.appendTranscript("user", trimmed);
+    this.options?.onTranscript(trimmed, true);
+  }
 
-    if (this.ws.url.includes("generativelanguage.googleapis.com")) {
-      this.ws.send(
-        JSON.stringify({
-          clientContent: {
-            turns: [
-              {
-                role: "user",
-                parts: [{ text: prompt }],
-              },
-            ],
-            turnComplete: true,
-          },
-        })
-      );
-    } else {
-      this.ws.send(
-        JSON.stringify({
-          type: "text_prompt",
-          text: prompt,
-        })
-      );
+  public sendTextPrompt(prompt: string): boolean {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
+
+    try {
+      if (this.ws.url.includes("generativelanguage.googleapis.com")) {
+        this.ws.send(
+          JSON.stringify({
+            clientContent: {
+              turns: [
+                {
+                  role: "user",
+                  parts: [{ text: prompt }],
+                },
+              ],
+              turnComplete: true,
+            },
+          })
+        );
+      } else {
+        this.ws.send(
+          JSON.stringify({
+            type: "text_prompt",
+            text: prompt,
+          })
+        );
+      }
+      return true;
+    } catch {
+      return false;
     }
   }
 

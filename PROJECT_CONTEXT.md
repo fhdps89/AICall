@@ -159,6 +159,11 @@
 ---
 
 ## 5. 버전 히스토리
+- **v2.10.0 이후 수정(미배포) (2026-11-21 KST) — 마이크 점검 무한 로딩 해소: 제한 시간·실패 이유·다시 점검·건너뛰기, 통화 중 글로 답하기**:
+  - **배경·원인**: `PreCallScreen.tsx`의 `checkMic`이 `getUserMedia`를 시간 제한 없이 `await`해 마이크 부재/권한 창 무응답 환경에서 `"checking"` 상태에 영구 고정되고 「전화 걸기」가 활성화되지 않았으며, 통화 화면(`NewCallScreen.tsx`)에도 마이크 없이 글로 답할 수단이 없었음.
+  - **수정**: 순수 모듈 `src/ui/call/micCheck.ts`에 `checkMicrophone(..., timeoutMs = 8000)`, 오류 `name`별 `MicFailReason` 매핑·지연 도착 스트림 트랙 정리, 글 답변 정규화 `formatWrittenAnswer(text)` 추가. `PreCallScreen.tsx`에 점검 중 「취소」, 실패 사유별 안내, 「다시 점검」, 최초·취소 후 `idle` 및 실패 상태에서 「마이크 없이 진행 (글로 답하기)」(`onStart({ micSkipped })`) 추가. `App.tsx`가 `textOnly` 상태를 `NewCallScreen.tsx`로 전달. `LiveProvider.sendTextPrompt`가 전송 성공 여부(`boolean`)를 반환하도록 변경. `NewCallScreen.tsx`는 `textOnly` 시 `skipMic`으로 마이크 초기화·경고를 생략해 튜터 음성만 수신하고, 하단 고정 바에 `formatWrittenAnswer` 기반 500자 제한·IME 조합 중 Enter 무시 「글로 답하기」 입력창을 상시 제공(`sendTextPrompt` 성공 시에만 `appendUserText` 기록, 소켓 끊김으로 실패 시 입력 유지 + 「연결이 끊겨 보내지 못했어요」 표시).
+  - **방어 조치**: `checkSeqRef`/`mountedRef`로 취소·언마운트 뒤 늦게 도착한 스트림을 상태 갱신 없이 정리, `ensureSessionCreated`/`hasMicRecordingRef`로 텍스트 전용 통화의 세션 저장·종료 복기 누락 및 이전 통화 녹음 재사용 차단, `tests/micCheck.test.ts` 8건(`getUserMedia` 0회 호출 및 `sendTextPrompt` 소켓 상태 검증 포함) 추가.
+  - **검증**: `npm test` 45/45 통과, `npm run lint`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 통과 (`package.json` 버전 `2.10.0` 유지).
 - **v2.10.0 (P0-1~P0-6 묶음, 2026-11-21 KST)**: 승인된 P0 실기기 QC 후속 개선 묶음 (`README.md` 헤더·v2.10.0 요약 및 `package.json`/`package-lock.json` `2.10.0` 반영).
   - **P0-1**: 복기 단계별 소요 시간 계측.
   - **P0-2**: 복기 화면 「이번 통화 성과」 표시와 빈 통화 문구 정리.
