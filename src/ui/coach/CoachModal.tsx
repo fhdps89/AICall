@@ -364,6 +364,8 @@ export const CoachModal: React.FC<CoachModalProps> = ({
             </div>
           </div>
           <button
+            type="button"
+            aria-label="닫기"
             onClick={onClose}
             className="w-8 h-8 rounded-full bg-slate-800/80 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition cursor-pointer"
           >

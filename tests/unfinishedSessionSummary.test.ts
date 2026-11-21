@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  countSessionChunks,
   describeRecordingState,
   formatRecordingChunksSummary,
   formatSessionChipLabel,
@@ -122,5 +123,45 @@ test("formatSessionChipLabel: 날짜·시각과 과 번호를 간결하게 표�
   assert.equal(
     formatSessionChipLabel({ startedAt: localIso, lessonIndex: 4 }),
     "11/21 13:13 · 4과"
+  );
+});
+
+test("countSessionChunks: 원격·로컬 조각 합산 및 중복 인덱스 처리", () => {
+  assert.deepEqual(countSessionChunks([], [0, 1]), {
+    total: 2,
+    uploaded: 0,
+    localPending: 2,
+  });
+
+  assert.deepEqual(
+    countSessionChunks(
+      [
+        { index: 0, uploaded: true },
+        { index: 1, uploaded: true },
+        { index: 2, uploaded: false },
+      ],
+      [2]
+    ),
+    {
+      total: 3,
+      uploaded: 2,
+      localPending: 1,
+    }
+  );
+});
+
+test("describeRecordingState: counts로 원격 0·로컬 2일 때 uploading 문구를 반환한다", () => {
+  const counts = countSessionChunks([], [0, 1]);
+  const res = describeRecordingState(
+    {
+      recordingChunks: [],
+      liveTranscript: [],
+    },
+    counts
+  );
+  assert.equal(res.tone, "uploading");
+  assert.equal(
+    res.text,
+    "녹음 조각 2개는 아직 올라가지 않았어요. 앱을 켜 둔 채 잠시 기다린 뒤 복기해 주세요."
   );
 });

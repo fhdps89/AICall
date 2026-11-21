@@ -80,7 +80,12 @@ export const KeepImportModal: React.FC<{ user: User; onClose: () => void; onSave
             <div className="text-xs font-bold text-emerald-400">Keep 가져오기</div>
             <div className="text-lg font-black text-white">English mistake log 붙여넣기</div>
           </div>
-          <button onClick={onClose} className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 cursor-pointer">
+          <button
+            type="button"
+            aria-label="닫기"
+            onClick={onClose}
+            className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 cursor-pointer"
+          >
             <X className="w-5 h-5" />
           </button>
         </div>

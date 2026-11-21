@@ -162,7 +162,12 @@ export const SttBenchmarkModal: React.FC<{ user: User; onClose: () => void }> = 
             <div className="text-xs font-bold text-violet-400">받아쓰기 품질 시험 (1-F)</div>
             <div className="text-lg font-black text-white">틀린 문장을 틀린 그대로 읽어 주세요</div>
           </div>
-          <button onClick={onClose} className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 cursor-pointer">
+          <button
+            type="button"
+            aria-label="닫기"
+            onClick={onClose}
+            className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 cursor-pointer"
+          >
             <X className="w-5 h-5" />
           </button>
         </div>

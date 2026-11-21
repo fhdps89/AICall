@@ -18,7 +18,10 @@ export type ApiErrorCode =
   | 'KEEP_PARSE_FAILED'
   | 'STT_BENCH_FAILED'
   | 'UPLOAD_FAILED'
-  | 'TOKEN_FAILED';
+  | 'TOKEN_FAILED'
+  | 'NOT_FOUND'
+  | 'STORAGE_FORBIDDEN'
+  | 'STORAGE_FAILED';
 
 export function apiError(res: Response, status: number, code: ApiErrorCode, message: string, extra: Record<string, unknown> = {}): void {
   res.status(status).json({ ok: false, code, error: message, ...extra });

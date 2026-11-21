@@ -4,6 +4,29 @@
 
 ---
 
+### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA 2·21·23·5행: 복구 복기 조각 다운로드를 서버 중계로(CORS 우회)·복구 통화 사용량 집계·로컬 조각 합산·모달 접근성 (브랜치 `fix/qa2-b`)
+- **배경**:
+  - 정상 종료 통화는 메모리에 있는 `audioBlobs`를 바로 받아쓰기에 쓰지만, 통화 중 새로고침·종료 후 복구 복기(`App.tsx` → `runPostCallReview`)는 `audioBlobs` 없이 저장된 조각을 다시 내려받아야 하며 이때 브라우저 CORS 차단으로 녹음 조각 다운로드가 실패함(QA 2행).
+  - 끊긴 통화는 `NewCallScreen.tsx`의 `handleHangUp`을 거치지 않아 통화 횟수·통화 분이 기록되지 않으며(QA 21행), 끝나지 않은 통화 모달이 로컬 대기 조각을 합산하지 않고(QA 23행, 실제 0개 표시 원인은 `[미확인]`), 모달 닫기(`X`) 버튼 라벨 누락 및 제목 겹침이 확인됨(QA 5행).
+- **원인**:
+  - `reviewPipeline.ts`가 `storageUrl`(`firebasestorage.googleapis.com` `alt=media`)을 브라우저 `fetch`로 직접 호출해 버킷 CORS 설정 없이는 브라우저가 응답을 차단하고, 조각마다 경고를 반복 출력함(Firebase JS SDK `getBlob()`·`getBytes()`도 버킷 CORS가 필요).
+  - `App.tsx` 복구 복기 경로가 `getAllPendingChunks()` 로컬 조각과 `recordUsage`를 연결하지 않았고, `UnfinishedSessionModal.tsx`는 Firestore `recordingChunks`만 읽어 `unfinishedSessionSummary.ts`에 전달함.
+  - `UnfinishedSessionModal.tsx` 닫기 버튼이 `absolute top-4 right-4`로 배치된 반면 헤더에 오른쪽 여백(`pr-8`)이 없었고, 7개 모달의 아이콘 전용 닫기 버튼에 `aria-label`이 누락됨.
+- **수정**:
+  - **2행 서버 중계 및 복기 조각 수집 (`server/storageRelay.ts`, `server/errors.ts`, `server.ts`, `src/services/review/chunkSource.ts`, `src/services/review/reviewPipeline.ts`, `src/App.tsx`)**:
+    - `server/storageRelay.ts`(신규)에 호스트(`firebasestorage.googleapis.com`)·버킷·경로(`users/${uid}/recordings/<sessionId>/chunk_NNNN_<ms>.webm`)·다운로드 토큰 검증 및 `Authorization: Firebase <ID토큰>` 변환·에러 매핑(`NOT_FOUND`, `STORAGE_FORBIDDEN`, `STORAGE_FAILED`)·`audio/*` `Content-Type` 필터링·스트림 바이트 상한 읽기(`readStreamWithLimit`, `StorageFileTooLargeError`)를 구현하고, `server.ts`에 `GET /api/recordings/storage-file`(15초 타임아웃·`content-length` 및 스트림 누적 10MB 초과 시 즉시 중단 413·리다이렉트 차단·`Cache-Control: private, no-store`)을 추가함. 서버 로그에 요청 헤더·토큰·전체 URL은 남기지 않음.
+    - 순수 모듈 `src/services/review/chunkSource.ts`(신규)로 로컬·서버 중계(`/api/recordings/storage-file`, `/api/recordings/file`)·건너뜀 계획을 세우고, `403` 1회 또는 연속 3회 실패 시 조기 중단 및 요약 경고 1회만 출력하도록 `reviewPipeline.ts`를 교체(브라우저 직접 `fetch` 제거). `App.tsx` 복구 복기에서 `getAllPendingChunks()`로 해당 세션 로컬 조각을 `localChunks`로 전달.
+    - `docs/troubleshooting/firebase-storage-setup.md` `(d)`절을 `[선택]` 절로 바꾸고 정확한 `cors.json`과 휴대폰용 Cloud Shell 적용·확인 단계를 정리함(운영 origin 및 CORS 적용 시 SDK 업로드 영향은 `[미확인]`).
+  - **21행 복구 통화 사용량 집계 (`src/services/session/recoveredUsage.ts`, `src/services/firebase/db.ts`, `src/App.tsx`)**:
+    - 순수 모듈 `src/services/session/recoveredUsage.ts`(신규)의 `recoveredCallUsage`로 `endedAt`·`usageRecordedAt`이 없고 오늘(KST) 시작한 복구 통화의 시간(`lastChunkAt`·`liveTranscript[].timestamp` 최댓값, 3시간 상한)과 `callsForDuration`을 산출(다른 날 시작 통화는 `null` 반환)하고, `createRecoveredUsageRecorder`로 세션 ID 단위 진행 중 호출을 추적해 동시 중복 실행을 차단. `db.ts`에 `SessionData.usageRecordedAt`과 `markSessionUsageRecorded`를 추가하고, `App.tsx` 모듈 수준 `recordRecoveredUsageOnce`가 복기 시작 시 `markSessionUsageRecorded`를 먼저 기록한 뒤 `recordUsage`를 1회 호출함.
+  - **23행 조각 수 합산 보강 (`src/ui/call/unfinishedSessionSummary.ts`, `src/ui/call/UnfinishedSessionModal.tsx`)**:
+    - `countSessionChunks`와 `describeRecordingState(session, counts?)`를 추가하고, `UnfinishedSessionModal.tsx`가 마운트 시 `getAllPendingChunks()`를 읽어 원격·로컬 조각을 합산 표시하도록 보강.
+  - **5행 모달 닫기 버튼 접근성 및 겹침 해소**: `UnfinishedSessionModal.tsx` 헤더에 `pr-8`을 추가하고, `UnfinishedSessionModal.tsx`·`SettingsModal.tsx`·`CoachModal.tsx`·`LectureModal.tsx`·`KeepImportModal.tsx`·`SttBenchmarkModal.tsx`·`QuizModal.tsx`의 `<X` 닫기 버튼에 `type="button" aria-label="닫기"`를 추가.
+- **방어 조치 (Safeguards)**:
+  - `server/storageRelay.ts`가 `path`와 `token`만 받아 서버에서 고정 호스트·버킷·`users/${uid}/` 경로로 URL을 조립하므로 SSRF 및 타인 폴더 접근을 차단함. 토큰이 없는 조각의 중계는 배포된 Storage 보안 규칙(`allow read`, 실제 규칙 `[미확인]`)에 의존하며 실패 시 403으로 즉시 중단하고 기존 대본 폴백으로 전환함. `readStreamWithLimit`로 `content-length` 누락 응답도 상한 초과 시 스트림을 즉시 취소해 메모리 고갈을 방지함.
+  - 복구 사용량은 `createRecoveredUsageRecorder`의 세션 ID별 `Set` 동시 실행 차단과 `markSessionUsageRecorded` 선행 기록으로 중복 집계를 방지함.
+  - `tests/storageRelay.test.ts`, `tests/chunkSource.test.ts`, `tests/recoveredUsage.test.ts`, `tests/unfinishedSessionSummary.test.ts`, `tests/a11yCloseButtons.test.ts`로 검증.
+- **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build` 모두 통과 확인.
 ### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA 재확인 19행: 개발 용어 사용자 말로 교체·금지어 스캐너 확장 (브랜치 `fix/qa2-c`)
 - **배경**:
   - QA 재확인 19행에서 통화 연결 상태, 설정, 아침 강의 알림, 사용량, 복기, 서버 키 미설정 안내 화면에 일반 사용자에게 낯선 개발 용어(`Gemini`, `Live`, `서버 중계`, `직접 연결`, `프롬프트`, `그록봇`, `토큰`, `TTS`, `Survey topics`, `My role in`, `전사`, `개발자 메뉴`, `JSON`)가 여전히 노출되는 문제가 보고됨.

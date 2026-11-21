@@ -15,6 +15,19 @@ import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive
 import { LIVE_MODEL, TEXT_MODEL, GEMINI_STT_MODEL, GEMINI_TTS_LITE_MODEL } from './src/config/models.ts';
 import { userRecordingPath as userRecordingPathIn } from './server/recordingPath.ts';
 import { apiError, noKey, NO_KEY_MESSAGE } from './server/errors.ts';
+import {
+  MAX_STORAGE_FILE_BYTES,
+  STORAGE_FETCH_TIMEOUT_MS,
+  StorageFileTooLargeError,
+  firebaseAuthHeader,
+  isValidDownloadToken,
+  readStorageBucket,
+  readStreamWithLimit,
+  relayContentType,
+  relayErrorFor,
+  storageMediaUrl,
+  storageObjectPath,
+} from './server/storageRelay.ts';
 import { isValidFeedSecret, writeFeedSync, loadFeedForSecret, buildFeedToday, feedAudioFile, renderFeedHtml } from './server/feed.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -513,6 +526,62 @@ app.get('/api/recordings/file', requireAuth, (req: Request, res: Response) => {
     res.sendFile(safePath, SEND_DATA_FILE);
   } else {
     res.status(404).send('Audio file not found');
+  }
+});
+
+const STORAGE_BUCKET = readStorageBucket();
+
+// Firebase Storage에 올라간 조각을 서버가 대신 읽어 준다(서버 간 호출이라 버킷 CORS와 무관).
+app.get('/api/recordings/storage-file', requireAuth, async (req: Request, res: Response) => {
+  const objectPath = storageObjectPath(res.locals.user.uid, String(req.query.path || ''));
+  const token = req.query.token;
+  if (!objectPath || (token !== undefined && !isValidDownloadToken(token))) {
+    apiError(res, 400, 'BAD_REQUEST', '녹음 조각 경로가 올바르지 않아요.');
+    return;
+  }
+  const url = storageMediaUrl(STORAGE_BUCKET, objectPath, typeof token === 'string' ? token : undefined);
+  if (!url) {
+    apiError(res, 503, 'STORAGE_FAILED', '저장소 설정을 찾지 못했어요.');
+    return;
+  }
+  const headers: Record<string, string> = {};
+  if (!token) {
+    const h = firebaseAuthHeader(req.headers.authorization);
+    if (h) headers.Authorization = h;
+  }
+  try {
+    const up = await fetch(url, {
+      headers,
+      redirect: 'error',
+      signal: AbortSignal.timeout(STORAGE_FETCH_TIMEOUT_MS),
+    });
+    if (!up.ok) {
+      const e = relayErrorFor(up.status);
+      console.warn(`[StorageRelay] upstream ${up.status} (${path.basename(objectPath)})`);
+      apiError(res, e.status, e.code, e.message);
+      return;
+    }
+    if (Number(up.headers.get('content-length') || 0) > MAX_STORAGE_FILE_BYTES) {
+      await up.body?.cancel().catch(() => {});
+      apiError(res, 413, 'STORAGE_FAILED', '녹음 조각이 너무 커요.');
+      return;
+    }
+    const buf = await readStreamWithLimit(up.body, MAX_STORAGE_FILE_BYTES);
+    res.setHeader('Content-Type', relayContentType(up.headers.get('content-type')));
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.send(buf);
+  } catch (err: any) {
+    if (err instanceof StorageFileTooLargeError) {
+      apiError(res, 413, 'STORAGE_FAILED', '녹음 조각이 너무 커요.');
+      return;
+    }
+    console.warn('[StorageRelay] fetch failed:', err?.name || 'error'); // URL·토큰 출력 금지
+    apiError(
+      res,
+      err?.name === 'TimeoutError' ? 504 : 502,
+      'STORAGE_FAILED',
+      '저장소에서 녹음 조각을 가져오지 못했어요. 잠시 후 다시 시도해 주세요.'
+    );
   }
 });
 
