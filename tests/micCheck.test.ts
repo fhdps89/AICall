@@ -228,9 +228,13 @@ test("GeminiLiveProvider skipMic skips getUserMedia and sendTextPrompt returns s
     assert.deepEqual(uiTranscripts, [{ text: "I work at a shipyard.", isUser: true }]);
     assert.deepEqual(loggedAll, [{ role: "user", text: "I work at a shipyard." }]);
 
-    const textPromptMsg = sentPayloads
+    const textPrompts = sentPayloads
       .map((raw) => JSON.parse(raw))
-      .find((m) => m.type === "text_prompt");
+      .filter((m) => m.type === "text_prompt");
+    // connect() now also sends the tutor kickoff as text_prompt; assert the written answer is present.
+    const textPromptMsg = textPrompts.find((m) =>
+      String(m.text).startsWith("The learner answers in writing:")
+    );
     assert.equal(textPromptMsg?.text, "The learner answers in writing: I work at a shipyard.");
 
     // Closed socket: sendTextPrompt must return false and send nothing.
