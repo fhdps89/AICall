@@ -12,14 +12,21 @@ import {
   HardDrive,
   CheckCircle2,
   AlertCircle,
+  Trash2,
 } from "lucide-react";
 import { PromptPlaceholders } from "../../data/promptCustomizer";
 import { CURRENT_MODEL_CONFIG } from "../../config/models";
 import { collection, getDocs, query, orderBy, limit } from "firebase/firestore";
 import { db } from "../../services/firebase/config";
 import { SessionData, getUserSettings, saveUserSettings } from "../../services/firebase/db";
-import { getAllPendingChunks, LocalRecordingChunk } from "../../services/recording/chunkIndexedDb";
+import {
+  deletePendingChunks,
+  getAllPendingChunks,
+  LocalRecordingChunk,
+  retryPendingUploadsDetailed,
+} from "../../services/recording/chunkIndexedDb";
 import { ALLOWED_USER_EMAIL } from "../../services/firebase/auth";
+import { friendlyError } from "../common/friendlyError";
 import { FeedSettingsPanel } from "./FeedSettingsPanel";
 import { UsagePanel } from "./UsagePanel";
 import { GeminiKeyPanel } from "./GeminiKeyPanel";
@@ -53,10 +60,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [sessionsList, setSessionsList] = useState<SessionData[]>([]);
   const [pendingLocalChunks, setPendingLocalChunks] = useState<LocalRecordingChunk[]>([]);
   const [loadingRecordings, setLoadingRecordings] = useState(false);
+  const [retryingPending, setRetryingPending] = useState(false);
+  const [deletingPending, setDeletingPending] = useState(false);
+  const [pendingActionStatus, setPendingActionStatus] = useState<{
+    message: string;
+    isError: boolean;
+  } | null>(null);
 
   // Show the latest saved values each time the modal opens
   useEffect(() => {
-    if (isOpen) setFormData(placeholders);
+    if (isOpen) {
+      setFormData(placeholders);
+      setPendingActionStatus(null);
+    }
   }, [isOpen]);
 
   useEffect(() => {
@@ -113,6 +129,63 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   // Must stay below every hook: returning before a hook changes the hook count when the
   // modal opens, and React then throws instead of showing the settings screen.
   if (!isOpen) return null;
+
+  const pendingActionBusy = retryingPending || deletingPending;
+
+  const handleRetryPendingNow = async () => {
+    if (!userId || pendingActionBusy) return;
+    setRetryingPending(true);
+    setPendingActionStatus(null);
+    try {
+      const result = await retryPendingUploadsDetailed(userId, { force: true });
+      const refreshed = await getAllPendingChunks();
+      setPendingLocalChunks(refreshed);
+      setPendingActionStatus({
+        message: result.skipped
+          ? "이미 다시 올리는 중이에요. 잠시 뒤 다시 확인해 주세요."
+          : `${result.uploaded}개 올렸어요 / ${result.failed}개는 아직 못 올렸어요`,
+        isError: false,
+      });
+    } catch (err) {
+      setPendingActionStatus({
+        message: `다시 올리기에 실패했어요: ${friendlyError(err)}`,
+        isError: true,
+      });
+    } finally {
+      setRetryingPending(false);
+    }
+  };
+
+  const handleDeletePendingChunks = async () => {
+    if (pendingActionBusy) return;
+    const ids = new Set(pendingLocalChunks.map((c) => c.id));
+    const count = ids.size;
+    if (
+      !window.confirm(
+        `서버에 올라가지 않은 녹음 조각 ${count}개를 이 기기에서 지워요. 지운 조각은 되돌릴 수 없어요. 계속할까요?`
+      )
+    ) {
+      return;
+    }
+    setDeletingPending(true);
+    setPendingActionStatus(null);
+    try {
+      const deleted = await deletePendingChunks((c) => ids.has(c.id));
+      const refreshed = await getAllPendingChunks();
+      setPendingLocalChunks(refreshed);
+      setPendingActionStatus({
+        message: `남은 조각 ${deleted}개를 이 기기에서 지웠어요.`,
+        isError: false,
+      });
+    } catch (err) {
+      setPendingActionStatus({
+        message: `조각을 지우지 못했어요: ${friendlyError(err)}`,
+        isError: true,
+      });
+    } finally {
+      setDeletingPending(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -492,10 +565,37 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   통화 중 마이크 소리가 10초 단위로 나뉘어 IndexedDB에 임시 기록된 후, 즉시 Cloud Storage로 업로드됩니다.
                 </p>
                 {pendingLocalChunks.length > 0 && (
-                  <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center gap-2">
-                    <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
-                    <span>업로드 대기 중인 로컬 조각: {pendingLocalChunks.length}개</span>
+                  <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs space-y-2">
+                    <div className="flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+                      <span>업로드 대기 중인 로컬 조각: {pendingLocalChunks.length}개</span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleRetryPendingNow}
+                        disabled={pendingActionBusy || !userId}
+                        className="px-2.5 py-1.5 rounded-md bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 text-[11px] font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${retryingPending ? "animate-spin" : ""}`} />
+                        지금 다시 올리기
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleDeletePendingChunks}
+                        disabled={pendingActionBusy}
+                        className="px-2.5 py-1.5 rounded-md bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-slate-200 text-[11px] font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        남은 조각 지우기
+                      </button>
+                    </div>
                   </div>
+                )}
+                {pendingActionStatus && (
+                  <p className={`text-[11px] ${pendingActionStatus.isError ? "text-rose-300" : "text-slate-300"}`}>
+                    {pendingActionStatus.message}
+                  </p>
                 )}
               </div>
 

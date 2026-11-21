@@ -202,6 +202,17 @@ export const App: React.FC = () => {
     };
 
     loadUserData();
+
+    // 로그인 상태에서 60초마다 미업로드 조각 재시도(대기 조각이 없으면 즉시 반환)
+    const retryInterval = setInterval(() => {
+      retryPendingUploads(user.uid).catch((retryErr) => {
+        console.warn("[App] Periodic retry failed chunks error:", retryErr);
+      });
+    }, 60_000);
+
+    return () => {
+      clearInterval(retryInterval);
+    };
   }, [user]);
 
   // Handle Initial Progress Save

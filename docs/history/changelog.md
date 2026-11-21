@@ -4,6 +4,39 @@
 
 ---
 
+### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA-2 녹음 조각 업로드: 직접 업로드 시간 제한·실패 기억·서버 중계 우선 전환 (브랜치 `fix/qa-r2-chunk-upload-timeout`)
+- **배경**:
+  - 통화 중 10초 녹음 조각 업로드가 계속 실패하고 콘솔 오류가 대량 발생하며 IndexedDB(`OneCallRecordingsDB`)에 미업로드 조각이 쌓이는 QA 버그가 보고됨.
+- **원인**:
+  - `firebase-applet-config.json`의 `storageBucket`(`gen-lang-client-0592656565.firebasestorage.app`)이 GCS JSON API에서 404(버킷 미프로비저닝) 상태라 브라우저의 Firebase SDK 직접 업로드(`firebasestorage.googleapis.com`)가 프리플라이트부터 실패함(콘솔에서 CORS 오류로 관측, Firebase 콘솔에서 Storage 시작 필요).
+  - `src/services/firebase/storage.ts`의 `uploadAudioFile`이 직접 업로드(`uploadBytes`)를 먼저 시도할 때 Firebase Storage SDK의 `maxUploadRetryTime` 기본값(10분) 때문에 조각마다 최대 10분간 재시도하느라 서버 중계(`/api/recordings/upload-chunk`)로 넘어가지 못함. `chunkIndexedDb.ts`의 `retryPendingUploads`도 같은 함수를 직렬 호출해 재시도가 사실상 끝나지 않았으며, 직접·중계 경로가 모두 실패할 때 `directErr`만 던져 중계 실패 원인을 숨기고 있었음.
+- **수정**:
+  - `src/services/firebase/config.ts`: `STORAGE_RETRY_TIMEOUT_MS = 8000` 상수를 두고 `storage.maxUploadRetryTime`과 `storage.maxOperationRetryTime`을 8초로 제한.
+  - `src/services/firebase/uploadPolicy.ts`(신규 순수 모듈, Firebase·DOM 의존 없음): `createChunkUploader({ direct, relay, now, directTimeoutMs, cooldownMs })` 추가. `direct`는 `Promise.race`와 타이머 정리로 기본 12초(`DEFAULT_DIRECT_TIMEOUT_MS`) 제한, 실패 시 기본 10분(`DEFAULT_DIRECT_COOLDOWN_MS`) 동안 `direct`를 건너뛰고 바로 `relay`를 사용하며 쿨다운 진입 시에만 1회 경고 로그 출력. 쿨다운 만료 후 `direct`를 1회 재시도해 성공하면 기억을 해제하고, 양쪽이 모두 실패하면 두 오류 메시지를 모두 포함한 `Error`를 던짐. 함께 `selectRetryableChunks`·`createPendingRetryRunner`를 분리해 30초(`RECENT_CHUNK_GRACE_MS`) 이내 조각 건너뛰기(`force: true` 시 생략), 동시 실행 가드(`skipped: true`), 조각별 실패 격리 및 상세 결과(`{ total, uploaded, failed, skipped }`) 반환을 구현.
+  - `src/services/firebase/storage.ts`: `uploadAudioFile` 시그니처를 유지한 채 `createChunkUploader` 기반으로 교체(응답 `!response.ok` 시 HTTP 상태코드 포함 오류 발생), `getStorageFileUrl`도 `isDirectBlocked()` 확인 시 `getDownloadURL` 호출 없이 즉시 서버 중계 URL(`/api/recordings/file?path=...`)을 반환하도록 변경.
+  - `src/services/recording/chunkIndexedDb.ts`: `createPendingRetryRunner`를 감싼 모듈 전역 실행기(`pendingRetryRunner`)로 `retryPendingUploadsDetailed`와 `retryPendingUploads`(`number` 반환 유지)를 제공해 동시 실행 가드(이미 실행 중이면 `skipped: true`, `retryPendingUploads`는 `0`)와 30초 이내 조각 건너뛰기를 적용(기존 조각별 오류 격리 유지).
+  - `src/App.tsx`: 로그인 상태에서 60초 간격 `setInterval`로 `retryPendingUploads`를 주기 호출하고 `useEffect` 정리 함수에서 `clearInterval` 수행(대기 조각이 없으면 즉시 `0` 반환).
+  - `docs/troubleshooting/firebase-storage-setup.md`(신규): 프로젝트 소유자용 Storage 버킷 확인(`curl`), Firebase 콘솔 Storage 시작 절차, `storage.rules` 보안 규칙 예시 코드블록, 필요 시 `cors.json` 적용 명령, 서버 중계 저장소(`.data/recordings`)의 한계 안내 문서 작성.
+- **방어 조치 (Safeguards)**:
+  - `tests/uploadPolicy.test.ts`(신규): direct 성공 시 relay 미호출, direct 실패→relay 폴백 및 쿨다운 동안 direct 미호출·경고 1회, 무응답(never-resolving) 타임아웃 후 relay 전환, 쿨다운 경과 후 재시도 성공 및 기억 해제, 양쪽 실패 시 두 원인 메시지 포함, 동시 호출들의 쿨다운 상태 일관성, `selectRetryableChunks` 30초 경계, `createPendingRetryRunner` 동시 실행 가드(`skipped: true`) 및 부분 실패 격리를 검증.
+  - `server.ts`, `src/services/recording/chunkRecorder.ts`, `tests/chunkRecorder.test.ts`, `firebase-applet-config.json`, `package.json` 버전은 변경하지 않고, 루트 `storage.rules` 파일도 생성하지 않음.
+- **검증**: `npm test` 49/49 통과, `npm run lint`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 모두 오류 없이 통과.
+- **QA-2 후속: 녹음 보관함 「지금 다시 올리기」·막힌 조각 정리 (2026-11-21 KST, `v2.10.0 이후 수정(미배포)`)**:
+  - **배경**: QA-2 수정 이전에 이미 IndexedDB에 쌓여 있던 미업로드 로컬 조각을 사용자가 설정 > 녹음 보관함에서 직접 즉시 재업로드하거나 정리할 수단이 없었음.
+  - **원인**: `retryPendingUploads`가 30초 유예 건너뛰기(`force`)와 성공/실패/건너뜀 구분 반환을 지원하지 않았고, 대기 조각 삭제 API(`deletePendingChunks`)와 설정 화면 버튼이 없었음.
+  - **수정**:
+    - `src/services/firebase/uploadPolicy.ts` · `src/services/recording/chunkIndexedDb.ts`: 중복되어 있던 대기 조각 실행기를 `uploadPolicy.ts`의 `createPendingRetryRunner` 하나로 통합해 `force`·30초 유예·동시 실행 가드(`skipped: true`)·`RetryPendingResult`(`{ total, uploaded, failed, skipped }`)를 처리하고, `chunkIndexedDb.ts`는 이를 감싸 `retryPendingUploadsDetailed(userId, options?)` 및 `retryPendingUploads(userId, options?)`(`number` 반환 유지)를 제공. 순수 필터 선택 함수 `selectChunksToDelete` 및 `deletePendingChunks(filter?)` 추가.
+    - `src/ui/settings/SettingsModal.tsx`: 녹음 보관함 「업로드 대기 중인 로컬 조각」 경고 박스 내부에 「지금 다시 올리기」(스피너·비활성, `retryPendingUploadsDetailed(userId, { force: true })` 실행 후 `skipped`면 「이미 다시 올리는 중이에요. 잠시 뒤 다시 확인해 주세요.」, 아니면 `N개 올렸어요 / M개는 아직 못 올렸어요` 한 줄 표시 및 목록 갱신)와 「남은 조각 지우기」(확인 후 스냅샷 `ids`만 `deletePendingChunks(c => ids.has(c.id))`로 삭제 및 목록 갱신) 버튼 추가, 실패 시 한 줄 오류 표시.
+    - `docs/troubleshooting/firebase-storage-setup.md`: (d)항 `cors.json` 안내에서 미사용 `5173` 포트 언급 제거(`3000`만 유지).
+  - **방어 조치 (Safeguards)**:
+    - `tests/pendingChunks.test.ts`(신규): `selectChunksToDelete`·`deletePendingChunks` 필터 선택 및 삭제, 통합된 `createPendingRetryRunner` 경로의 `force: true` 30초 유예 건너뛰기·동시 실행 가드(`skipped: true`)·`total === uploaded + failed` 일치, `retryPendingUploadsDetailed`/`retryPendingUploads` 빈 DB 래퍼 동작을 검증.
+    - `tests/uploadPolicy.test.ts`: 기존 동시 호출 테스트(6)에 첫 동시 묶음의 `directCalls === 3` 단언 추가, `createPendingRetryRunner` 가드 테스트에 `skipped: true`/`false` 단언 반영.
+  - **남은 리스크**:
+    - `force` 재시도가 막 끝난 통화의 마지막 조각과 겹치면 `recordingChunks` 메타데이터를 덮어쓸 수 있음(기존 경로에도 있던 경쟁, 후속 과제).
+  - **검증**: `npm test` 49/49 통과, `npm run lint`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 모두 오류 없이 통과.
+
+---
+
 ### [2026-11-21 KST] v2.10.0 — P0-6 줌·텍스트 선택·배경색 통일 및 P0 묶음 릴리즈 (브랜치 `fix/p0-6-zoom-select-color`, 설계 Claude CLI Opus 5.5 high, 구현 agy Gemini 4 Hydrogen high)
 - **배경**:
   - `index.html` 뷰포트의 `maximum-scale=1.0, user-scalable=no`가 모바일 핀치 줌을 차단하고 있었으며, `index.html` `<body>`와 `CoachModal.tsx`의 `select-none`이 복기·강의·코치 텍스트 선택/복사를 막고 있었음.
