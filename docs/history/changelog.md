@@ -4,6 +4,20 @@
 
 ---
 
+### [2026-11-21 KST] P0-3 홈 「오늘 할 것」 루프 재배치 (v2.10.0 묶음)
+- **브랜치**: `fix/p0-3-home-loop` · **모델**: 계획 Claude CLI Opus 5.5 high · 구현 agy Gemini 4 Hydrogen high
+- **배경**: 홈 화면의 아침 강의 카드가 「더 보기」 접힘 영역 안에 숨어 있어 하루 학습 루프(수업 → 강의 → 복습 퀴즈)가 한눈에 이어지지 않았고, 일요일 주간 복기 카드에 바로 실행할 행동 버튼이 없었음. 또한 오늘 수업 카드와 4대 트랙 카드의 인라인 `<select>`가 선택 즉시 Firestore 진도를 저장해 모바일 스크롤·터치 중 실수로 진도가 바뀔 위험이 있었고, 일반 사용자 헤더에도 계정 이메일이 노출되고 있었음.
+- **원인과 수정**:
+  - `src/ui/home/HomeScreen.tsx`: `<MorningLectureCard>`를 `showMore` 접힘 블록 밖으로 꺼내 오늘 수업 카드와 복습·퀴즈 카드 사이에 배치하고 `lectureCardRef`로 감싸 상시 마운트 유지. 「더 보기」 라벨을 `더 보기 · 주간 루틴 · 트랙 바꾸기 · 코치 소개`로 갱신.
+  - 일요일/주간 복기 카드(`isPlanReviewDay && !overrideGoalId`)에 「오늘 퀴즈」(복습 대상이 0개이면 비활성), 「오늘 강의」(`lectureCardRef` 스크롤), 「트랙 골라 통화」(`showMore` 펼친 뒤 `goalsSectionRef` 스크롤) 버튼 3개 추가.
+  - 헤더 이메일(`user.email`)을 `devMode`일 때만 표시하도록 제한.
+  - `src/ui/home/LessonChangeSheet.tsx`(신규): 모바일 하단/중앙 확인 시트(「진도 바꾸기」 / 「확인」 / 「취소」). `HomeScreen.tsx`의 오늘 수업 카드와 트랙 카드 인라인 `<select>` 두 곳을 「진도 바꾸기」 버튼으로 교체해, 시트에서 「확인」을 누를 때만 `handleLessonChange` 호출.
+  - 문서: `README.md` 1단계 홈 항목과 `PROJECT_CONTEXT.md`(홈 UI·§5 히스토리) 동기화.
+- **방어 조치**: `LessonChangeSheet`에서 현재 과(`currentIndex`)와 같은 과가 선택됐거나 저장 중(`saving`)일 때는 「확인」 버튼을 비활성화하고, 「취소」 또는 배경 클릭 시 `onConfirm`을 호출하지 않아 의도치 않은 진도 변경을 차단. 2일 결석 배너와 `App.tsx`의 미완료 통화 버튼은 기존 동작 그대로 유지.
+- **검증**: `npm test` 25/25 통과, `npm run lint`·`npx tsc --noEmit`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 오류 없음.
+
+---
+
 ### [2026-11-10 KST] v2.9.0 — 전체 코드 리뷰 2차 반영 (GitHub 브랜치 `claude/full-review-2026-11`, Claude)
 - **배경**: 2026-11-10에 `main`(`24901cb`, v2.8.1) 전체 약 14,100줄을 다시 리뷰. 빌드·타입 검사·테스트 18개는 통과했지만, 약한 인터넷·앱을 중간에 닫음·버튼 두 번 누름 같은 실제 사용 상황에서 학습 기록이 빠지는 문제 9개(높음), 8개(중간), 6개(낮음)를 찾음. 전체 목록과 근거: [`docs/reviews/2026-11-full-code-review.md`](../reviews/2026-11-full-code-review.md).
 - **문제 원인과 적용된 수정 내역 — 높음**
