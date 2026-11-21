@@ -16,6 +16,7 @@ import {
 } from "firebase/firestore";
 import { db, auth } from "./config";
 import { sanitizePlanChangeAfter, isEmptyPlanChange } from "../../data/planValidation";
+import type { ReviewTiming } from "../review/reviewTiming";
 
 export enum OperationType {
   CREATE = "create",
@@ -314,6 +315,7 @@ export interface SessionData {
   sttPartial: SttPartialItem[];
   sttFinal?: SttFinalData;
   review?: SessionReviewData;
+  reviewTiming?: ReviewTiming;
   connectionPath?: "direct" | "proxy";
   directFailCount?: number;
   createdAt: string;
@@ -593,6 +595,26 @@ export async function saveSessionReview(
       updatePayload.sttFinal = sttFinal;
     }
     await updateDoc(sessionRef, updatePayload);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `users/${userId}/sessions/${sessionId}`);
+  }
+}
+
+/**
+ * Persist post-call review step timing metadata on the session document without changing status.
+ */
+export async function saveReviewTiming(
+  userId: string,
+  sessionId: string,
+  timing: ReviewTiming
+): Promise<void> {
+  const sessionRef = doc(db, "users", userId, "sessions", sessionId);
+  const now = new Date().toISOString();
+  try {
+    await updateDoc(sessionRef, {
+      reviewTiming: timing,
+      updatedAt: now,
+    });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `users/${userId}/sessions/${sessionId}`);
   }

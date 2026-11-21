@@ -79,6 +79,7 @@
    - **미완료 통화 복기 연결**: 지시서 3의 "끝나지 않은 통화" 모달에서 "복기 시작" 클릭 시 즉시 복기 파이프라인 가동.
    - **mistakes 컬렉션 자동 저장**: stage 1, status reviewing, source call 메타데이터 저장.
    - **통화 마지막 말 포함** (v2.8.0): 통화 종료 시 녹음기가 마지막(10초 미만) 조각이 다 만들어질 때까지 기다린 뒤(최대 3초) 복기에 넘김.
+   - **단계별 소요 시간 계측 (`reviewTiming.ts`, P0-1)**: `sessions` 문서에 `reviewTiming`(단계별 소요 ms·총합·1분 묶음 수·전사 요청 수·결과 `ok`/`empty`/`failed`·`sourceStt`)을 저장하며, 개발자 모드에서 `ReviewModal` 상단에 한 줄 요약을 표시함.
 4. **B-3 통화 중 녹음 & 끊김 대비 이중 안전망 (`chunkIndexedDb.ts`, `chunkRecorder.ts`, `NewCallScreen.tsx`)**:
    - **10초 마이크 청크 녹음**: `MediaRecorder`로 10초 조각 생성 -> IndexedDB(`OneCallRecordingsDB`)에 선저장 -> Cloud Storage 즉시 업로드 -> 성공 시 IndexedDB 삭제.
    - **연결 독립성 보장**: Live 연결이 끊기거나(GoAway, 소켓 재연결, 프록시 전환) 불안정해도 마이크 녹음은 중단 없이 독립 백그라운드 구동.
@@ -153,6 +154,7 @@
 ---
 
 ## 5. 버전 히스토리
+- **2026-11-21 KST (P0-1, v2.10.0 묶음 — 버전 표기 유지)**: `reviewTiming.ts` 추가 및 `reviewPipeline.ts` 단계별(`collectChunks`·`transcribe`·`fallback`·`review`·`save`) 소요 시간 계측, `sessions.reviewTiming` 저장(`saveReviewTiming`), 개발자 모드 `ReviewModal` 한 줄 소요 시간 표시.
 - **v2.9.0 (2026-11-10 KST)**: [전체 코드 리뷰 2차 반영] 통화 종료는 `pending_review`, 복기 저장 시에만 `done`(복기 중 앱을 닫아도 다시 복기 가능, 홈 아래 「끝나지 않은 통화」 버튼). 복기 직후 피드 동기화. 1분 임시 받아쓰기 묶음을 녹음 순서대로(업로드와 무관). 기록용 받아쓰기는 분 단위 재시도 + 실패한 분만 임시 받아쓰기로 보충. 통화 종료 중복 방지, 연결 끊김 시 복기로 이어 가기, 화면 꺼짐 방지 재요청, 「다시 시도」 경합 방지. 내 말이 없는 통화는 진도 유지. 복기 AI가 준 실수 id 검사, 요청 크기 제한. 코치 메시지 최신 50개. 오류 응답 표준화(`server/errors.ts`, 내부 문구 비노출)와 화면용 `friendlyError`. 보안 헤더 2종. 테스트 25개. 기록: `docs/reviews/2026-11-full-code-review.md`, 실기기 QC: `docs/qc/2026-11-android-qc-checklist.html`.
 - **v2.8.1 (2026-10-19 KST)**: [피드 404] 피드 설정과 사용자 Gemini 키를 Firestore `feeds/{id}`에 암호화 백업, 새로 뜬 서버가 복원해 그록봇만으로 아침 강의 생성. `firestore.rules`에 feeds 규칙 추가(배포 필요).
 - **v2.8.0 (2026-10-19 KST)**: [전체 코드 리뷰 반영] 통화마다 새 Live 인스턴스(앞 통화 섞임 해결), 통화 마지막 말 복기 포함, "다시 시도" 시 녹음 번호 이어 가기, Firestore `ignoreUndefinedProperties`(코치 답장·업로드 실패 조각 기록 저장), 복기·코치 승인 뒤 목표 다시 불러오기, 코치 되돌리기는 바꾼 항목만, 오인식 신고 시 실수 삭제, 서버 재시작으로 멈춘 강의 복구, 다시 복기해도 중복·진도 후퇴 없음, 1분 받아쓰기 스위치 연결, 퀴즈 녹음 형식 자동 선택, 취약점 3개 저장(여행 치환 수정), 코치 제안 검사, 키 탐색 1분 캐시·부모 프로세스만, 상태 API 경로 비노출, 미완료 통화만 읽기, 안 쓰는 코드 삭제, 빌드 파일 나누기, 자동 테스트 17개. 상세: [`docs/reviews/2026-10-full-code-review.md`](./docs/reviews/2026-10-full-code-review.md).

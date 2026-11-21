@@ -21,6 +21,8 @@ import {
   CheckCircle,
 } from "lucide-react";
 import { authFetch } from "../../services/api/authFetch";
+import { useDevMode } from "../../data/devMode";
+import type { ReviewTiming } from "../../services/review/reviewTiming";
 
 export interface ReviewModalProps {
   userId?: string;
@@ -31,6 +33,7 @@ export interface ReviewModalProps {
   lessonTitle?: string;
   review: SessionReviewData | any;
   sttFinal?: SttFinalData;
+  timing?: ReviewTiming;
   onClose: () => void;
   onOpenPodcast?: () => void;
 }
@@ -44,9 +47,11 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
   lessonTitle,
   review,
   sttFinal,
+  timing,
   onClose,
   onOpenPodcast,
 }) => {
+  const devMode = useDevMode();
   const [copied, setCopied] = useState<boolean>(false);
   const [playingIndex, setPlayingIndex] = useState<number | null>(null);
   // Items reported earlier stay hidden when the review is reopened
@@ -164,6 +169,15 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
     }
   };
 
+  const timingParts: string[] = [];
+  if (timing?.steps.transcribe !== undefined || timing?.steps.fallback !== undefined) {
+    const sttMs = (timing.steps.transcribe ?? 0) + (timing.steps.fallback ?? 0);
+    timingParts.push(`받아쓰기 ${Math.round(sttMs / 1000)}초`);
+  }
+  if (timing?.steps.review !== undefined) {
+    timingParts.push(`AI ${Math.round(timing.steps.review / 1000)}초`);
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md overflow-y-auto">
       <div className="relative w-full max-w-3xl max-h-[94vh] overflow-y-auto bg-[#161D2A] border border-slate-800 rounded-3xl p-5 sm:p-6 text-slate-100 shadow-2xl flex flex-col gap-5">
@@ -190,6 +204,13 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
             <X size={20} />
           </button>
         </div>
+
+        {/* Dev-mode only timing summary */}
+        {devMode && timing && timingParts.length > 0 && (
+          <div className="text-[11px] text-slate-400 font-mono">
+            복기 소요: {timingParts.join(" · ")}
+          </div>
+        )}
 
         {/* Floating feedback alert when a mistake is reported */}
         {reportedMessage && (
