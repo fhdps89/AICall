@@ -30,6 +30,7 @@ import { friendlyError } from "../common/friendlyError";
 import { FeedSettingsPanel } from "./FeedSettingsPanel";
 import { UsagePanel } from "./UsagePanel";
 import { GeminiKeyPanel } from "./GeminiKeyPanel";
+import { VoicePanel } from "./VoicePanel";
 import { ADVANCED_TOGGLE_TEXT, KEY_TAB_LABEL } from "./settingsText";
 import { Sparkles, Bell } from "lucide-react";
 
@@ -42,10 +43,11 @@ interface SettingsModalProps {
   onResetProgressRequest: () => void;
 }
 
-type SettingsTabId = "prompts" | "models" | "recordings" | "feed" | "usage" | "coach" | "geminiKey";
+type SettingsTabId = "prompts" | "voice" | "models" | "recordings" | "feed" | "usage" | "coach" | "geminiKey";
 
 const SETTINGS_TABS: ReadonlyArray<{ id: SettingsTabId; label: string; devOnly?: boolean }> = [
   { id: "prompts", label: "내 정보 입력" },
+  { id: "voice", label: "AI 목소리" },
   { id: "models", label: "개발자: 모델·보안", devOnly: true },
   { id: "recordings", label: "녹음 보관함" },
   { id: "feed", label: "아침 강의 알림" },
@@ -332,7 +334,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           ) : activeTab === "geminiKey" ? (
             devMode ? <GeminiKeyPanel userId={userId} /> : null
-          ) : activeTab === "models" && !devMode ? null : activeTab === "usage" ? (
+          ) : activeTab === "models" && !devMode ? null : activeTab === "voice" ? (
+            <VoicePanel userId={userId} />
+          ) : activeTab === "usage" ? (
             <UsagePanel userId={userId} />
           ) : activeTab === "feed" ? (
             <FeedSettingsPanel userId={userId} />

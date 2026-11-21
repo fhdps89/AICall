@@ -13,6 +13,7 @@ const MODAL_FILES = [
   "src/ui/keep/KeepImportModal.tsx",
   "src/ui/sttBench/SttBenchmarkModal.tsx",
   "src/ui/quiz/QuizModal.tsx",
+  "src/ui/home/TrackPickerSheet.tsx",
 ];
 
 test("7개 모달의 <X 아이콘을 품은 <button> 여는 태그에 모두 aria-label이 있다", () => {

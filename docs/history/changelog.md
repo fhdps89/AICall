@@ -4,6 +4,17 @@
 
 ---
 
+### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 사용자 피드백 3건 (홈 트랙 바로 바꾸기, AI 말소리 끊김, 목소리 고정·선택) (브랜치 `englead/feedback-1122-track-voice-audio`, Draft PR #33 위에 쌓음)
+- **배경**: 찬식님이 어제 앱을 써 보고 남긴 피드백. 1) 트랙 바꾸기가 하단 「더 보기」에 숨어 있음 2) AI 말소리가 살짝씩 끊김 3) AI 목소리가 통화 중 바뀜. 운영에서 「이 트랙으로 바꾸기」 선택이 새로고침하면 사라진다는 버그도 함께 확인됨. 머지·배포는 하지 않음.
+- **원인과 수정**:
+  - **트랙 선택 저장 안 됨**: `HomeScreen`의 `overrideGoalId`가 `useState(null)`뿐이었음. 오늘(KST) 날짜를 키로 `localStorage`(`onecall_today_track_override:{uid}`)에 저장(`dailyTrackOverride.ts`). 다음 날, 깨진 값, 목록에 없는 트랙은 무시.
+  - **트랙 바로 바꾸기**: 오늘 수업 카드 「트랙: …」 칩 → `TrackPickerSheet`(`trackOptions.ts`). 진행할 과가 없는 트랙은 비활성, 복기일에는 「주간 복기(오늘 루틴)」 항목. 요일별 주간 루틴을 설정에서 고치는 곳은 아직 없음(미구현).
+  - **말소리 끊김**: `geminiLiveProvider.playAudioChunk`가 청크 도착 즉시 예약해 선행 버퍼가 없었음(네트워크·메인스레드 지연 = 무음). `audioPlaybackScheduler.ts`(선행 120ms~400ms 적응, 새 발화 구분, interrupted 때만 리셋)로 교체. 샘플레이트는 출력 컨텍스트·버퍼 모두 24000으로 일치해 원인이 아님. 홀수 바이트 청크 예외 방지, `playback_stats` 로그 추가.
+  - **목소리**: 모든 경로가 이미 `voiceName: "Kore"`를 보내고 있어 「미지정」은 원인이 아님. 모델(`gemini-3.8-live`) 자체의 음색 흔들림이 Google 포럼에 다수 보고됨(앱이 완전히 막을 수 없음). 앱 쪽 불일치(경로·시도마다 `languageCode` 유무가 다름, 허용 목록 검증이 서버에만 있음, 기본값 `Kore` 흩어짐)를 `src/config/voices.ts` + `server/liveConfig.ts`로 통일하고, 설정 「AI 목소리」 탭(허용 5종, 미리 듣기, `settings/general.voiceName`)을 추가.
+- **방어 조치 (Safeguards)**: 허용 목록 밖 값은 클라·서버 모두 Kore로 정규화. 설정 읽기는 통화 시작을 1.5초 넘게 막지 않음(캐시 → localStorage → 원격). 선택한 목소리는 다음 통화부터 적용. 아침 강의 두 화자 구조는 건드리지 않음.
+- **테스트**: `tests/audioPlaybackScheduler.test.ts`, `trackOptions.test.ts`, `dailyTrackOverride.test.ts`, `voices.test.ts`, `liveConfig.test.ts`, `voicePreference.test.ts`, `audioPlayable.test.ts` 추가, `liveWire.test.ts`·`a11yCloseButtons.test.ts` 갱신. `npm test` 284/284, lint, server tsc, build 통과. 스크린샷: `/workspace/collab/onecall_feedback_20261122/shots/`.
+- **배포 후 확인 필요**: 실기기 통화에서 끊김 체감, 음색 일관성(모델 측 흔들림은 남을 수 있음), 서버 로그 `[Live] stage=playback_stats`.
+
 ### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA 6차 재확인 후속 (30·28·24·29/33행, 브랜치 `englead/qa6-r30-28-24-29-track`)
 - **배경**: QA봇이 #32 머지·배포(main `1c445d7`, 번들 `index-Bb2KsfTc.js`)를 다시 확인한 부분 실패·신규 이슈를 Draft PR로 고침. 머지·배포는 하지 않음.
 - **원인과 수정**:

@@ -18,6 +18,7 @@ import { LIVE_STATUS_TEXT } from "../../services/providers/liveStatusText";
 import { getChunkRecorder } from "../../services/recording/chunkRecorder";
 import { formatWrittenAnswer, WRITTEN_ANSWER_MAX_LENGTH } from "./micCheck";
 import { RECONNECT_NOTICE_DELAY_MS, resolveReconnectUiState } from "./reconnectNotice";
+import { getPreferredVoice } from "../../services/settings/voicePreferenceDefault";
 import {
   PhoneOff,
   Mic,
@@ -201,8 +202,10 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
         ])
       : Promise.resolve([]);
 
-    dueMistakes
-      .then((due) => {
+    const preferredVoice = getPreferredVoice(userId);
+
+    Promise.all([dueMistakes, preferredVoice])
+      .then(([due, voiceName]) => {
         if (isCancelled) return;
         const reviewTargets = (due || [])
           .slice(0, 3)
@@ -211,6 +214,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
         return provider.connect({
         sessionId: currentSessionId,
         systemPrompt,
+        voiceName,
         skipMic: textOnly,
         onMediaStreamReady: (stream) => {
           if (isCancelled || !userId) return;

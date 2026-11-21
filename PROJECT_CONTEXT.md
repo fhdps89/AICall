@@ -146,7 +146,7 @@
    - `NODE_ENV`가 없는 배포 서버에 개발 도구(Vite)가 없으면, 죽지 않고 빌드된 `dist/`를 내보냄(v2.8.0).
 
 13. **테스트·빌드 (v2.8.0)**:
-   - `npm test`: Node 내장 테스트(`node:test`) + `tsx`, `tests/*.test.ts`. 2026-11-21 기준 249개. 코치 제안 검사, 트랙별 취약점 치환, 복습 실수 3개 제한, 서버 재시작 강의 상태, 강의 오디오 재생성, 실수 묶음 필터·complete-linkage, 복기 알약 여백, 2인 음성 조각, 피드 비밀키 형식, 1분 호출 한도, 녹음 경로 차단, 잘못된 로그인 토큰 거부, 1분 묶음, KST 날짜 계산, 비용 계산, 녹음기(마지막 조각 포함·재시작 번호). 녹음기 테스트는 저장 함수를 가짜로 바꿔 끼워 실제 Firebase에 접속하지 않음(`ChunkRecorder` 생성자의 `deps`).
+   - `npm test`: Node 내장 테스트(`node:test`) + `tsx`, `tests/*.test.ts`. 2026-11-22 기준 284개. 코치 제안 검사, 트랙별 취약점 치환, 복습 실수 3개 제한, 서버 재시작 강의 상태, 강의 오디오 재생성, 실수 묶음 필터·complete-linkage, 복기 알약 여백, 2인 음성 조각, 피드 비밀키 형식, 1분 호출 한도, 녹음 경로 차단, 잘못된 로그인 토큰 거부, 1분 묶음, KST 날짜 계산, 비용 계산, 녹음기(마지막 조각 포함·재시작 번호). 녹음기 테스트는 저장 함수를 가짜로 바꿔 끼워 실제 Firebase에 접속하지 않음(`ChunkRecorder` 생성자의 `deps`).
    - CI(`.github/workflows/ci.yml`): 설치 → 앱 타입 검사 → 서버·테스트 타입 검사(`tsconfig.server.json`이 `tests/`도 포함) → 빌드 → `npm test`.
    - 빌드는 라이브러리를 `firebase`·`react`·`icons`·`vendor` 파일로 나눔(`vite.config.ts`). Firebase SDK 자체가 약 590KB(압축 140KB)라 경고 기준을 700KB로 둠.
    - `npm audit`는 10건(high 8, moderate 2, 2026-11-10 기준): Firebase가 쓰는 `@grpc/grpc-js` 계열, 개발 서버용 `vite`·`esbuild`, `qs`·`re2js`·`source-map-js` 등. `npm audit fix`가 Firebase SDK 버전을 올리므로 실기기 QC 뒤 별도 적용 권장.
@@ -166,6 +166,11 @@
 ---
 
 ## 5. 버전 히스토리
+- **v2.10.0 이후 수정(미배포) — 사용자 피드백 3건: 홈 트랙 바로 바꾸기·AI 말소리 끊김·목소리 고정/선택 (2026-11-22 KST, 브랜치 `englead/feedback-1122-track-voice-audio`, #33 위에 쌓음)**:
+  - **트랙 바꾸기**: 오늘 수업 카드의 「트랙: …」을 눌러 바텀시트(`TrackPickerSheet`, 항목 계산은 순수 `trackOptions.ts`)에서 바로 고름. 진행할 과가 없는 트랙은 비활성. 주간 복기일 「트랙 골라 통화」도 같은 시트를 엶. 고른 트랙은 **오늘(KST) 하루만** `localStorage`(`onecall_today_track_override:{uid}`, 순수 `dailyTrackOverride.ts`)에 저장되어 새로고침·통화 뒤 홈으로 돌아와도 유지되고 다음 날 자동으로 사라짐(기존엔 `useState`뿐이라 새로고침하면 주간 복기로 되돌아갔음). 요일별 주간 루틴(`plan.weeklyPattern`)을 설정에서 고치는 화면은 아직 없음.
+  - **말소리 끊김**: `playAudioChunk`가 청크 도착마다 `max(now, nextPlaybackTime)`로 바로 예약해 지터 버퍼가 없었음. 순수 `audioPlaybackScheduler.ts`가 선행 시간(기본 120ms, 언더런마다 +60ms, 최대 400ms)을 두고 이어 붙임. 새 발화(1초 이상 무음 뒤)는 언더런으로 세지 않고, 학습한 선행 시간은 통화 동안 유지하며 50개 무문제 때마다 조금씩 줄임. interrupted 때만 커서 리셋. turnComplete마다 `[Live] stage=playback_stats underruns=… leadMs=… interrupts=…` 로그. 홀수 바이트 청크 예외 방지.
+  - **목소리**: 코드상 voiceName은 이미 모든 연결 경로가 `Kore`로 보내고 있었음(미지정이 원인 아님). `gemini-3.8-live` 자체가 같은 voiceName에서도 응답·세션마다 음색이 흔들린다는 보고가 Google 포럼에 다수 있어 앱이 완전히 막을 수 없음. 앱 쪽 불일치만 정리: `src/config/voices.ts`(허용 목록 5종, 기본 Kore, `normalizeVoiceName`, `LIVE_LANGUAGE_CODE=null`)를 클라·서버가 공유하고, `server/liveConfig.ts`의 모든 시도와 직접 연결 setup이 같은 speechConfig(voiceName만, languageCode 없음)를 보냄(경로·시도마다 달랐던 languageCode 제거). 설정 「AI 목소리」 탭(`VoicePanel`)에서 선택·미리 듣기, `users/{uid}/settings/general.voiceName`에 저장(기본 Kore), 통화 시작 때 읽어 다음 통화부터 적용(통화 중 변경 불가). 아침 강의(코치 Kore+상대역 Puck)와 발음 듣기는 선택을 따르지 않음.
+  - **검증**: `npm test` 284/284, lint, server tsc, build 통과. 모바일 스크린샷 `/workspace/collab/onecall_feedback_20261122/shots/`. 끊김·음색은 실기기 통화로만 확인 가능(배포 후 확인).
 - **v2.10.0 이후 수정(미배포) — QA 6차 재확인 후속 (2026-11-21 KST, 브랜치 `englead/qa6-r30-28-24-29-track`)**:
   - **30행**: status 폴링 + 압축 오디오(AAC/MP3, ffmpeg 없으면 WAV). 재생성 중 3분 하드 타임아웃 없음.
   - **28행**: 홈 강의 카드가 오디오 다운로드를 기다리지 않음.

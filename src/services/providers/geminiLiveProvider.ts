@@ -1,4 +1,5 @@
 import { LIVE_MODEL } from "../../config/models";
+import { LIVE_LANGUAGE_CODE, normalizeVoiceName } from "../../config/voices";
 import {
   LiveProvider,
   LiveSessionOptions,
@@ -21,6 +22,13 @@ import {
   redactSocketUrl,
 } from "./liveWire";
 import { MAX_KICKOFF_ATTEMPTS, shouldSendKickoff, isTutorOutput } from "./liveKickoff";
+import {
+  PlaybackSchedulerState,
+  createScheduler,
+  scheduleChunk,
+  resetScheduler,
+  describeScheduler,
+} from "./audioPlaybackScheduler";
 
 /**
  * 새 통화 연결 직후 튜터가 사용자 발화를 기다리지 않고 먼저 인사하도록 유도하는 초기 신호.
@@ -106,7 +114,8 @@ export class GeminiLiveProvider implements LiveProvider {
   private recordDest: MediaStreamAudioDestinationNode | null = null;
   private deviceChangeTimer: ReturnType<typeof setTimeout> | null = null;
   private swappingMic = false;
-  private nextPlaybackTime = 0;
+  private playbackScheduler: PlaybackSchedulerState = createScheduler();
+  private interruptCount = 0;
   private activeSources: AudioBufferSourceNode[] = [];
   // Tutor voice goes AudioContext -> MediaStream -> <audio>, so phones treat it as call audio
   // (volume keys change it, earphones/Bluetooth get it). Null when we fell back to ctx.destination.
@@ -139,6 +148,8 @@ export class GeminiLiveProvider implements LiveProvider {
       this.resumeHandle = options.resumeToken;
     }
     this.connectStartedAt = Date.now();
+    this.playbackScheduler = createScheduler();
+    this.interruptCount = 0;
     // resumeToken 없이 새 Live 맥락을 열 때만 튜터 발화 여부와 kickoff 횟수를 초기화한다(재연결·resumeToken 재개에서는 유지).
     if (!options.resumeToken) {
       this.tutorSpoke = false;
@@ -395,9 +406,10 @@ export class GeminiLiveProvider implements LiveProvider {
           c,
           buildDirectSetup({
             model: LIVE_MODEL,
-            voiceName: this.options?.voiceName || "Kore",
+            voiceName: normalizeVoiceName(this.options?.voiceName),
             systemInstruction: this.activeSystemPrompt || this.options?.systemPrompt || "",
             resumeHandle: this.resumeHandle,
+            languageCode: LIVE_LANGUAGE_CODE,
           })
         );
       };
@@ -548,7 +560,7 @@ export class GeminiLiveProvider implements LiveProvider {
           c,
           buildProxyInit({
             systemInstruction: this.activeSystemPrompt || this.options?.systemPrompt || "",
-            voiceName: this.options?.voiceName || "Kore",
+            voiceName: normalizeVoiceName(this.options?.voiceName),
             resumeHandle: this.resumeHandle,
             languageCode: "en-US",
           })
@@ -796,11 +808,15 @@ export class GeminiLiveProvider implements LiveProvider {
         }
 
         if (msg.serverContent.interrupted) {
+          this.interruptCount += 1;
           this.stopAudioPlayback();
           this.options?.onInterrupted?.();
         }
 
         if (msg.serverContent.turnComplete) {
+          console.log(
+            `[Live] stage=playback_stats ${describeScheduler(this.playbackScheduler)} interrupts=${this.interruptCount}`
+          );
           this.options?.onTurnComplete?.();
         }
       }
@@ -831,9 +847,13 @@ export class GeminiLiveProvider implements LiveProvider {
         this.appendTranscript("model", msg.text);
         this.options?.onTranscript(msg.text, false);
       } else if (msg.type === "interrupted") {
+        this.interruptCount += 1;
         this.stopAudioPlayback();
         this.options?.onInterrupted?.();
       } else if (msg.type === "turnComplete") {
+        console.log(
+          `[Live] stage=playback_stats ${describeScheduler(this.playbackScheduler)} interrupts=${this.interruptCount}`
+        );
         this.options?.onTurnComplete?.();
       } else if (msg.type === "session_resumption_update" && msg.handle) {
         this.resumeHandle = msg.handle;
@@ -1121,7 +1141,7 @@ export class GeminiLiveProvider implements LiveProvider {
 
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
     this.outputAudioCtx = new AudioContextClass({ sampleRate: 24000 });
-    this.nextPlaybackTime = this.outputAudioCtx.currentTime;
+    this.playbackScheduler = createScheduler(this.outputAudioCtx.currentTime);
     this.playbackOut = this.outputAudioCtx.destination;
 
     // Played straight to ctx.destination, mobile browsers use the media channel while the mic
@@ -1149,7 +1169,10 @@ export class GeminiLiveProvider implements LiveProvider {
   private playAudioChunk(pcmBuffer: ArrayBuffer): void {
     if (!this.outputAudioCtx) return;
 
-    const pcm16 = new Int16Array(pcmBuffer);
+    const evenBytes = pcmBuffer.byteLength - (pcmBuffer.byteLength % 2);
+    if (evenBytes <= 0) return;
+
+    const pcm16 = new Int16Array(pcmBuffer, 0, evenBytes / 2);
     const float32 = new Float32Array(pcm16.length);
     for (let i = 0; i < pcm16.length; i++) {
       float32[i] = pcm16[i] / 32768.0;
@@ -1163,9 +1186,11 @@ export class GeminiLiveProvider implements LiveProvider {
     source.connect(this.playbackOut || this.outputAudioCtx.destination);
 
     const now = this.outputAudioCtx.currentTime;
-    const startTime = Math.max(now, this.nextPlaybackTime);
+    const { startTime } = scheduleChunk(this.playbackScheduler, {
+      now,
+      durationSec: audioBuffer.duration,
+    });
     source.start(startTime);
-    this.nextPlaybackTime = startTime + audioBuffer.duration;
 
     this.activeSources.push(source);
     source.onended = () => {
@@ -1184,7 +1209,7 @@ export class GeminiLiveProvider implements LiveProvider {
     }
     this.activeSources = [];
     if (this.outputAudioCtx) {
-      this.nextPlaybackTime = this.outputAudioCtx.currentTime;
+      resetScheduler(this.playbackScheduler, this.outputAudioCtx.currentTime);
     }
   }
 

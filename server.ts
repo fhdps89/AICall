@@ -5,7 +5,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
-import { GoogleGenAI, Modality, Type } from '@google/genai';
+import { GoogleGenAI, Type } from '@google/genai';
 import { requireAuth, verifyFirebaseIdToken, setAfterAuthHook } from './server/auth.ts';
 import { ensureUserGeminiKey, getUserSuppliedKey } from './server/userKey.ts';
 import { saveFeedBackup, deleteFeedBackup } from './server/feedStore.ts';
@@ -15,6 +15,8 @@ import { mimeForAudioFile } from './server/lectureAudioEncode.ts';
 import { computeMistakeClusters, validateClusterRequestBody } from './server/mistakeClusters.ts';
 import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive } from './server/sttBench.ts';
 import { LIVE_MODEL, TEXT_MODEL, GEMINI_STT_MODEL, GEMINI_TTS_LITE_MODEL } from './src/config/models.ts';
+import { LIVE_LANGUAGE_CODE, normalizeVoiceName } from './src/config/voices.ts';
+import { buildLiveConfigAttempts } from './server/liveConfig.ts';
 import { userRecordingPath as userRecordingPathIn } from './server/recordingPath.ts';
 import { apiError, noKey, NO_KEY_MESSAGE } from './server/errors.ts';
 import {
@@ -365,12 +367,7 @@ app.post('/api/gemini/tts', requireAuth, geminiLimit, async (req: Request, res: 
   }
 
   try {
-    const validVoices = ['Kore', 'Puck', 'Charon', 'Fenrir', 'Zephyr'];
-    let voice = 'Kore';
-    if (typeof voiceName === 'string') {
-      const match = validVoices.find(v => v.toLowerCase() === voiceName.trim().toLowerCase());
-      if (match) voice = match;
-    }
+    const voice = normalizeVoiceName(voiceName);
 
     const response = await ai.models.generateContent({
       model: FALLBACK_TTS_MODEL,
@@ -1444,12 +1441,7 @@ async function startServer() {
           // One Live session per socket: a repeated init would leave the first session open.
           if (liveSession || initStarted) return;
           initStarted = true;
-          const validVoices = ['Kore', 'Puck', 'Charon', 'Fenrir', 'Zephyr'];
-          let voiceName = 'Kore';
-          if (typeof msg.voiceName === 'string') {
-            const match = validVoices.find(v => v.toLowerCase() === msg.voiceName.trim().toLowerCase());
-            if (match) voiceName = match;
-          }
+          const voiceName = normalizeVoiceName(msg.voiceName);
           const systemInstruction = msg.systemInstruction || 'You are a friendly English conversation tutor on a phone call. Speak natural, simple American English in short turns, and keep the learner talking.';
 
           console.log('[Gemini Live] stage=init_received');
@@ -1540,50 +1532,14 @@ async function startServer() {
             },
           });
 
-          // Target Language configuration: English dialog with bilingual Korean support
-          const targetLang = typeof msg.languageCode === 'string' && msg.languageCode ? msg.languageCode : 'en-US';
+          // Target Language configuration: ignore client languageCode, share fixed LIVE_LANGUAGE_CODE across paths
+          const configsToTry = buildLiveConfigAttempts({
+            voiceName,
+            systemInstruction,
+            resumeHandle: msg.resumeHandle,
+          });
 
-          const configsToTry: Array<{
-            desc: string;
-            config: any;
-            lock: string;
-          }> = [
-            {
-              desc: `gemini-3.8-live with session resumption & context compression`,
-              config: {
-                responseModalities: [Modality.AUDIO],
-                inputAudioTranscription: {},
-                outputAudioTranscription: {},
-                sessionResumption: {
-                  handle: msg.resumeHandle || undefined,
-                },
-                contextWindowCompression: {
-                  slidingWindow: {},
-                },
-                speechConfig: {
-                  voiceConfig: { prebuiltVoiceConfig: { voiceName } },
-                  languageCode: targetLang,
-                },
-                systemInstruction,
-              },
-              lock: targetLang,
-            },
-            {
-              desc: 'gemini-3.8-live standard audio session',
-              config: {
-                responseModalities: [Modality.AUDIO],
-                inputAudioTranscription: {},
-                outputAudioTranscription: {},
-                speechConfig: {
-                  voiceConfig: { prebuiltVoiceConfig: { voiceName } },
-                },
-                systemInstruction,
-              },
-              lock: targetLang,
-            },
-          ];
-
-          let activeLock: string = targetLang;
+          let activeLock: string | null = LIVE_LANGUAGE_CODE;
           let activeModel = NATIVE_AUDIO_MODEL;
           let connectError: any = null;
 

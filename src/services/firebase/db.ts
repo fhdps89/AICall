@@ -15,6 +15,7 @@ import {
   limit,
 } from "firebase/firestore";
 import { db, auth } from "./config";
+import { DEFAULT_VOICE, normalizeVoiceName } from "../../config/voices";
 import { sanitizePlanChangeAfter, isEmptyPlanChange } from "../../data/planValidation";
 import type { ReviewTiming } from "../review/reviewTiming";
 import {
@@ -159,6 +160,7 @@ export interface CoachMessageData {
 
 export interface UserSettingsData {
   coachNudges: string[];
+  voiceName?: string;
   updatedAt?: string;
 }
 
@@ -1343,15 +1345,16 @@ export async function getUserSettings(userId: string): Promise<UserSettingsData>
   try {
     const snap = await getDoc(sRef);
     if (!snap.exists()) {
-      return { coachNudges: ["weekly", "absence2d"] };
+      return { coachNudges: ["weekly", "absence2d"], voiceName: DEFAULT_VOICE };
     }
     const d = snap.data() as any;
     return {
       coachNudges: Array.isArray(d.coachNudges) ? d.coachNudges : ["weekly", "absence2d"],
+      voiceName: normalizeVoiceName(d.voiceName),
       updatedAt: d.updatedAt,
     };
   } catch {
-    return { coachNudges: ["weekly", "absence2d"] };
+    return { coachNudges: ["weekly", "absence2d"], voiceName: DEFAULT_VOICE };
   }
 }
 
