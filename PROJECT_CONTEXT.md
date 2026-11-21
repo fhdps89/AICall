@@ -159,6 +159,10 @@
 ---
 
 ## 5. 버전 히스토리
+- **v2.10.0 이후 수정(미배포) — 내 학습 기록: 날짜별 통화 횟수·분·연속 학습일 저장과 표시 (2026-11-21 KST)**:
+  - **배경**: 기존 `users/{uid}/usage/{yyyy-mm}` 문서는 통화 분·토큰·예상 비용만 기록하고 통화 횟수와 연속 학습일(streak) 집계가 없어, 매일의 학습 지속 현황을 앱에서 한눈에 확인하기 어려웠음.
+  - **원인 및 수정**: `usageService.ts`의 `UsageDelta`·`UsageMonth`·`days.{DD}`에 `calls`를 추가하고, `buildUsageFields`·`buildUsagePayload` 순수 함수 분리(월 합계와 `days[day]` 동일 필드 사용, 비용 계산 `estimateCostUsd` 불변) 및 최근 3개월 병렬 조회 `getUsageMonths`(최대 3개월 제한 사유 주석 명시)를 추가. `NewCallScreen.tsx` 통화 종료 시 `learningLog.ts`의 순수 함수 `callsForDuration(callDuration)`으로 10초 이상 통화에만 `calls: 1`(10초 미만은 `0`, `liveMinutes`는 그대로) 기록. Firebase 비의존 순수 모듈 `src/services/usage/learningLog.ts`(`callsForDuration`, `summarizeLearningLog`, `getRecentMonthKeys`, `addDaysToDateStr`, `isActiveLearningDay`)로 날짜 문자열 기반 월 경계·윤년·연말·옛 데이터(`calls` 없음 → `liveMinutes >= 0.5`)를 처리하며, `thisMonth` 합계는 오늘 카드와 일치하도록 `days` 합계만으로 산출. `UsagePanel.tsx` 상단에 「내 학습 기록」 카드(오늘·이번 달·연속/최고 학습일·최근 14일 막대·빈 상태 안내·조회 실패 시 `기록을 불러오지 못했어요. 잠시 뒤 다시 열어 주세요.` 구분 표시)를 추가하고(하단 사용량 표 및 안내문 유지), `HomeScreen.tsx` 「오늘 할 것」 옆에 `연속 학습 S일` 한 줄 표시 추가(`1일 이상`일 때만 노출, 0일 및 조회 실패 시 숨김).
+  - **방어 조치·검증**: `firestore.rules` 및 `package.json` 변경 없음. `tests/learningLog.test.ts`로 빈 입력·오늘 통화·`thisMonth` `days` 단일 기준 합산·streak(오늘 포함/어제까지/0)·월 경계·윤년 2월·연말/연초·옛 데이터·14일 정렬·`bestStreakDays`·`callsForDuration`(0/9/9.9/10/600초)·`buildUsageFields` 비용 불변·`buildUsagePayload` 월/일 동일 필드를 검증.
 - **v2.10.0 (P0-1~P0-6 묶음, 2026-11-21 KST)**: 승인된 P0 실기기 QC 후속 개선 묶음 (`README.md` 헤더·v2.10.0 요약 및 `package.json`/`package-lock.json` `2.10.0` 반영).
   - **P0-1**: 복기 단계별 소요 시간 계측.
   - **P0-2**: 복기 화면 「이번 통화 성과」 표시와 빈 통화 문구 정리.

@@ -52,6 +52,8 @@ import { KeepImportModal } from "../keep/KeepImportModal";
 import { SttBenchmarkModal } from "../sttBench/SttBenchmarkModal";
 import { CoachModal } from "../coach/CoachModal";
 import { LessonChangeSheet } from "./LessonChangeSheet";
+import { getUsageMonths } from "../../services/usage/usageService";
+import { getRecentMonthKeys, summarizeLearningLog } from "../../services/usage/learningLog";
 
 interface HomeScreenProps {
   user: User;
@@ -100,6 +102,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const [userPlan, setUserPlan] = useState<UserPlanData | null>(null);
   const [userSettings, setUserSettings] = useState<UserSettingsData | null>(null);
   const [isTwoDayAbsent, setIsTwoDayAbsent] = useState<boolean>(false);
+  const [streakDays, setStreakDays] = useState<number | null>(null);
 
   const loadMistakes = async () => {
     try {
@@ -141,10 +144,23 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   };
 
   useEffect(() => {
-    if (user?.uid) {
-      loadMistakes();
-      loadPlanAndSettings();
-    }
+    if (!user?.uid) return;
+    let cancelled = false;
+    loadMistakes();
+    loadPlanAndSettings();
+    const today = getKSTToday();
+    getUsageMonths(user.uid, getRecentMonthKeys(today, 3))
+      .then((months) => {
+        if (!cancelled) {
+          setStreakDays(summarizeLearningLog(months, today).streakDays);
+        }
+      })
+      .catch(() => {
+        // 조용히 무시하고 연속 학습일 표시를 숨긴다.
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [user?.uid]);
 
   // Handle B-5 Requirement 2: advanceMistakeAfterLesson (임시 디버그)
@@ -334,7 +350,15 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
           </div>
         )}
         {/* 오늘 할 것: ① 오늘 수업 통화 → ② 오늘 아침 강의 → ③ 복습 퀴즈 */}
-        <h2 className="text-sm font-bold text-white">오늘 할 것</h2>
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-sm font-bold text-white">오늘 할 것</h2>
+          {streakDays !== null && streakDays >= 1 && (
+            <span className="text-xs text-amber-300/90 font-semibold flex items-center gap-1">
+              <Flame className="w-3.5 h-3.5 text-amber-400" />
+              <span>연속 학습 {streakDays}일</span>
+            </span>
+          )}
+        </div>
         {/* Today's Class Card (오늘 수업 카드) */}
         <section className="bg-gradient-to-br from-[#161D2A] via-[#151C28] to-[#121824] border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-xl relative overflow-hidden">
           <div className="absolute top-0 right-0 w-64 h-64 bg-amber-500/5 rounded-full blur-3xl pointer-events-none" />

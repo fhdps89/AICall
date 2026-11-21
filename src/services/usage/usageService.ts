@@ -3,7 +3,7 @@
  * { liveMinutes, sttMinutes, textTokens, ttsChars, estCostUsd, days: { "DD": { estCostUsd, ... } } }
  * Unit prices come only from PRICING_RATES in src/config/models.ts (single source).
  */
-import { doc, getDoc, setDoc, increment } from "firebase/firestore";
+import { doc, getDoc, setDoc, increment, FieldValue } from "firebase/firestore";
 import { db } from "../firebase/config";
 import { PRICING_RATES, DEFAULT_STT_ENGINE, DEFAULT_TTS_ENGINE } from "../../config/models";
 import { getKSTToday } from "../firebase/db";
@@ -18,6 +18,16 @@ export interface UsageDelta {
   textTokens?: number;
   ttsChars?: number;
   ttsEngine?: "gemini" | "elevenlabs";
+  calls?: number;
+}
+
+export interface UsageDay {
+  liveMinutes?: number;
+  sttMinutes?: number;
+  textTokens?: number;
+  ttsChars?: number;
+  estCostUsd?: number;
+  calls?: number;
 }
 
 export interface UsageMonth {
@@ -26,7 +36,8 @@ export interface UsageMonth {
   textTokens: number;
   ttsChars: number;
   estCostUsd: number;
-  days?: Record<string, { liveMinutes?: number; sttMinutes?: number; textTokens?: number; ttsChars?: number; estCostUsd?: number }>;
+  calls?: number;
+  days?: Record<string, UsageDay>;
 }
 
 export function estimateCostUsd(d: UsageDelta): number {
@@ -43,23 +54,75 @@ export function estimateCostUsd(d: UsageDelta): number {
   );
 }
 
+export interface UsageFields<T> {
+  liveMinutes: T;
+  sttMinutes: T;
+  textTokens: T;
+  ttsChars: T;
+  estCostUsd: T;
+  calls: T;
+}
+
+export type UsagePayload<T> = UsageFields<T> & {
+  days: Record<string, UsageFields<T>>;
+  updatedAt: string;
+};
+
+export function buildUsageFields(d: UsageDelta): UsageFields<FieldValue>;
+export function buildUsageFields<T>(d: UsageDelta, inc: (n: number) => T): UsageFields<T>;
+export function buildUsageFields<T>(
+  d: UsageDelta,
+  inc: (n: number) => T = increment as unknown as (n: number) => T
+): UsageFields<T> {
+  const tokens = (d.textInputTokens || 0) + (d.textOutputTokens || 0) + (d.textTokens || 0);
+  const cost = estimateCostUsd(d);
+  return {
+    liveMinutes: inc(d.liveMinutes || 0),
+    sttMinutes: inc(d.sttMinutes || 0),
+    textTokens: inc(tokens),
+    ttsChars: inc(d.ttsChars || 0),
+    estCostUsd: inc(cost),
+    calls: inc(d.calls || 0),
+  };
+}
+
+/**
+ * 월 합계와 일별(days[day])에 동일한 증분 필드를 넣어 Firestore 저장 payload를 만든다.
+ */
+export function buildUsagePayload(
+  d: UsageDelta,
+  day: string,
+  inc?: undefined,
+  updatedAt?: string
+): UsagePayload<FieldValue>;
+export function buildUsagePayload<T>(
+  d: UsageDelta,
+  day: string,
+  inc: (n: number) => T,
+  updatedAt?: string
+): UsagePayload<T>;
+export function buildUsagePayload<T>(
+  d: UsageDelta,
+  day: string,
+  inc: (n: number) => T = increment as unknown as (n: number) => T,
+  updatedAt: string = new Date().toISOString()
+): UsagePayload<T> {
+  const fields = buildUsageFields(d, inc);
+  return {
+    ...fields,
+    days: { [day]: fields },
+    updatedAt,
+  };
+}
+
 export async function recordUsage(uid: string, d: UsageDelta): Promise<void> {
   const today = getKSTToday(); // YYYY-MM-DD (KST)
   const month = today.slice(0, 7);
   const day = today.slice(8, 10);
-  const tokens = (d.textInputTokens || 0) + (d.textOutputTokens || 0) + (d.textTokens || 0);
-  const cost = estimateCostUsd(d);
-  const fields = {
-    liveMinutes: increment(d.liveMinutes || 0),
-    sttMinutes: increment(d.sttMinutes || 0),
-    textTokens: increment(tokens),
-    ttsChars: increment(d.ttsChars || 0),
-    estCostUsd: increment(cost),
-  };
   try {
     await setDoc(
       doc(db, "users", uid, "usage", month),
-      { ...fields, days: { [day]: fields }, updatedAt: new Date().toISOString() },
+      buildUsagePayload(d, day),
       { merge: true }
     );
   } catch (err) {
@@ -70,4 +133,16 @@ export async function recordUsage(uid: string, d: UsageDelta): Promise<void> {
 export async function getUsageMonth(uid: string, month = getKSTToday().slice(0, 7)): Promise<UsageMonth | null> {
   const snap = await getDoc(doc(db, "users", uid, "usage", month));
   return snap.exists() ? (snap.data() as UsageMonth) : null;
+}
+
+export async function getUsageMonths(
+  uid: string,
+  months: string[]
+): Promise<Record<string, UsageMonth | null>> {
+  // 최근 14일·연속 학습일 계산용으로 최대 3개월까지만 읽어 불필요한 Firestore 문서 조회를 제한한다.
+  const unique = Array.from(new Set(months)).slice(0, 3);
+  const entries = await Promise.all(
+    unique.map(async (m) => [m, await getUsageMonth(uid, m)] as const)
+  );
+  return Object.fromEntries(entries);
 }

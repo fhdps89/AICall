@@ -4,6 +4,21 @@
 
 ---
 
+### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — 내 학습 기록: 날짜별 통화 횟수·분·연속 학습일 저장과 표시 (브랜치 `feat/self-usage-log`)
+- **배경**:
+  - 기존 `users/{uid}/usage/{yyyy-mm}` 문서는 `liveMinutes`·토큰·예상 비용만 기록해 일별 통화 횟수와 연속 학습일(streak)을 파악할 수 없었음.
+  - 찬식님 본인 학습 확인용으로 기존 `usage` 컬렉션을 그대로 확장해 날짜별 통화 횟수·통화 분·연속 학습일을 저장하고 설정의 사용량 패널과 홈 화면에 표시하고자 함.
+- **원인과 수정**:
+  - **데이터 저장 및 조회 (`src/services/usage/usageService.ts`, `src/ui/call/NewCallScreen.tsx`)**: `UsageDelta`·`UsageMonth`·`UsageDay`(`days.{DD}`)에 `calls` 필드를 추가하고, `recordUsage`의 필드·문서 생성부를 `buildUsageFields`·`buildUsagePayload` 순수 함수로 분리해 월 합계와 `days.{DD}`에 동일한 `calls` 포함 필드를 `increment`하도록 확장(`estimateCostUsd` 비용 계산 로직은 불변). `NewCallScreen.tsx` 통화 종료 시 `learningLog.ts`의 `callsForDuration(callDuration)`을 호출해 `10초` 이상이면 `calls: 1`, 10초 미만이면 `calls: 0`을 기록(`liveMinutes`는 기존과 동일). 최근 3개월 문서를 병렬 조회하는 `getUsageMonths(uid, months)`를 추가하고 Firestore 읽기 제한 사유를 주석으로 명시.
+  - **순수 집계 모듈 (`src/services/usage/learningLog.ts`)**: Firebase 의존성 없이 `callsForDuration(sec)`과 `YYYY-MM-DD` 문자열 기준 순수 날짜 계산(`addDaysToDateStr`, `getRecentMonthKeys`) 및 `summarizeLearningLog(months, today)` 구현. 「학습한 날」은 `calls > 0 || liveMinutes >= 0.5`(옛 데이터 호환)로 판정하고, `thisMonth` 합계는 오늘 카드와 어긋나지 않도록 `days` 합계만으로 산출하며, `streakDays`(오늘 또는 어제 기준 역순 연속)·`bestStreakDays`(조회된 달 내 최장 연속)·`recentDays`(최근 14일, 오래된 날짜→오늘 순)를 계산.
+  - **UI 표시 (`src/ui/settings/UsagePanel.tsx`, `src/ui/home/HomeScreen.tsx`)**: `UsagePanel.tsx` 최상단에 「내 학습 기록」 카드(오늘 통화 N회·M분, 이번 달 N회·M분·학습한 날 K일, 연속 학습 S일·최고 B일, 최근 14일 막대 그래프, 기록 없을 시 안내 문구, 조회 실패 시 `기록을 불러오지 못했어요. 잠시 뒤 다시 열어 주세요.` 구분 표시)를 추가하고 기존 사용량·예상 비용 표 및 하단 안내문은 그대로 유지. `HomeScreen.tsx` 「오늘 할 것」 헤더 우측에 `연속 학습 S일` 한 줄 표시를 추가(`getUsageMonths` 1회 호출, `streakDays >= 1`일 때만 노출하고 0일 및 조회 실패 시 숨김).
+- **방어 조치 (Safeguards)**:
+  - 기존 `users/{uid}/usage/{yyyy-mm}` 경로만 확장해 `firestore.rules`를 변경하지 않으며, `getUsageMonths`는 중복 제거 후 최대 3개월만 조회함.
+  - 10초 미만 통화는 `callsForDuration`에서 `0`으로 처리해 실수로 건 통화가 통화 횟수나 연속 학습일에 잡히지 않도록 방어하고, `tests/learningLog.test.ts`(신규)로 빈 입력·오늘 통화·`thisMonth` `days` 단일 기준 합산·streak(오늘 포함/어제까지/0)·월 경계·윤년 2월·연말→연초·옛 데이터 임계값·14일 정렬·`bestStreakDays`·`callsForDuration`(0/9/9.9/10/600초)·`buildUsageFields` 비용 불변·`buildUsagePayload` 월/일 동일 필드를 검증.
+- **검증**: `npm test` 50/50 통과, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build` 오류 없이 통과 확인.
+
+---
+
 ### [2026-11-21 KST] v2.10.0 — P0-6 줌·텍스트 선택·배경색 통일 및 P0 묶음 릴리즈 (브랜치 `fix/p0-6-zoom-select-color`, 설계 Claude CLI Opus 5.5 high, 구현 agy Gemini 4 Hydrogen high)
 - **배경**:
   - `index.html` 뷰포트의 `maximum-scale=1.0, user-scalable=no`가 모바일 핀치 줌을 차단하고 있었으며, `index.html` `<body>`와 `CoachModal.tsx`의 `select-none`이 복기·강의·코치 텍스트 선택/복사를 막고 있었음.

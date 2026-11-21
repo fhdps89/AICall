@@ -1,26 +1,63 @@
 import React, { useEffect, useState } from "react";
-import { Loader2 } from "lucide-react";
-import { getUsageMonth, UsageMonth } from "../../services/usage/usageService";
+import { Loader2, Flame } from "lucide-react";
+import { getUsageMonths, UsageMonth } from "../../services/usage/usageService";
+import {
+  getRecentMonthKeys,
+  isActiveLearningDay,
+  summarizeLearningLog,
+} from "../../services/usage/learningLog";
 import { getKSTToday } from "../../services/firebase/db";
 import { PRICING_RATES } from "../../config/models";
 
-/** B-10 이번 달 사용량·예상 비용 */
+/** B-10 이번 달 사용량·예상 비용 + 내 학습 기록 */
 export const UsagePanel: React.FC<{ userId?: string }> = ({ userId }) => {
-  const [usage, setUsage] = useState<UsageMonth | null>(null);
+  const [months, setMonths] = useState<Record<string, UsageMonth | null>>({});
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const today = getKSTToday();
   const month = today.slice(0, 7);
 
   useEffect(() => {
     if (!userId) return;
-    getUsageMonth(userId, month)
-      .then(setUsage)
-      .catch(() => setUsage(null))
-      .finally(() => setLoading(false));
-  }, [userId, month]);
+    let cancelled = false;
+    setLoading(true);
+    setLoadError(false);
+    getUsageMonths(userId, getRecentMonthKeys(today, 3))
+      .then((res) => {
+        if (!cancelled) {
+          setMonths(res);
+          setLoadError(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setMonths({});
+          setLoadError(true);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [userId, today]);
 
   if (!userId) return <div className="text-xs text-slate-400">로그인 후 사용할 수 있어요.</div>;
   if (loading) return <div className="text-xs text-slate-400 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" />불러오는 중…</div>;
+
+  const usage = months[month] ?? null;
+  const log = summarizeLearningLog(months, today);
+  const hasCallHistory =
+    log.thisMonth.calls > 0 ||
+    log.thisMonth.minutes > 0 ||
+    log.bestStreakDays > 0 ||
+    Object.values(months).some((m) => (m?.calls || 0) > 0 || (m?.liveMinutes || 0) > 0);
+  const maxRecentMinutes = Math.max(
+    1,
+    ...log.recentDays.map((day) => day.minutes)
+  );
+
   const d = usage?.days?.[today.slice(8, 10)];
   const usd = (n?: number) => `$${(n || 0).toFixed(4)}`;
   const rows: [string, string, string][] = [
@@ -31,7 +68,99 @@ export const UsagePanel: React.FC<{ userId?: string }> = ({ userId }) => {
     ["예상 비용", usd(usage?.estCostUsd), usd(d?.estCostUsd)],
   ];
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
+      <section className="rounded-xl bg-slate-900/60 border border-slate-800 p-3.5 space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-xs font-bold text-white">내 학습 기록</h3>
+          {!loadError && hasCallHistory && (
+            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-300">
+              <Flame className="w-3.5 h-3.5 text-amber-400" />
+              <span>연속 학습 {log.streakDays}일 (최고 {log.bestStreakDays}일)</span>
+            </span>
+          )}
+        </div>
+
+        {loadError ? (
+          <p className="text-xs text-rose-300 py-2">
+            기록을 불러오지 못했어요. 잠시 뒤 다시 열어 주세요.
+          </p>
+        ) : !hasCallHistory ? (
+          <p className="text-xs text-slate-400 py-2">
+            아직 통화 기록이 없어요. 오늘 첫 통화를 해 보세요.
+          </p>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <div className="rounded-lg bg-[#121824] border border-slate-800/80 p-2.5">
+                <div className="text-[11px] text-slate-400">오늘 통화</div>
+                <div className="mt-1 font-bold text-white">
+                  {log.today.calls}회 · {log.today.minutes.toFixed(1)}분
+                </div>
+              </div>
+              <div className="rounded-lg bg-[#121824] border border-slate-800/80 p-2.5">
+                <div className="text-[11px] text-slate-400">이번 달</div>
+                <div className="mt-1 font-bold text-white">
+                  {log.thisMonth.calls}회 · {log.thisMonth.minutes.toFixed(1)}분
+                </div>
+                <div className="text-[11px] text-slate-400 mt-0.5">
+                  학습한 날 {log.thisMonth.activeDays}일
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-[11px] text-slate-400">
+                <span>최근 14일</span>
+                <span>날짜별 통화 분 (학습한 날 강조)</span>
+              </div>
+              <div className="grid grid-cols-[repeat(14,minmax(0,1fr))] gap-1 items-end pt-1">
+                {log.recentDays.map((day) => {
+                  const active = isActiveLearningDay(day.calls, day.minutes);
+                  const isToday = day.date === today;
+                  const pct =
+                    day.minutes > 0
+                      ? Math.max(18, Math.round((day.minutes / maxRecentMinutes) * 100))
+                      : active
+                      ? 18
+                      : 8;
+                  return (
+                    <div
+                      key={day.date}
+                      title={`${day.date} · ${day.calls}회 · ${day.minutes.toFixed(1)}분`}
+                      className="flex flex-col items-center gap-1"
+                    >
+                      <div className="w-full h-14 flex items-end justify-center">
+                        <div
+                          style={{ height: `${pct}%` }}
+                          className={`w-full rounded-t transition-all ${
+                            active
+                              ? "bg-amber-400"
+                              : day.minutes > 0
+                              ? "bg-slate-600"
+                              : "bg-slate-800/80"
+                          } ${isToday ? "ring-1 ring-amber-200/80" : ""}`}
+                        />
+                      </div>
+                      <span
+                        className={`text-[9px] font-mono leading-none ${
+                          isToday
+                            ? "text-amber-300 font-bold"
+                            : active
+                            ? "text-slate-300"
+                            : "text-slate-500"
+                        }`}
+                      >
+                        {Number(day.date.slice(8, 10))}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </>
+        )}
+      </section>
+
       <table className="w-full text-xs">
         <thead className="text-slate-400">
           <tr>
