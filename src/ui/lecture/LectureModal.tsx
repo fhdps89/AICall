@@ -31,13 +31,35 @@ export const LectureModal: React.FC<LectureModalProps> = ({ user, lecture, onClo
   const [done, setDone] = useState(Boolean(lecture.listenedAt));
   const [toast, setToast] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [rebuilding, setRebuilding] = useState(false);
+  const [retryTick, setRetryTick] = useState(0);
 
   useEffect(() => {
     let revoked: string | null = null;
+    let cancelled = false;
+    const ac = new AbortController();
+    setError(null);
+    setSrc(null);
+    setRebuilding(false);
+    setOffline("loading");
     (async () => {
       try {
-        const url = await resolveLectureAudio(lecture);
+        const url = await resolveLectureAudio(lecture, {
+          signal: ac.signal,
+          onRebuilding: () => {
+            if (!cancelled) setRebuilding(true);
+          },
+        });
+        if (cancelled) {
+          if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+          return;
+        }
         const cached = await cacheLectureAudio(url);
+        if (cancelled) {
+          if (cached) URL.revokeObjectURL(cached);
+          else if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+          return;
+        }
         if (cached) {
           revoked = cached;
           setSrc(cached);
@@ -47,14 +69,19 @@ export const LectureModal: React.FC<LectureModalProps> = ({ user, lecture, onClo
           setSrc(url);
           setOffline("stream");
         }
+        setRebuilding(false);
       } catch (err: any) {
+        if (cancelled) return;
+        setRebuilding(false);
         setError(friendlyError(err, "오디오를 불러오지 못했어요."));
       }
     })();
     return () => {
+      cancelled = true;
+      ac.abort();
       if (revoked) URL.revokeObjectURL(revoked);
     };
-  }, [lecture.date, lecture.audioUrl]);
+  }, [lecture.date, lecture.audioUrl, retryTick]);
 
   useEffect(() => {
     if (audioRef.current) audioRef.current.playbackRate = rate;
@@ -109,10 +136,25 @@ export const LectureModal: React.FC<LectureModalProps> = ({ user, lecture, onClo
         </div>
 
         <div className="p-5 space-y-4">
-          {error && <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm">{error}</div>}
+          {error && (
+            <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm space-y-2">
+              <div>{error}</div>
+              <button
+                type="button"
+                onClick={() => {
+                  setError(null);
+                  setRetryTick((n) => n + 1);
+                }}
+                className="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-100 text-xs font-bold cursor-pointer"
+              >
+                다시 시도
+              </button>
+            </div>
+          )}
           {!src && !error && (
             <div className="flex items-center gap-2 text-slate-400 text-sm">
-              <Loader2 className="w-4 h-4 animate-spin" /> 오디오 미리 받는 중…
+              <Loader2 className="w-4 h-4 animate-spin" />
+              {rebuilding ? "오디오를 다시 만드는 중… 1~3분 걸릴 수 있어요." : "오디오 미리 받는 중…"}
             </div>
           )}
           {src && (

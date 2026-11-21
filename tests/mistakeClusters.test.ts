@@ -13,6 +13,7 @@ import {
   cosine,
   decodeVecBase64,
   encodeVecBase64,
+  isClusterableMistake,
 } from '../server/clusterMath.ts';
 import { embedTexts } from '../server/sieEmbeddings.ts';
 import {
@@ -81,7 +82,7 @@ test('cluster: just below threshold stays separate', () => {
   assert.deepEqual(clusterBySimilarity([v0, v1]), [[0], [1]]);
 });
 
-test('cluster: single-linkage chains A~B, B~C, A!~C into one cluster (intentional)', () => {
+test('cluster: complete-linkage does not chain A~B, B~C when A!~C', () => {
   // Angle between A and B: 30 deg (cos ~ 0.866 >= 0.80)
   // Angle between B and C: 30 deg (cos ~ 0.866 >= 0.80)
   // Angle between A and C: 60 deg (cos = 0.5 < 0.80)
@@ -91,7 +92,9 @@ test('cluster: single-linkage chains A~B, B~C, A!~C into one cluster (intentiona
   assert.ok(cosine(a, b) >= CLUSTER_SIM_THRESHOLD);
   assert.ok(cosine(b, c) >= CLUSTER_SIM_THRESHOLD);
   assert.ok(cosine(a, c) < CLUSTER_SIM_THRESHOLD);
-  assert.deepEqual(clusterBySimilarity([a, b, c]), [[0, 1, 2]]);
+  const res = clusterBySimilarity([a, b, c]);
+  // A and C cannot share a cluster. Closest pair (A,B) merges; C stays alone.
+  assert.deepEqual(res, [[0, 1], [2]]);
 });
 
 test('cluster: order sorted by size desc, then first index; member sets invariant to input shuffle', () => {
@@ -130,7 +133,7 @@ test('cluster: threshold constant is pinned to 0.80', () => {
 });
 
 test('buildEmbeddingText: labeled format, whitespace collapse & 200/200/300 truncation', () => {
-  assert.equal(EMBED_TEXT_VERSION, 1);
+  assert.equal(EMBED_TEXT_VERSION, 2);
   const longWrong = 'a'.repeat(250);
   const longCorrect = 'b'.repeat(250);
   const longWhy = 'c'.repeat(350);
@@ -139,7 +142,7 @@ test('buildEmbeddingText: labeled format, whitespace collapse & 200/200/300 trun
     naturalPhrase: ` ${longCorrect} `,
     reason: `  ${longWhy} `,
   });
-  assert.ok(text.startsWith('Instruct: '));
+  assert.ok(text.startsWith('Instruct: Identify the type of English grammar or usage error'));
   assert.ok(text.includes('\nQuery: wrong: '));
   assert.ok(text.includes(' | correct: '));
   assert.ok(text.includes(' | why: '));
@@ -153,6 +156,26 @@ test('buildEmbeddingText: labeled format, whitespace collapse & 200/200/300 trun
     reason: ' 과거   시제 ',
   });
   assert.ok(spaced.includes('wrong: I go yesterday | correct: I went yesterday | why: 과거 시제'));
+});
+
+
+test('isClusterableMistake: drops truncated fragments, short non-English, keeps short English mistakes', () => {
+  assert.deepEqual(isClusterableMistake({ myPhrase: "while discussing o" }), { ok: false, reason: 'truncated' });
+  assert.deepEqual(isClusterableMistake({ myPhrase: 'inter-' }), { ok: false, reason: 'truncated' });
+  assert.deepEqual(isClusterableMistake({ myPhrase: 'A ver.' }), { ok: false, reason: 'non_english' });
+  assert.deepEqual(isClusterableMistake({ myPhrase: '' }), { ok: false, reason: 'too_short' });
+  assert.deepEqual(isClusterableMistake({ myPhrase: '??' }), { ok: false, reason: 'too_short' });
+  assert.equal(isClusterableMistake({ myPhrase: 'I go' }).ok, true);
+  assert.equal(isClusterableMistake({ myPhrase: 'I buy' }).ok, true);
+  assert.equal(isClusterableMistake({ myPhrase: 'I want a' }).ok, true);
+  // Known limit: a longer non-English phrase with a 4+ letter token is kept.
+  assert.equal(isClusterableMistake({ myPhrase: 'Yo tengo hambre' }).ok, true);
+  assert.equal(isClusterableMistake({ myPhrase: 'He go yesterday' }).ok, true);
+  assert.equal(isClusterableMistake({ myPhrase: 'Can you fix it?' }).ok, true);
+  assert.equal(isClusterableMistake({ myPhrase: "recieve the package" }).ok, true);
+  assert.equal(isClusterableMistake({ myPhrase: 'much cheaper than now' }).ok, true);
+  assert.equal(isClusterableMistake({ myPhrase: 'I go 1' }).ok, true);
+  assert.equal(isClusterableMistake({ myPhrase: 'wrong 3' }).ok, true);
 });
 
 test('clusterKey: stable regardless of member order', () => {
@@ -410,8 +433,18 @@ test('sie: error log contains no auth header or key', async () => {
 // C. Cache & orchestration tests (temp DATA_DIR, stub fetch & naming)
 // ---------------------------------------------------------------------------
 
-function makeItem(id: string, myPhrase: string, naturalPhrase: string, reason: string): ClusterRequestItem {
-  return { id, myPhrase, naturalPhrase, reason };
+function makeItem(id: string, myPhrase?: string, naturalPhrase?: string, reason = '시제'): ClusterRequestItem {
+  return {
+    id,
+    myPhrase: myPhrase ?? `I go ${id}`,
+    naturalPhrase: naturalPhrase ?? `I went ${id}`,
+    reason,
+  };
+}
+
+/** Unique, clusterable English stand-in so short fixture tags are not dropped by isClusterableMistake. */
+function en(tag: string): string {
+  return `I go ${tag} today`;
 }
 
 test('no key -> enabled:false no_key, fetch not called', async () => {
@@ -428,7 +461,7 @@ test('no key -> enabled:false no_key, fetch not called', async () => {
         }) as typeof fetch,
       },
       'user-1',
-      [makeItem('1', 'a', 'b', 'r'), makeItem('2', 'c', 'd', 'r')]
+      [makeItem('1', en('a'), en('b'), 'r'), makeItem('2', en('c'), en('d'), 'r')]
     );
     assert.equal(fetchCalls, 0);
     assert.deepEqual(res, {
@@ -452,7 +485,7 @@ test('fewer than 2 items -> too_few, fetch not called (0 and 1 items)', async ()
   }) as typeof fetch;
 
   try {
-    for (const list of [[], [makeItem('1', 'a', 'b', 'r')]]) {
+    for (const list of [[], [makeItem('1', en('a'), en('b'), 'r')]]) {
       const res = await computeMistakeClusters(
         { apiKey: DUMMY_KEY, dataDir: tmp, fetchImpl: fetchStub },
         'user-1',
@@ -466,6 +499,83 @@ test('fewer than 2 items -> too_few, fetch not called (0 and 1 items)', async ()
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+
+test('junk originals are dropped before SIE; remaining English mistakes still cluster', async () => {
+  const tmp = makeTempDir();
+  const seenInputs: string[][] = [];
+  const fetchStub = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body || '{}')) as { input?: string[] };
+    seenInputs.push(body.input || []);
+    const vecs = (body.input || []).map((_, i) => ({
+      index: i,
+      embedding: i === 0 ? [1, 0] : [0.99, 0.01],
+    }));
+    return makeJsonResponse(200, { data: vecs, usage: { prompt_tokens: body.input?.length || 0 } });
+  }) as typeof fetch;
+
+  try {
+    const res = await computeMistakeClusters(
+      {
+        apiKey: DUMMY_KEY,
+        dataDir: tmp,
+        logger: () => {},
+        fetchImpl: fetchStub,
+        generateClusterNames: async (clusters) => ({
+          items: clusters.map((c) => ({ key: c.key, name: '과거시제 오류', description: '시제를 빠뜨림' })),
+          inputTokens: 1,
+          outputTokens: 1,
+        }),
+      },
+      'user-junk',
+      [
+        makeItem('junk-es', 'A ver.', "Let's see.", 'filler'),
+        makeItem('junk-cut', 'while discussing o', 'while discussing it', 'cut'),
+        makeItem('m1', 'I go yesterday', 'I went yesterday', '시제'),
+        makeItem('m2', 'She go to school', 'She went to school', '시제'),
+      ]
+    );
+    assert.equal(res.enabled, true);
+    assert.equal(seenInputs.length, 1);
+    assert.equal(seenInputs[0].length, 2);
+    assert.ok(seenInputs[0].every((text) => text.includes('wrong: I go') || text.includes('wrong: She go')));
+    assert.ok(res.ok && res.enabled && res.clusters.length === 1);
+    if (res.ok && res.enabled) {
+      assert.deepEqual(res.clusters[0].memberIds.sort(), ['m1', 'm2']);
+      assert.equal(res.clusters[0].size, 2);
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('only junk leftovers after filter -> enabled with empty clusters, no SIE call', async () => {
+  const tmp = makeTempDir();
+  let fetchCalls = 0;
+  try {
+    const res = await computeMistakeClusters(
+      {
+        apiKey: DUMMY_KEY,
+        dataDir: tmp,
+        fetchImpl: (async () => {
+          fetchCalls++;
+          return makeJsonResponse(200, {});
+        }) as typeof fetch,
+      },
+      'user-junk-only',
+      [
+        makeItem('j1', 'A ver.', "Let's see.", 'es'),
+        makeItem('j2', 'while discussing o', 'while discussing it', 'cut'),
+      ]
+    );
+    assert.equal(fetchCalls, 0);
+    assert.equal(res.enabled, true);
+    assert.deepEqual(res.clusters, []);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 
 test('same id + same text embeds once; second call hits cache with 0 SIE tokens', async () => {
   const tmp = makeTempDir();
@@ -556,8 +666,8 @@ test('model or textVersion change in cache invalidates and re-embeds', async () 
   const tmp = makeTempDir();
   let fetchCalls = 0;
   const items = [
-    makeItem('m1', 'a', 'b', 'r'),
-    makeItem('m2', 'c', 'd', 'r'),
+    makeItem('m1', en('a'), en('b'), 'r'),
+    makeItem('m2', en('c'), en('d'), 'r'),
   ];
   const deps = {
     apiKey: DUMMY_KEY,
@@ -606,13 +716,13 @@ test('removed ids pruned from cache file and cache filename hides raw uid', asyn
 
   try {
     await computeMistakeClusters(deps, uid, [
-      makeItem('m1', 'a', 'b', 'r'),
-      makeItem('m2', 'c', 'd', 'r'),
-      makeItem('m3', 'e', 'f', 'r'),
+      makeItem('m1', en('a'), en('b'), 'r'),
+      makeItem('m2', en('c'), en('d'), 'r'),
+      makeItem('m3', en('e'), en('f'), 'r'),
     ]);
     await computeMistakeClusters(deps, uid, [
-      makeItem('m1', 'a', 'b', 'r'),
-      makeItem('m3', 'e', 'f', 'r'),
+      makeItem('m1', en('a'), en('b'), 'r'),
+      makeItem('m3', en('e'), en('f'), 'r'),
     ]);
 
     const filePath = clusterCachePath(uid, tmp);
@@ -646,7 +756,7 @@ test('corrupt cache file -> treated empty, no throw, rewritten cleanly', async (
         }) as typeof fetch,
       },
       'user-corrupt',
-      [makeItem('m1', 'a', 'b', 'r'), makeItem('m2', 'c', 'd', 'r')]
+      [makeItem('m1', en('a'), en('b'), 'r'), makeItem('m2', en('c'), en('d'), 'r')]
     );
 
     assert.equal(res.enabled, true);
@@ -714,7 +824,7 @@ test('SIE failure -> enabled:false; Gemini naming not called', async () => {
         },
       },
       'user-1',
-      [makeItem('m1', 'a', 'b', 'r'), makeItem('m2', 'c', 'd', 'r')]
+      [makeItem('m1', en('a'), en('b'), 'r'), makeItem('m2', en('c'), en('d'), 'r')]
     );
     assert.equal(res.enabled, false);
     assert.equal(namingCalls, 0);
@@ -745,8 +855,8 @@ test('naming failure -> enabled:true with fallback titles (and not cached)', asy
 
   try {
     const first = await computeMistakeClusters(deps, 'user-1', [
-      makeItem('m1', 'a', 'b', 'r'),
-      makeItem('m2', 'c', 'd', 'r'),
+      makeItem('m1', en('a'), en('b'), 'r'),
+      makeItem('m2', en('c'), en('d'), 'r'),
     ]);
     assert.equal(first.enabled, true);
     if (first.enabled) {
@@ -757,8 +867,8 @@ test('naming failure -> enabled:true with fallback titles (and not cached)', asy
 
     // Fallback names were not cached, so naming is retried on next call
     await computeMistakeClusters(deps, 'user-1', [
-      makeItem('m1', 'a', 'b', 'r'),
-      makeItem('m2', 'c', 'd', 'r'),
+      makeItem('m1', en('a'), en('b'), 'r'),
+      makeItem('m2', en('c'), en('d'), 'r'),
     ]);
     assert.equal(namingCalls, 2);
   } finally {
@@ -784,7 +894,7 @@ test('naming cached per cluster key; adding member triggers naming only for chan
       const body = JSON.parse(String(init?.body)) as { input: string[] };
       return makeJsonResponse(200, {
         data: body.input.map((t, idx) => {
-          const match = /wrong: (\w+)/.exec(t);
+          const match = /wrong: I go (\w+) today/.exec(t);
           const vec = (match && vecByWrong[match[1]]) || [1, 0];
           return { index: idx, embedding: vec };
         }),
@@ -803,10 +913,10 @@ test('naming cached per cluster key; adding member triggers naming only for chan
 
   try {
     const base = [
-      makeItem('m1', 'a1', 'r', 'why'),
-      makeItem('m2', 'a2', 'r', 'why'),
-      makeItem('m3', 'b1', 'r', 'why'),
-      makeItem('m4', 'b2', 'r', 'why'),
+      makeItem('m1', en('a1'), en('right'), 'why'),
+      makeItem('m2', en('a2'), en('right'), 'why'),
+      makeItem('m3', en('b1'), en('right'), 'why'),
+      makeItem('m4', en('b2'), en('right'), 'why'),
     ];
     await computeMistakeClusters(deps, 'user-1', base);
     assert.equal(namedKeyBatches.length, 1);
@@ -819,7 +929,7 @@ test('naming cached per cluster key; adding member triggers naming only for chan
     // Add a3 to cluster A -> only cluster A's new key is sent to naming
     await computeMistakeClusters(deps, 'user-1', [
       ...base,
-      makeItem('m5', 'a3', 'r', 'why'),
+      makeItem('m5', en('a3'), en('right'), 'why'),
     ]);
     assert.equal(namedKeyBatches.length, 2);
     assert.equal(namedKeyBatches[1].length, 1);
@@ -840,7 +950,7 @@ test('naming output validated: too-long name and unknown key fall back', async (
           const body = JSON.parse(String(init?.body)) as { input: string[] };
           return makeJsonResponse(200, {
             data: body.input.map((t, idx) => {
-              const isB = t.includes('wrong: b');
+              const isB = /wrong: I go b/.test(t);
               return { index: idx, embedding: isB ? [0, 1] : [1, 0] };
             }),
             usage: { prompt_tokens: 10 },
@@ -857,10 +967,10 @@ test('naming output validated: too-long name and unknown key fall back', async (
       },
       'user-1',
       [
-        makeItem('m1', 'a1', 'r', 'why'),
-        makeItem('m2', 'a2', 'r', 'why'),
-        makeItem('m3', 'b1', 'r', 'why'),
-        makeItem('m4', 'b2', 'r', 'why'),
+        makeItem('m1', en('a1'), en('right'), 'why'),
+        makeItem('m2', en('a2'), en('right'), 'why'),
+        makeItem('m3', en('b1'), en('right'), 'why'),
+        makeItem('m4', en('b2'), en('right'), 'why'),
       ]
     );
 
@@ -881,10 +991,10 @@ test('response only includes size >= 2, max 8 clusters, no vectors; usage separa
   // Create 10 distinct clusters of size 2 + 1 singleton = 21 items
   const items: ClusterRequestItem[] = [];
   for (let g = 0; g < 10; g++) {
-    items.push(makeItem(`g${g}_1`, `w${g}_1`, 'c', 'r'));
-    items.push(makeItem(`g${g}_2`, `w${g}_2`, 'c', 'r'));
+    items.push(makeItem(`g${g}_1`, en(`w${g}_1`), en('c'), 'r'));
+    items.push(makeItem(`g${g}_2`, en(`w${g}_2`), en('c'), 'r'));
   }
-  items.push(makeItem('single', 'ws', 'c', 'r'));
+  items.push(makeItem('single', en('ws'), en('c'), 'r'));
 
   try {
     const res = await computeMistakeClusters(
@@ -896,7 +1006,7 @@ test('response only includes size >= 2, max 8 clusters, no vectors; usage separa
           return makeJsonResponse(200, {
             data: body.input.map((t, idx) => {
               const vec = new Array(11).fill(0);
-              const m = /wrong: w(\d+)_/.exec(t);
+              const m = /wrong: I go w(\d+)_/.exec(t);
               if (m) vec[Number(m[1])] = 1;
               else vec[10] = 1;
               return { index: idx, embedding: vec };

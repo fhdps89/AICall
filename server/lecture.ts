@@ -57,6 +57,8 @@ export interface LectureState {
   textTokens?: number;
   durationSec?: number;
   audioFile?: string; // relative file name inside LECTURE_DIR/{uid}
+  /** Audio generation only. Do not use status=generating for a TTS rebuild of a ready script. */
+  audioStatus?: 'ready' | 'rebuilding' | 'missing';
   error?: string;
   createdAt: string;
   updatedAt: string;
@@ -105,6 +107,224 @@ export function lectureAudioPath(uid: string, date: string): string | null {
   if (!st?.audioFile) return null;
   const p = path.join(userDir(uid), path.basename(st.audioFile));
   return fs.existsSync(p) ? p : null;
+}
+
+export function lectureHasLocalScript(uid: string, date: string): boolean {
+  const st = readLectureState(uid, date);
+  return Array.isArray(st?.script) && st!.script!.length > 0;
+}
+
+export const LECTURE_AUDIO_MISSING = 'LECTURE_AUDIO_MISSING';
+export const LECTURE_AUDIO_SCRIPT_MISSING = 'LECTURE_AUDIO_SCRIPT_MISSING';
+export const MAX_LECTURE_SCRIPT_ITEMS = MAX_NEW + MAX_REVIEW;
+
+export type LecturePcm = { data: Buffer; rate: number };
+export type LectureSynthesizeFn = (
+  ai: GoogleGenAI,
+  engine: 'gemini' | 'elevenlabs',
+  text: string,
+  twoSpeakers: boolean
+) => Promise<LecturePcm>;
+
+export interface LectureAudioScriptPayload {
+  title?: string;
+  coachNote?: string;
+  script: LectureScriptItem[];
+  itemCount?: number;
+  newMistakeIds?: string[];
+  reviewMistakeIds?: string[];
+  ttsEngine?: 'gemini' | 'elevenlabs';
+  createdAt?: string;
+  textTokens?: number;
+}
+
+export type LectureScriptSanitizeResult =
+  | { ok: true; payload: LectureAudioScriptPayload }
+  | { ok: false; error: string };
+
+export function sanitizeLectureScriptPayload(raw: unknown): LectureScriptSanitizeResult {
+  if (!raw || typeof raw !== 'object') return { ok: false, error: 'script payload must be an object' };
+  const obj = raw as Record<string, unknown>;
+  if (!Array.isArray(obj.script)) return { ok: false, error: 'script must be an array' };
+  if (obj.script.length === 0) return { ok: false, error: 'script is empty' };
+  if (obj.script.length > MAX_LECTURE_SCRIPT_ITEMS) {
+    return { ok: false, error: `script must not exceed ${MAX_LECTURE_SCRIPT_ITEMS} items` };
+  }
+  const items: LectureScriptItem[] = [];
+  for (const row of obj.script) {
+    if (!row || typeof row !== 'object') return { ok: false, error: 'each script item must be an object' };
+    const it = row as Record<string, unknown>;
+    if (typeof it.mistakeId !== 'string' || !it.mistakeId.trim()) {
+      return { ok: false, error: 'script item needs mistakeId' };
+    }
+    if (typeof it.myPhrase !== 'string' || typeof it.naturalPhrase !== 'string') {
+      return { ok: false, error: 'script item needs myPhrase and naturalPhrase' };
+    }
+    const kind = it.kind === 'review' ? 'review' : 'new';
+    const dialogue = Array.isArray(it.dialogue)
+      ? it.dialogue.slice(0, 4).flatMap((d) => {
+          if (!d || typeof d !== 'object') return [];
+          const line = d as Record<string, unknown>;
+          if (typeof line.line !== 'string') return [];
+          const speaker = line.speaker === 'Partner' ? 'Partner' : 'Coach';
+          return [{ speaker: speaker as 'Coach' | 'Partner', line: String(line.line).slice(0, 400) }];
+        })
+      : [];
+    items.push({
+      mistakeId: String(it.mistakeId).slice(0, 80),
+      kind,
+      myPhrase: String(it.myPhrase).slice(0, 400),
+      naturalPhrase: String(it.naturalPhrase).slice(0, 400),
+      explanation: String(it.explanation || '').slice(0, 800),
+      dialogue,
+      meaningKo: String(it.meaningKo || '').slice(0, 400),
+      answerEnglish: String(it.answerEnglish || it.naturalPhrase).slice(0, 400),
+      startSec: typeof it.startSec === 'number' && Number.isFinite(it.startSec) ? it.startSec : undefined,
+    });
+  }
+  const ids = (list: unknown) =>
+    (Array.isArray(list) ? list : []).filter((x) => typeof x === 'string').map((x) => String(x).slice(0, 80));
+  return {
+    ok: true,
+    payload: {
+      title: typeof obj.title === 'string' ? obj.title.slice(0, 80) : undefined,
+      coachNote: typeof obj.coachNote === 'string' ? obj.coachNote.slice(0, 1200) : undefined,
+      script: items,
+      itemCount: items.length,
+      newMistakeIds: ids(obj.newMistakeIds),
+      reviewMistakeIds: ids(obj.reviewMistakeIds),
+      ttsEngine: obj.ttsEngine === 'elevenlabs' ? 'elevenlabs' : 'gemini',
+      createdAt: typeof obj.createdAt === 'string' ? obj.createdAt : undefined,
+      textTokens: typeof obj.textTokens === 'number' && Number.isFinite(obj.textTokens) ? obj.textTokens : undefined,
+    },
+  };
+}
+
+const rebuildDone = new Map<string, Promise<void>>();
+
+export function lectureRebuildInFlight(uid: string, date: string): Promise<void> | undefined {
+  return rebuildDone.get(`${uid}:${date}`);
+}
+
+/**
+ * Re-render TTS from an existing script when the WAV was lost (e.g. server disk wiped on redeploy).
+ * Keeps status=ready so a ready lecture is not flipped to generating/INTERRUPTED.
+ */
+export function startLectureAudioRebuild(
+  ai: GoogleGenAI,
+  uid: string,
+  date: string,
+  payload?: unknown,
+  opts: { synthesizeFn?: LectureSynthesizeFn } = {}
+): LectureState {
+  safeDate(date);
+  const key = `${uid}:${date}`;
+  const existingPath = lectureAudioPath(uid, date);
+  const existing = readLectureState(uid, date);
+  if (existingPath && existing) {
+    return { ...existing, status: 'ready', audioStatus: 'ready' };
+  }
+  if (running.has(key) && existing) {
+    return { ...existing, audioStatus: 'rebuilding' };
+  }
+
+  let scriptItems = existing?.script;
+  let title = existing?.title;
+  let coachNote = existing?.coachNote;
+  let newMistakeIds = existing?.newMistakeIds || [];
+  let reviewMistakeIds = existing?.reviewMistakeIds || [];
+  let ttsEngine: 'gemini' | 'elevenlabs' = existing?.ttsEngine || 'gemini';
+  let createdAt = existing?.createdAt;
+  let textTokens = existing?.textTokens;
+
+  if ((!scriptItems || scriptItems.length === 0) && payload !== undefined) {
+    const sanitized = sanitizeLectureScriptPayload(payload);
+    if (!sanitized.ok) {
+      const failed: LectureState = {
+        uid,
+        date,
+        status: existing?.status === 'ready' ? 'ready' : 'failed',
+        newMistakeIds,
+        reviewMistakeIds,
+        ttsEngine,
+        createdAt: createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        audioStatus: 'missing',
+        error: sanitized.error,
+      };
+      if (existing?.status === 'ready') {
+        // Keep the ready lecture; just report that rebuild could not start.
+        return { ...existing, audioStatus: 'missing', error: sanitized.error };
+      }
+      writeLectureState(failed);
+      return failed;
+    }
+    scriptItems = sanitized.payload.script;
+    title = sanitized.payload.title || title;
+    coachNote = sanitized.payload.coachNote ?? coachNote;
+    if (sanitized.payload.newMistakeIds?.length) newMistakeIds = sanitized.payload.newMistakeIds;
+    if (sanitized.payload.reviewMistakeIds?.length) reviewMistakeIds = sanitized.payload.reviewMistakeIds;
+    ttsEngine = sanitized.payload.ttsEngine || ttsEngine;
+    createdAt = sanitized.payload.createdAt || createdAt;
+    textTokens = sanitized.payload.textTokens ?? textTokens;
+  }
+
+  if (!scriptItems || scriptItems.length === 0) {
+    const st: LectureState = {
+      uid,
+      date,
+      status: existing?.status === 'ready' ? 'ready' : 'failed',
+      newMistakeIds,
+      reviewMistakeIds,
+      ttsEngine,
+      createdAt: createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      audioStatus: 'missing',
+      error: LECTURE_AUDIO_SCRIPT_MISSING,
+      ...(existing || {}),
+    };
+    st.status = existing?.status === 'ready' ? 'ready' : 'failed';
+    st.audioStatus = 'missing';
+    st.error = LECTURE_AUDIO_SCRIPT_MISSING;
+    if (existing?.status !== 'ready') writeLectureState(st);
+    return st;
+  }
+
+  const now = new Date().toISOString();
+  const state: LectureState = {
+    ...(existing || {}),
+    uid,
+    date,
+    status: 'ready',
+    title: title || existing?.title || '오늘 아침 강의',
+    script: scriptItems,
+    coachNote,
+    itemCount: scriptItems.length,
+    newMistakeIds,
+    reviewMistakeIds,
+    ttsEngine,
+    textTokens,
+    createdAt: createdAt || existing?.createdAt || now,
+    updatedAt: now,
+    audioStatus: 'rebuilding',
+  };
+  delete state.error;
+  delete state.audioFile;
+  writeLectureState(state);
+  running.add(key);
+  const done = renderAndSaveAudio(ai, state, { title: state.title || '오늘 아침 강의', items: scriptItems, coachNote: state.coachNote || '' }, opts.synthesizeFn)
+    .catch((err) => {
+      console.error('[Lecture] audio rebuild failed:', err);
+      state.audioStatus = 'missing';
+      state.error = 'GENERATION_FAILED';
+      writeLectureState(state);
+    })
+    .finally(() => {
+      running.delete(key);
+      rebuildDone.delete(key);
+    });
+  rebuildDone.set(key, done.then(() => undefined));
+  return state;
 }
 
 const running = new Set<string>();
@@ -411,17 +631,27 @@ async function runJob(
   state.textTokens = script.tokens;
   writeLectureState(state);
 
+  await renderAndSaveAudio(ai, state, script);
+}
+
+async function renderAndSaveAudio(
+  ai: GoogleGenAI,
+  state: LectureState,
+  script: { title: string; items: LectureScriptItem[]; coachNote: string },
+  synthesizeFn?: LectureSynthesizeFn
+): Promise<void> {
   const RATE = 24000;
   const pieces: Buffer[] = [];
   let totalBytes = 0;
   let chars = 0;
+  const synth = synthesizeFn || synthesize;
   const push = (b: Buffer) => {
     pieces.push(b);
     totalBytes += b.length;
   };
   const say = async (text: string, two: boolean) => {
     chars += text.length;
-    push(resample(await synthesize(ai, state.ttsEngine, text, two), RATE));
+    push(resample(await synth(ai, state.ttsEngine, text, two), RATE));
   };
   const silence = (sec: number) => push(Buffer.alloc(Math.round(sec * RATE) * 2));
 
@@ -450,12 +680,22 @@ async function runJob(
 
   const pcm = Buffer.concat(pieces);
   const fileName = `${state.date}.wav`;
-  fs.writeFileSync(path.join(userDir(state.uid), fileName), wavFromPcm(pcm, RATE));
+  const dir = userDir(state.uid);
+  const finalPath = path.join(dir, fileName);
+  const tmpPath = path.join(dir, `${fileName}.${process.pid}.tmp`);
+  try {
+    fs.writeFileSync(tmpPath, wavFromPcm(pcm, RATE));
+    fs.renameSync(tmpPath, finalPath);
+  } catch (err) {
+    try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+    throw err;
+  }
   state.script = script.items;
   state.chars = chars;
   state.durationSec = Math.round(pcm.length / 2 / RATE);
   state.audioFile = fileName;
   state.status = 'ready';
+  state.audioStatus = 'ready';
   delete state.error;
   writeLectureState(state);
 }

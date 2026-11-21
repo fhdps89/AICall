@@ -583,6 +583,9 @@ export const App: React.FC = () => {
   }
 
   // 5. Authenticated Main Home View
+  const showUnfinishedPill =
+    unfinishedSessions.length > 0 && !showUnfinishedModal && !isGeneratingReview && !reviewFailure && !activeReviewData;
+
   return (
     <>
       <HomeScreen
@@ -597,6 +600,7 @@ export const App: React.FC = () => {
         onStartCall={handleStartCall}
         onOpenSettings={() => setShowSettingsModal(true)}
         onLogout={handleLogout}
+        reserveBottomForPill={showUnfinishedPill}
       />
 
       {/* Dedicated post-call review flow: loading → (ReviewModal) | in-app failure card */}
@@ -614,10 +618,12 @@ export const App: React.FC = () => {
       )}
 
       {/* 끝나지 않은 통화 안내 띠: 창을 닫았거나 복기를 나중으로 미뤘을 때 다시 여는 곳 */}
-      {unfinishedSessions.length > 0 && !showUnfinishedModal && !isGeneratingReview && !reviewFailure && !activeReviewData && (
+      {showUnfinishedPill && (
         <button
+          type="button"
+          data-testid="unfinished-call-pill"
           onClick={() => setShowUnfinishedModal(true)}
-          className="fixed bottom-safe left-1/2 -translate-x-1/2 z-40 px-4 py-2.5 rounded-full bg-amber-500 text-slate-950 text-xs font-bold shadow-xl shadow-amber-500/20 cursor-pointer"
+          className="fixed bottom-safe left-1/2 -translate-x-1/2 z-40 px-4 py-2.5 rounded-full bg-amber-500 text-slate-950 text-xs font-bold shadow-xl shadow-amber-500/20 cursor-pointer whitespace-nowrap"
         >
           끝나지 않은 통화 {unfinishedSessions.length}개 · 복기하기
         </button>
