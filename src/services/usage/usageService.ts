@@ -115,6 +115,8 @@ export function buildUsagePayload<T>(
   };
 }
 
+export const USAGE_UPDATED_EVENT = "aicall:usage-updated";
+
 export async function recordUsage(uid: string, d: UsageDelta): Promise<void> {
   const today = getKSTToday(); // YYYY-MM-DD (KST)
   const month = today.slice(0, 7);
@@ -125,6 +127,9 @@ export async function recordUsage(uid: string, d: UsageDelta): Promise<void> {
       buildUsagePayload(d, day),
       { merge: true }
     );
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event(USAGE_UPDATED_EVENT));
+    }
   } catch (err) {
     console.warn("[usage] record failed (non-fatal):", err);
   }

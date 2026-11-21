@@ -14,7 +14,6 @@ import {
   UserSettingsData,
   initUserPlanIfMissing,
   getUserPlan,
-  checkTwoDayAbsence,
   getUserSettings,
   getPlanChanges,
   createPlanChange,
@@ -52,8 +51,14 @@ import { KeepImportModal } from "../keep/KeepImportModal";
 import { SttBenchmarkModal } from "../sttBench/SttBenchmarkModal";
 import { CoachModal } from "../coach/CoachModal";
 import { LessonChangeSheet } from "./LessonChangeSheet";
-import { getUsageMonths } from "../../services/usage/usageService";
-import { getRecentMonthKeys, summarizeLearningLog } from "../../services/usage/learningLog";
+import { getUsageMonths, USAGE_UPDATED_EVENT } from "../../services/usage/usageService";
+import {
+  deriveHomeLearningStatus,
+  getRecentMonthKeys,
+  restBannerTitle,
+  summarizeLearningLog,
+  type LearningLogSummary,
+} from "../../services/usage/learningLog";
 
 interface HomeScreenProps {
   user: User;
@@ -101,8 +106,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   // B-9 Plan & Coach States
   const [userPlan, setUserPlan] = useState<UserPlanData | null>(null);
   const [userSettings, setUserSettings] = useState<UserSettingsData | null>(null);
-  const [isTwoDayAbsent, setIsTwoDayAbsent] = useState<boolean>(false);
-  const [streakDays, setStreakDays] = useState<number | null>(null);
+  const [learningSummary, setLearningSummary] = useState<LearningLogSummary | null>(null);
+  const learningReqRef = useRef(0);
+  const learningInFlightRef = useRef<Promise<void> | null>(null);
 
   const loadMistakes = async () => {
     try {
@@ -130,12 +136,6 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       const s = await getUserSettings(user.uid);
       setUserSettings(s);
 
-      // B-9 Requirement 5: 이틀 연속 결석 체크 (어제·그제 통화 done 세션 없음)
-      if (s.coachNudges.includes("absence2d")) {
-        const absent = await checkTwoDayAbsence(user.uid);
-        setIsTwoDayAbsent(absent);
-      }
-
       // B-9 Requirement 2: OPIc 시험 날짜(deadline) 1~2주 전 모의고사 배치 자동 제안 (승인 전엔 plan/goals 미반영)
       checkOpicDeadlineMockProposal(user.uid, goals, p);
     } catch (err) {
@@ -145,23 +145,60 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
 
   useEffect(() => {
     if (!user?.uid) return;
-    let cancelled = false;
     loadMistakes();
     loadPlanAndSettings();
-    const today = getKSTToday();
-    getUsageMonths(user.uid, getRecentMonthKeys(today, 3))
-      .then((months) => {
-        if (!cancelled) {
-          setStreakDays(summarizeLearningLog(months, today).streakDays);
+
+    const refreshLearningSummary = () => {
+      if (learningInFlightRef.current) {
+        return learningInFlightRef.current;
+      }
+      const reqId = ++learningReqRef.current;
+      const today = getKSTToday();
+      let promise: Promise<void> | null = null;
+      promise = (async () => {
+        try {
+          const months = await getUsageMonths(user.uid, getRecentMonthKeys(today, 3));
+          if (reqId === learningReqRef.current) {
+            setLearningSummary(summarizeLearningLog(months, today));
+          }
+        } catch {
+          // 실패 시 두 표시 모두 숨긴다.
+          if (reqId === learningReqRef.current) {
+            setLearningSummary(null);
+          }
+        } finally {
+          if (learningInFlightRef.current === promise) {
+            learningInFlightRef.current = null;
+          }
         }
-      })
-      .catch(() => {
-        // 조용히 무시하고 연속 학습일 표시를 숨긴다.
-      });
+      })();
+      learningInFlightRef.current = promise;
+      return promise;
+    };
+
+    void refreshLearningSummary();
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void refreshLearningSummary();
+      }
+    };
+    const handleUsageUpdated = () => {
+      void refreshLearningSummary();
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener(USAGE_UPDATED_EVENT, handleUsageUpdated);
+
     return () => {
-      cancelled = true;
+      learningReqRef.current += 1;
+      learningInFlightRef.current = null;
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener(USAGE_UPDATED_EVENT, handleUsageUpdated);
     };
   }, [user?.uid]);
+
+  const { streakDays, restDays } = deriveHomeLearningStatus(learningSummary);
 
   // Handle B-5 Requirement 2: advanceMistakeAfterLesson (임시 디버그)
   const handleAdvanceMistake = async (mistakeId: string, phrase: string) => {
@@ -326,15 +363,15 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
 
       {/* Main Content */}
       <main className="max-w-5xl mx-auto px-4 py-6 w-full flex-1 space-y-6">
-        {/* B-9 Requirement 5: 이틀 연속 결석 배너 (어제·그제 통화 done 세션 없음) */}
-        {isTwoDayAbsent && userSettings?.coachNudges?.includes("absence2d") && (
+        {/* B-9 Requirement 5: 쉰 날 배너 — usage days(KST) 기준, 오늘 포함 2일 이상 미학습일 때만 */}
+        {restDays !== null && userSettings?.coachNudges?.includes("absence2d") && (
           <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-amber-500/20 via-[#1F2737] to-[#161D2A] border border-amber-500/40 text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xl">
             <div className="flex items-center gap-3.5">
               <div className="w-10 h-10 rounded-2xl bg-amber-500/20 border border-amber-500/40 text-amber-400 flex items-center justify-center shrink-0">
                 <Flame className="w-6 h-6 text-amber-400" />
               </div>
               <div>
-                <p className="text-sm font-extrabold text-white">이틀째 쉬었어요. 오늘 수업만 해도 좋아요</p>
+                <p className="text-sm font-extrabold text-white">{restBannerTitle(restDays)}</p>
                 <p className="text-xs text-amber-300/80 mt-0.5">부담 없이 5분만 대화해도 학습 리듬이 자연스럽게 회복돼요.</p>
               </div>
             </div>
@@ -352,7 +389,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
         {/* 오늘 할 것: ① 오늘 수업 통화 → ② 오늘 아침 강의 → ③ 복습 퀴즈 */}
         <div className="flex items-center justify-between gap-2">
           <h2 className="text-sm font-bold text-white">오늘 할 것</h2>
-          {streakDays !== null && streakDays >= 1 && (
+          {streakDays !== null && (
             <span className="text-xs text-amber-300/90 font-semibold flex items-center gap-1">
               <Flame className="w-3.5 h-3.5 text-amber-400" />
               <span>연속 학습 {streakDays}일</span>

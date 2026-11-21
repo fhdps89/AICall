@@ -33,7 +33,7 @@
   - **제안 검사** (`src/data/planValidation.ts`, v2.8.0): 코치가 만든 변경은 카드로 보여 주기 전과 승인해 적용하기 전에 검사. 있는 목표·있는 과 번호·실제 날짜(YYYY-MM-DD)·요일별 목표 id 목록·하루 5~240분만 남기고 나머지는 버림. 남는 게 없으면 카드를 만들지 않음.
   - **승인·되돌리기** (v2.8.0): 승인하는 순간의 실제 값을 `before`로, 실제로 적용한 값을 `after`로 저장. 되돌리기는 그 변경이 바꾼 항목만 복원(그 사이 다른 트랙의 진도는 그대로). 변경 전에 시험일이 없었으면 시험일을 지움. 승인·되돌리기 뒤에는 홈의 목표 목록을 다시 불러옴.
 - **먼저 말 걸기 (2일 결석 배너 & 일요일 주간 리뷰)**:
-  - 2일 연속 결석 시 홈 상단에 "이틀째 쉬었어요. 오늘 수업만 해도 좋아요" 배너 노출.
+  - usage 일별 기록(KST) 기준, 오늘 포함 2일 이상 학습 기록 없음(오늘 학습 시 숨김, 최근 3개월(usage 문서 3개) 안에 학습 기록이 없으면 숨김(장기 휴식 사용자는 배너가 안 뜸)) 시 홈 상단에 "이틀째 쉬었어요. 오늘 수업만 해도 좋아요"(3일 이상은 "N일째 쉬었어요. 오늘 수업만 해도 좋아요") 배너 노출.
   - 일요일 아침 강의 coachNote를 주간 리뷰 톤으로 자동 편성.
 
 ---
@@ -147,7 +147,7 @@
 ---
 
 ## 4-1. v2.9.0 아키텍처 변경 요약 (2026-11-10 KST)
-- **통화 세션 상태**: `in-progress` → (통화 종료) `pending_review` → (복기 저장) `done`. 「보관만 하기」만 복기 없이 `done`(`finalizeCallSession(..., { archive: true })`). 2일 결석 판단·코치의 최근 세션은 `done`만 셈. 끝낸 통화가 하나도 없으면 결석 띠를 띄우지 않음.
+- **통화 세션 상태**: `in-progress` → (통화 종료) `pending_review` → (복기 저장) `done`. 「보관만 하기」만 복기 없이 `done`(`finalizeCallSession(..., { archive: true })`). 코치의 최근 세션은 `done`만 셈.
 - **끝나지 않은 통화 다시 열기**: 앱을 열 때의 창 외에, `App.tsx`가 홈 아래에 버튼을 띄움. 복기 실패·완료 뒤 `getUnfinishedSessions`로 목록 갱신.
 - **복기 파이프라인**(`reviewPipeline.ts` + 순수 규칙 `reviewRules.ts`): ① 분마다 받아쓰기(실패 시 1회 재시도) → ② 실패한 분은 같은 `minuteIndex`의 `sttPartial`로 보충(`mergeMinuteTranscripts`) → ③ 녹음이 없으면 `sttPartial` 전체 → ④ 그것도 없으면 Live 대화 로그의 학습자 발화 → ⑤ 아무것도 없으면 `sourceStt: "none"`: AI 복기를 부르지 않고 안내 문구만 저장, 진도 유지(`review.lessonAdvanced = false`). `usedCorrectly`/`repeatedMistakes`는 보낸 목록의 id만 반영(`keepKnownIds`). 기존 실수 목록은 4개 항목만, 종류별 최신 150개까지 전송.
 - **피드 동기화 시점**: 홈 화면 로드 + 복기 완료 직후(`App.tsx` → `syncFeed`).
@@ -159,6 +159,10 @@
 ---
 
 ## 5. 버전 히스토리
+- **v2.10.0 이후 수정(미배포) — QA 재확인 20행: 연속 학습일·휴식 배너를 같은 일별 사용 기록(KST)에서 파생 (2026-11-21 KST)**:
+  - **배경**: 홈 화면에서 오늘 10초 이상 통화 직후 또는 복기를 닫고 돌아올 때 「연속 학습 N일」과 「이틀째 쉬었어요」 배너가 동시에 표시되거나 배너가 사라졌다가 다시 나타나는 불일치가 보고됨.
+  - **원인 및 수정**: 휴식 배너는 `checkTwoDayAbsence`(`users/{uid}/sessions` 최근 20개 `done` 세션의 `startedAt`, 오늘 제외)를, 연속 학습일은 `getUsageMonths` + `summarizeLearningLog`(`usage/{yyyy-mm}.days.{DD}`, 오늘 포함)를 각자 조회해 기준과 로딩 타이밍이 달랐음. `src/services/usage/learningLog.ts`에 `kstDateStr`·`REST_BANNER_MIN_DAYS`·`deriveHomeLearningStatus`·`restBannerTitle`을 추가하고 `summarizeLearningLog`에 `lastActiveDate`와 `restDays`를 계산해 두 표시를 같은 요약(`LearningLogSummary`)에서 파생하도록 통일. `src/services/firebase/db.ts`의 `getKSTToday`는 `kstDateStr(Date.now())`에 위임하고 `checkTwoDayAbsence`를 삭제. `src/services/usage/usageService.ts`는 `recordUsage` 성공 직후 `USAGE_UPDATED_EVENT`(`"aicall:usage-updated"`)를 디스패치하고, `src/ui/home/HomeScreen.tsx`는 `learningSummary` 단일 상태·`learningReqRef` 요청 가드·`learningInFlightRef` 진행 중 조회 재사용·마운트/`visibilitychange`/`USAGE_UPDATED_EVENT` 재조회로 교체.
+  - **방어 조치·검증**: `package.json` 버전 무변경. `tests/learningLog.test.ts`에 `kstDateStr`, `restDays`(당일/어제/이틀 이상/장기 휴식/빈 기록/월·연말·윤년 경계/10초 미만 통화/미래 날짜 무시), `deriveHomeLearningStatus(null)`, `restBannerTitle`, 10일 1,024조합 전수 속성 단언(`streakDays`·`restDays` 비공존) 추가. `npm test`·`npm run lint`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 통과.
 - **v2.10.0 이후 수정(미배포) — 내 학습 기록: 날짜별 통화 횟수·분·연속 학습일 저장과 표시 (2026-11-21 KST)**:
   - **배경**: 기존 `users/{uid}/usage/{yyyy-mm}` 문서는 통화 분·토큰·예상 비용만 기록하고 통화 횟수와 연속 학습일(streak) 집계가 없어, 매일의 학습 지속 현황을 앱에서 한눈에 확인하기 어려웠음.
   - **원인 및 수정**: `usageService.ts`의 `UsageDelta`·`UsageMonth`·`days.{DD}`에 `calls`를 추가하고, `buildUsageFields`·`buildUsagePayload` 순수 함수 분리(월 합계와 `days[day]` 동일 필드 사용, 비용 계산 `estimateCostUsd` 불변) 및 최근 3개월 병렬 조회 `getUsageMonths`(최대 3개월 제한 사유 주석 명시)를 추가. `NewCallScreen.tsx` 통화 종료 시 `learningLog.ts`의 순수 함수 `callsForDuration(callDuration)`으로 10초 이상 통화에만 `calls: 1`(10초 미만은 `0`, `liveMinutes`는 그대로) 기록. Firebase 비의존 순수 모듈 `src/services/usage/learningLog.ts`(`callsForDuration`, `summarizeLearningLog`, `getRecentMonthKeys`, `addDaysToDateStr`, `isActiveLearningDay`)로 날짜 문자열 기반 월 경계·윤년·연말·옛 데이터(`calls` 없음 → `liveMinutes >= 0.5`)를 처리하며, `thisMonth` 합계는 오늘 카드와 일치하도록 `days` 합계만으로 산출. `UsagePanel.tsx` 상단에 「내 학습 기록」 카드(오늘·이번 달·연속/최고 학습일·최근 14일 막대·빈 상태 안내·조회 실패 시 `기록을 불러오지 못했어요. 잠시 뒤 다시 열어 주세요.` 구분 표시)를 추가하고(하단 사용량 표 및 안내문 유지), `HomeScreen.tsx` 「오늘 할 것」 옆에 `연속 학습 S일` 한 줄 표시 추가(`1일 이상`일 때만 노출, 0일 및 조회 실패 시 숨김).

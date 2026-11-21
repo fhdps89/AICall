@@ -3,8 +3,12 @@ import assert from 'node:assert/strict';
 import {
   addDaysToDateStr,
   callsForDuration,
+  deriveHomeLearningStatus,
   getRecentMonthKeys,
+  kstDateStr,
+  restBannerTitle,
   summarizeLearningLog,
+  type LearningLogSummary,
 } from '../src/services/usage/learningLog.ts';
 import {
   buildUsageFields,
@@ -311,4 +315,177 @@ test('summarizeLearningLog derives thisMonth solely from days sum so it matches 
   const res = summarizeLearningLog({ '2026-11': mismatched }, '2026-11-21');
   assert.deepEqual(res.today, { calls: 1, minutes: 3.5 });
   assert.deepEqual(res.thisMonth, { calls: 1, minutes: 3.5, activeDays: 1 });
+});
+
+function assertNoConflict(s: LearningLogSummary) {
+  const h = deriveHomeLearningStatus(s);
+  assert.ok(!(h.streakDays !== null && h.restDays !== null), 'streakDays and restDays must not coexist');
+  return h;
+}
+
+test('kstDateStr converts UTC instants to KST date', () => {
+  assert.equal(kstDateStr(Date.UTC(2026, 10, 20, 14, 59, 59, 999)), '2026-11-20');
+  assert.equal(kstDateStr(Date.UTC(2026, 10, 20, 15, 0, 0)), '2026-11-21');
+  assert.equal(kstDateStr(Date.UTC(2025, 11, 31, 15, 0, 0)), '2026-01-01');
+  assert.equal(kstDateStr(Date.UTC(2028, 1, 28, 15, 0, 0)), '2028-02-29');
+});
+
+test('restDays is 0 and banner hidden when learned today', () => {
+  const s = summarizeLearningLog({ '2026-11': makeMonth({ '21': { calls: 1 } }) }, '2026-11-21');
+  const h = assertNoConflict(s);
+  assert.equal(s.restDays, 0);
+  assert.equal(s.lastActiveDate, '2026-11-21');
+  assert.equal(h.streakDays, 1);
+  assert.equal(h.restDays, null);
+});
+
+test('yesterday only: streak shown, no banner', () => {
+  const s = summarizeLearningLog({ '2026-11': makeMonth({ '20': { calls: 1 } }) }, '2026-11-21');
+  const h = assertNoConflict(s);
+  assert.equal(s.restDays, 1);
+  assert.equal(s.lastActiveDate, '2026-11-20');
+  assert.equal(h.streakDays, 1);
+  assert.equal(h.restDays, null);
+});
+
+test('two days ago only: banner 2, no streak', () => {
+  const s = summarizeLearningLog({ '2026-11': makeMonth({ '19': { calls: 1 } }) }, '2026-11-21');
+  const h = assertNoConflict(s);
+  assert.equal(s.restDays, 2);
+  assert.equal(s.lastActiveDate, '2026-11-19');
+  assert.equal(h.streakDays, null);
+  assert.equal(h.restDays, 2);
+  assert.equal(restBannerTitle(2), '이틀째 쉬었어요. 오늘 수업만 해도 좋아요');
+});
+
+test('long rest shows N일째', () => {
+  const s = summarizeLearningLog({ '2026-11': makeMonth({ '15': { calls: 1 } }) }, '2026-11-21');
+  const h = assertNoConflict(s);
+  assert.equal(s.restDays, 6);
+  assert.equal(h.streakDays, null);
+  assert.equal(h.restDays, 6);
+  assert.equal(restBannerTitle(6), '6일째 쉬었어요. 오늘 수업만 해도 좋아요');
+});
+
+test('no records: no banner, no streak', () => {
+  const empty = summarizeLearningLog({}, '2026-11-21');
+  const hEmpty = assertNoConflict(empty);
+  assert.equal(empty.restDays, null);
+  assert.equal(empty.lastActiveDate, null);
+  assert.deepEqual(hEmpty, { streakDays: null, restDays: null });
+
+  const nullMonth = summarizeLearningLog({ '2026-11': null }, '2026-11-21');
+  const hNull = assertNoConflict(nullMonth);
+  assert.equal(nullMonth.restDays, null);
+  assert.equal(nullMonth.lastActiveDate, null);
+  assert.deepEqual(hNull, { streakDays: null, restDays: null });
+});
+
+test('restDays crosses month boundary', () => {
+  const s = summarizeLearningLog(
+    { '2026-10': makeMonth({ '30': { calls: 1 } }) },
+    '2026-11-01'
+  );
+  const h = assertNoConflict(s);
+  assert.equal(s.restDays, 2);
+  assert.equal(s.lastActiveDate, '2026-10-30');
+  assert.equal(h.restDays, 2);
+});
+
+test('restDays crosses year end', () => {
+  const s = summarizeLearningLog(
+    { '2025-12': makeMonth({ '31': { calls: 1 } }) },
+    '2026-01-02'
+  );
+  const h = assertNoConflict(s);
+  assert.equal(s.restDays, 2);
+  assert.equal(s.lastActiveDate, '2025-12-31');
+  assert.equal(h.restDays, 2);
+});
+
+test('restDays handles leap year Feb 29', () => {
+  const leap = summarizeLearningLog(
+    { '2028-02': makeMonth({ '28': { calls: 1 } }) },
+    '2028-03-01'
+  );
+  const hLeap = assertNoConflict(leap);
+  assert.equal(leap.restDays, 2);
+  assert.equal(hLeap.restDays, 2);
+
+  const nonLeap = summarizeLearningLog(
+    { '2027-02': makeMonth({ '27': { calls: 1 } }) },
+    '2027-03-01'
+  );
+  const hNonLeap = assertNoConflict(nonLeap);
+  assert.equal(nonLeap.restDays, 2);
+  assert.equal(hNonLeap.restDays, 2);
+});
+
+test('call under 10s does not reset rest', () => {
+  const s = summarizeLearningLog(
+    {
+      '2026-11': makeMonth({
+        '19': { calls: 1 },
+        '21': { calls: callsForDuration(9), liveMinutes: 9 / 60 },
+      }),
+    },
+    '2026-11-21'
+  );
+  const h = assertNoConflict(s);
+  assert.equal(s.restDays, 2);
+  assert.equal(h.streakDays, null);
+  assert.equal(h.restDays, 2);
+});
+
+test('future-dated entries are ignored', () => {
+  const s = summarizeLearningLog(
+    {
+      '2026-11': makeMonth({
+        '19': { calls: 1 },
+        '25': { calls: 1 },
+      }),
+    },
+    '2026-11-21'
+  );
+  const h = assertNoConflict(s);
+  assert.equal(s.lastActiveDate, '2026-11-19');
+  assert.equal(s.restDays, 2);
+  assert.equal(h.restDays, 2);
+});
+
+test('streak and rest banner never coexist (property)', () => {
+  const today = '2026-03-02';
+  const baseDates: string[] = [];
+  for (let offset = 0; offset < 10; offset += 1) {
+    baseDates.push(addDaysToDateStr(today, -offset));
+  }
+
+  for (let mask = 0; mask < 1024; mask += 1) {
+    const febDays: Record<string, { calls: number }> = {};
+    const marDays: Record<string, { calls: number }> = {};
+    for (let bit = 0; bit < 10; bit += 1) {
+      if ((mask & (1 << bit)) === 0) continue;
+      const date = baseDates[bit];
+      const monthKey = date.slice(0, 7);
+      const dayKey = date.slice(8, 10);
+      if (monthKey === '2026-02') {
+        febDays[dayKey] = { calls: 1 };
+      } else {
+        marDays[dayKey] = { calls: 1 };
+      }
+    }
+    const months: Record<string, UsageMonth> = {};
+    if (Object.keys(febDays).length > 0) months['2026-02'] = makeMonth(febDays);
+    if (Object.keys(marDays).length > 0) months['2026-03'] = makeMonth(marDays);
+
+    const s = summarizeLearningLog(months, today);
+    const h = assertNoConflict(s);
+    if (h.restDays !== null) {
+      assert.equal(s.streakDays, 0);
+    }
+  }
+});
+
+test('deriveHomeLearningStatus(null) hides both', () => {
+  assert.deepEqual(deriveHomeLearningStatus(null), { streakDays: null, restDays: null });
 });

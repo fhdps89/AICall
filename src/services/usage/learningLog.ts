@@ -1,5 +1,9 @@
 import type { UsageMonth } from "./usageService";
 
+export const REST_BANNER_MIN_DAYS = 2;
+
+const KST_OFFSET_MS = 9 * 3600 * 1000;
+
 export interface DailyLearningLog {
   date: string;
   calls: number;
@@ -19,6 +23,25 @@ export interface LearningLogSummary {
   streakDays: number;
   bestStreakDays: number;
   recentDays: DailyLearningLog[];
+  /** today 이하 마지막 학습일. 조회한 달 안에 학습 기록이 없으면 null */
+  lastActiveDate: string | null;
+  /** 오늘 포함 연속 미학습 일수. 오늘 학습=0, 어제가 마지막=1, 그제가 마지막=2. lastActiveDate null이면 null */
+  restDays: number | null;
+}
+
+export interface HomeLearningStatus {
+  /** 표시할 연속 학습일(>=1)이면 값, 아니면 null */
+  streakDays: number | null;
+  /** 휴식 배너에 쓸 일수(>=REST_BANNER_MIN_DAYS)이면 값, 아니면 null */
+  restDays: number | null;
+}
+
+/**
+ * epoch ms → KST 'YYYY-MM-DD' (getUTC* 사용, 기기 타임존 비의존).
+ */
+export function kstDateStr(nowMs: number): string {
+  const kst = new Date(nowMs + KST_OFFSET_MS);
+  return formatDateStr(kst.getUTCFullYear(), kst.getUTCMonth() + 1, kst.getUTCDate());
 }
 
 function isLeapYear(year: number): boolean {
@@ -203,6 +226,30 @@ export function summarizeLearningLog(
     prevActive = date;
   }
 
+  // lastActiveDate & restDays: today 이하 마지막 학습일과 오늘 포함 연속 미학습 일수
+  let lastActiveDate: string | null = null;
+  for (let i = sortedActive.length - 1; i >= 0; i -= 1) {
+    if (sortedActive[i] <= today) {
+      lastActiveDate = sortedActive[i];
+      break;
+    }
+  }
+
+  let restDays: number | null = null;
+  if (lastActiveDate !== null) {
+    if (lastActiveDate === today) {
+      restDays = 0;
+    } else {
+      let count = 0;
+      let restCursor = today;
+      while (restCursor > lastActiveDate) {
+        count += 1;
+        restCursor = addDaysToDateStr(restCursor, -1);
+      }
+      restDays = count;
+    }
+  }
+
   // recentDays: 최근 14일 (오래된 날짜 → 오늘)
   const recentDays: DailyLearningLog[] = [];
   for (let offset = -13; offset <= 0; offset += 1) {
@@ -228,5 +275,38 @@ export function summarizeLearningLog(
     streakDays,
     bestStreakDays,
     recentDays,
+    lastActiveDate,
+    restDays,
   };
+}
+
+/**
+ * summary null(로딩·실패) → 둘 다 null.
+ * 연속 학습일(>=1)과 휴식 배너 일수(>=REST_BANNER_MIN_DAYS)를 한 번에 파생해 동시 노출을 막는다.
+ */
+export function deriveHomeLearningStatus(
+  summary: LearningLogSummary | null
+): HomeLearningStatus {
+  if (!summary) {
+    return { streakDays: null, restDays: null };
+  }
+  return {
+    streakDays: summary.streakDays >= 1 ? summary.streakDays : null,
+    restDays:
+      summary.restDays !== null && summary.restDays >= REST_BANNER_MIN_DAYS
+        ? summary.restDays
+        : null,
+  };
+}
+
+/**
+ * 휴식 배너 제목.
+ * 전제: `deriveHomeLearningStatus`가 `REST_BANNER_MIN_DAYS`(2) 이상만 넘긴다.
+ * 2 → "이틀째 쉬었어요. 오늘 수업만 해도 좋아요", n>=3 → `${n}일째 쉬었어요. 오늘 수업만 해도 좋아요`.
+ */
+export function restBannerTitle(restDays: number): string {
+  if (restDays <= REST_BANNER_MIN_DAYS) {
+    return "이틀째 쉬었어요. 오늘 수업만 해도 좋아요";
+  }
+  return `${restDays}일째 쉬었어요. 오늘 수업만 해도 좋아요`;
 }

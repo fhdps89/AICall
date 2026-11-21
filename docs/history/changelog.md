@@ -4,6 +4,22 @@
 
 ---
 
+### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA 재확인 20행: 연속 학습일·휴식 배너를 같은 일별 사용 기록(KST)에서 파생 (브랜치 `fix/qa2-d`)
+- **배경**:
+  - 홈 화면에서 10초 이상 통화 직후나 복기를 닫고 홈으로 돌아왔을 때 「연속 학습 N일」과 「이틀째 쉬었어요. 오늘 수업만 해도 좋아요」 배너가 동시에 표시되거나, 배너가 잠깐 사라졌다가 다시 나타나는 문제가 보고됨(QA 재확인 20행).
+- **원인**:
+  - 휴식 배너(`isTwoDayAbsent`)는 `checkTwoDayAbsence`가 `users/{uid}/sessions` 최근 20개 `done` 세션의 `startedAt`(오늘 제외, 어제·그제만 확인)을 3단계 직렬 조회(`initUserPlanIfMissing` → `getUserSettings` → `checkTwoDayAbsence`)로 계산했고, 연속 학습일(`streakDays`)은 `getUsageMonths` + `summarizeLearningLog`(`usage/{yyyy-mm}.days.{DD}`, 오늘 포함, `calls > 0 || liveMinutes >= 0.5`)로 계산해 데이터 원천·학습일 정의·갱신 시점이 서로 달랐음.
+  - 홈 마운트 시 `today`를 한 번만 잡아 앱을 연 채 KST 자정을 넘기거나 백그라운드에서 돌아와도 재계산되지 않았고, `recordUsage` 완료 시점과 홈 재마운트 조회가 겹칠 수 있었음.
+- **수정**:
+  - `src/services/usage/learningLog.ts`: epoch ms → KST `YYYY-MM-DD` 순수 함수 `kstDateStr(nowMs)`와 `REST_BANNER_MIN_DAYS = 2`, `HomeLearningStatus`, `deriveHomeLearningStatus(summary)`, `restBannerTitle(restDays)` 추가. `LearningLogSummary`와 `summarizeLearningLog`에 `today` 이하 마지막 학습일 `lastActiveDate`와 오늘 포함 연속 미학습 일수 `restDays`(오늘 학습=0, 어제 마지막=1, 그제 마지막=2, 기록 없음=null)를 추가.
+  - `src/services/firebase/db.ts`: `getKSTToday()`를 `kstDateStr(Date.now())` 위임으로 교체(`learningLog.ts`는 `usageService.ts`를 `import type`으로만 참조해 런타임 순환 없음)하고 미사용 `checkTwoDayAbsence` 삭제.
+  - `src/services/usage/usageService.ts`: `USAGE_UPDATED_EVENT = "aicall:usage-updated"`를 export하고 `recordUsage`의 `setDoc` 성공 직후 브라우저 전역(`typeof window !== "undefined"`)에 이벤트 디스패치(최소 수정).
+  - `src/ui/home/HomeScreen.tsx`: `isTwoDayAbsent`/`streakDays`와 `checkTwoDayAbsence` 호출을 제거하고 `learningSummary` 단일 상태 + `deriveHomeLearningStatus(learningSummary)`로 통일. `learningReqRef` 요청 세대 가드와 `learningInFlightRef` 진행 중 조회 재사용으로 마운트·`document` `visibilitychange`(`visible`)·`window` `USAGE_UPDATED_EVENT` 중복 읽기를 막고 cleanup에서 리스너 해제·in-flight 참조 초기화·진행 중 응답 폐기. 배너 제목은 `restBannerTitle(restDays)`로 2일("이틀째 쉬었어요...")·3일 이상("${n}일째 쉬었어요...") 분기.
+  - `PROJECT_CONTEXT.md`: §1 결석 배너 설명·§4-1 세션 상태 설명 갱신 및 §5 버전 히스토리 추가.
+- **방어 조치 (Safeguards)**:
+  - `deriveHomeLearningStatus`가 `streakDays >= 1`과 `restDays >= 2`를 같은 요약에서 파생하므로 두 표시가 동시에 뜰 수 없음(조회 중/실패 시 `null`로 둘 다 숨김).
+  - `tests/learningLog.test.ts`: `kstDateStr`, 당일·어제·이틀·장기 휴식·빈 기록, 월말/연말/윤년 2월 29일 경계, 10초 미만 통화 미반영, 미래 날짜 무시, `deriveHomeLearningStatus(null)`, 10일 1,024가지 활동 조합 전수 속성 테스트(`assertNoConflict` 및 `restDays !== null` ⇒ `streakDays === 0`) 추가.
+- **검증**: `npm test`(122/122), `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build` 모두 통과 확인.
 ### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — 내 학습 기록: 날짜별 통화 횟수·분·연속 학습일 저장과 표시 (브랜치 `feat/self-usage-log`)
 - **배경**:
   - 기존 `users/{uid}/usage/{yyyy-mm}` 문서는 `liveMinutes`·토큰·예상 비용만 기록해 일별 통화 횟수와 연속 학습일(streak)을 파악할 수 없었음.
