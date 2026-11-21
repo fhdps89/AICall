@@ -177,10 +177,12 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
     review?.usedCorrectlyItems || [];
   const repeatedItems: Array<{ id: string; myPhrase: string; naturalPhrase: string }> =
     review?.repeatedItems || [];
+  // Show the block only when at least one outcome item exists.
+  // lessonAdvanced alone must not open it: every non-empty review sets that flag,
+  // and older sessions without the new fields would otherwise show an empty block.
   const hasOutcomes =
     usedCorrectlyItems.length > 0 ||
-    repeatedItems.length > 0 ||
-    review?.lessonAdvanced === true;
+    repeatedItems.length > 0;
 
   const formatSourceLabel = (src: string | undefined) => {
     const label = sourceSttLabel(src);

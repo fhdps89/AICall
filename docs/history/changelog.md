@@ -15,7 +15,7 @@
 - **방어 조치 (Safeguards)**:
   - `tests/reviewView.test.ts`(신규): `sourceSttLabel` 4종 구분 및 기본값, `isEmptyReview` 판별(`none` 또는 `lessonAdvanced === false`), `levelBadge` 미정/`-`→`none`·`AL`→`good`, `outcomeItems` 미존재 ID 제거 및 순서 보존을 검증.
   - `tests/reviewRules.test.ts`, `ReviewFlowScreen.tsx`, `server.ts`, `package.json` 버전 및 P0-1 소요 시간 계측 로직은 변경하지 않음.
-- **검증**: `npm test` 32/32 통과, `npx tsc --noEmit` 및 `npx tsc -p tsconfig.server.json --noEmit` 오류 없음.
+- **검증**: `npm test` 32/32 통과, `npm run lint`·`npx tsc --noEmit`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 오류 없음. 성과 영역은 졸업·재복습 항목이 하나라도 있을 때만 열리며, `lessonAdvanced`만으로는 열리지 않는다.
 
 ---
 
