@@ -25,6 +25,7 @@ import {
 } from "./services/firebase/db";
 import { retryPendingUploads } from "./services/recording/chunkIndexedDb";
 import { runPostCallReview } from "./services/review/reviewPipeline";
+import type { ReviewTiming } from "./services/review/reviewTiming";
 import { DEFAULT_GOALS } from "./data/defaultGoals";
 import {
   DEFAULT_PROMPT_PLACEHOLDERS,
@@ -58,6 +59,7 @@ type HomeFocus = "lecture" | null;
 interface ActiveReviewState {
   review: SessionReviewData;
   sttFinal?: SttFinalData;
+  timing?: ReviewTiming;
   goalId: string;
   lessonIndex: number;
   goalTitle: string;
@@ -315,6 +317,7 @@ export const App: React.FC = () => {
         setActiveReviewData({
           review: result.review,
           sttFinal: result.sttFinal,
+          ...(result.timing ? { timing: result.timing } : {}),
           goalId: endedGoal.id,
           lessonIndex: endedLesson,
           goalTitle: endedGoal.title,
@@ -360,6 +363,7 @@ export const App: React.FC = () => {
       setActiveReviewData({
         review: session.review,
         sttFinal: session.sttFinal,
+        ...(session.reviewTiming ? { timing: session.reviewTiming } : {}),
         goalId: matchedGoal.id,
         lessonIndex: session.lessonIndex,
         goalTitle: matchedGoal.title,
@@ -391,6 +395,7 @@ export const App: React.FC = () => {
         setActiveReviewData({
           review: result.review,
           sttFinal: result.sttFinal,
+          ...(result.timing ? { timing: result.timing } : {}),
           goalId: matchedGoal.id,
           lessonIndex: session.lessonIndex,
           goalTitle: matchedGoal.title,
@@ -516,6 +521,7 @@ export const App: React.FC = () => {
           lessonTitle={activeReviewData.lessonTitle}
           review={activeReviewData.review}
           sttFinal={activeReviewData.sttFinal}
+          timing={activeReviewData.timing}
           onOpenPodcast={() => setPendingHomeFocus("lecture")}
           onClose={() => {
             setActiveReviewData(null);

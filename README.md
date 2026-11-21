@@ -14,7 +14,7 @@ AI 튜터와 영어로 통화하고, 통화에서 **틀린 말을 틀린 그대�
 | 1단계 | 4개 목표(OPIc AL·필리조선소 업무·미국/호주 여행·Bluey 듣기)와 요일 루틴, 오늘 수업 카드(아침 강의를 홈 루프에 노출, 진도 변경은 확인 시트에서 확정) | `src/data/defaultGoals.ts`, `src/ui/home/` |
 | 1단계 | 실시간 통화 `gemini-3.8-live`: 임시 토큰 직접 연결 → 실패 시 서버 중계, 세션 재개, 재연결(5번 실패하면 멈추고 안내). 통화마다 새 연결 객체라 앞 통화가 섞이지 않음 | `src/services/providers/geminiLiveProvider.ts`, `server.ts` `/live` |
 | 1단계 | 10초 조각 녹음(IndexedDB 먼저 저장 → Storage 업로드, 통화 마지막 조각까지 포함), 1분 단위 임시 받아쓰기(설정에서 끄기 가능), 끊긴 통화 복구 | `src/services/recording/` |
-| 1단계 | 통화 후 복기: 녹음을 1분 WAV로 합쳐 `gemini-3.5-transcribe` VERBATIM 받아쓰기 → `gemini-3.8-flash` 복기(`myPhrase`는 틀린 그대로). "내가 한 말 아님" 신고 시 그 실수는 복습 목록에서 빠짐. 다시 복기해도 중복·진도 후퇴 없음 | `src/services/review/reviewPipeline.ts`, `/api/review` |
+| 1단계 | 통화 후 복기: 녹음을 1분 WAV로 합쳐 `gemini-3.5-transcribe` VERBATIM 받아쓰기 → `gemini-3.8-flash` 복기(`myPhrase`는 틀린 그대로). "내가 한 말 아님" 신고 시 그 실수는 복습 목록에서 빠짐. 다시 복기해도 중복·진도 후퇴 없음. 복기 화면에서 이번 통화 성과(졸업·재복습·다음 수업 진행)도 함께 표시 | `src/services/review/reviewPipeline.ts`, `/api/review` |
 | 1단계 | Keep 실수 목록 붙여넣기 가져오기, 사용량·예상 비용, 받아쓰기 품질 시험(개발자 메뉴) | `src/ui/keep/`, `src/ui/settings/UsagePanel.tsx`, `src/ui/sttBench/` |
 | 2단계 | 간격 반복(1→3→7→14일, 보류, 졸업)과 퀴즈(말하기/타이핑, `gemini-3.8-flash` 채점) | `src/services/firebase/db.ts`, `src/ui/quiz/` |
 | 2단계 | 아침 강의(대본 `gemini-3.8-flash`, 2인 음성 `gemini-3.8-flash-tts`, 답 전 3초 무음). 서버 재시작으로 멈추면 "다시 만들기" 안내 | `server/lecture.ts`, `src/ui/lecture/` |
