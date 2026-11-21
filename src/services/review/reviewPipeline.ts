@@ -459,10 +459,9 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
     if (pendingResult) {
       pendingResult.timing = timing;
     }
-    try {
-      await saveReviewTiming(userId, sessionId, timing);
-    } catch (timingErr) {
+    // Do not await: an offline updateDoc may hang, delaying the review result/error UI.
+    void saveReviewTiming(userId, sessionId, timing).catch((timingErr) => {
       console.warn("[ReviewPipeline] Failed to save review timing:", timingErr);
-    }
+    });
   }
 }

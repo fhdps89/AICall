@@ -13,7 +13,7 @@
   - `src/ui/review/ReviewModal.tsx` · `src/App.tsx`: `ReviewModalProps` 및 `ActiveReviewState`에 `timing?: ReviewTiming` 전달. `useDevMode()`가 켜져 있고 `timing`이 있을 때만 복기 모달 상단에 `복기 소요: 받아쓰기 n초 · AI n초`(없는 단계 생략) 한 줄을 표시.
 - **방어 조치 (Safeguards)**:
   - `tests/reviewTiming.test.ts`(신규): 가짜 시계 기준 단계별 ms 및 `totalMs` 일치, `start` 후 `end` 없는 단계 제외, 동일 단계 2회 누적 합산 검증.
-  - 계측 저장 실패가 복기 완료·실패 전파나 세션 상태(`pending_review` → `done`)를 방해하지 않도록 `finally` 내부에서 `try/catch`로 격리. `package.json` 버전 및 `server.ts`·기존 테스트는 변경하지 않음.
+  - 계측 저장 실패가 복기 완료·실패 전파나 세션 상태(`pending_review` → `done`)를 방해하지 않도록 `finally`에서 `saveReviewTiming`을 기다리지 않고 `.catch`로만 경고한다(오프라인 `updateDoc` 대기 방지). `package.json` 버전 및 `server.ts`·기존 테스트는 변경하지 않음.
 - **검증**: `npm test` 28/28 통과, `npx tsc --noEmit` 및 `npx tsc -p tsconfig.server.json --noEmit` 오류 없음.
 
 ---
