@@ -494,7 +494,7 @@ export const App: React.FC = () => {
       {unfinishedSessions.length > 0 && !showUnfinishedModal && !isGeneratingReview && !reviewFailure && !activeReviewData && (
         <button
           onClick={() => setShowUnfinishedModal(true)}
-          className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 px-4 py-2.5 rounded-full bg-amber-500 text-slate-950 text-xs font-bold shadow-xl shadow-amber-500/20 cursor-pointer"
+          className="fixed bottom-safe left-1/2 -translate-x-1/2 z-40 px-4 py-2.5 rounded-full bg-amber-500 text-slate-950 text-xs font-bold shadow-xl shadow-amber-500/20 cursor-pointer"
         >
           끝나지 않은 통화 {unfinishedSessions.length}개 · 복기하기
         </button>

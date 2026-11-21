@@ -31,7 +31,7 @@ import {
 } from "lucide-react";
 
 const COMMAND_LABELS: Record<string, string> = {
-  Done: "끝내기",
+  Done: "답변 끝",
   Feedback: "피드백",
   "Model answer": "모범답",
   Pause: "잠깐",
@@ -261,7 +261,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
 
   // Auto-scroll transcripts
   useEffect(() => {
-    transcriptsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    transcriptsEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [transcripts]);
 
   // Handle Control Buttons (B-2 requirement 5)
@@ -324,7 +324,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
   };
 
   return (
-    <div className="min-h-screen bg-[#0F141C] text-slate-100 flex flex-col justify-between select-none">
+    <div className="min-h-screen h-screen h-dvh supports-[height:100dvh]:min-h-0 overflow-hidden bg-[#0F141C] text-slate-100 flex flex-col select-none">
       {/* Mic / connection failure: stop the call UI and offer retry or exit */}
       {connectError && (
         <div className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-6">
@@ -356,7 +356,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
         </div>
       )}
       {/* Top Header */}
-      <header className="p-4 sm:p-5 border-b border-slate-800 bg-[#161D2A]/90 backdrop-blur-md flex items-center justify-between">
+      <header className="shrink-0 px-4 sm:px-5 pt-safe pb-4 sm:pb-5 border-b border-slate-800 bg-[#161D2A]/90 backdrop-blur-md flex items-center justify-between">
         <div>
           <div className="flex items-center gap-2">
             <span className="text-xs font-bold text-amber-400 font-mono tracking-wider">
@@ -404,7 +404,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
       </header>
 
       {/* Main Conversation Stream */}
-      <main className="flex-1 max-w-2xl w-full mx-auto p-4 sm:p-6 overflow-y-auto space-y-4">
+      <main className="flex-1 min-h-0 max-w-2xl w-full mx-auto p-4 sm:p-6 overflow-y-auto overscroll-contain space-y-4">
         {/* Screen Keep-On notice (one line, no jargon) */}
         <div className="px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center gap-2 text-xs text-amber-200">
           <Smartphone className="w-4 h-4 text-amber-400 shrink-0" />
@@ -460,7 +460,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
             {isSpeakingModel
               ? "튜터가 답변하는 중..."
               : status === "connected"
-              ? "자유롭게 영어로 말해 보세요 (다 말했으면 '끝내기')"
+              ? "자유롭게 영어로 말해 보세요 (다 말했으면 '답변 끝')"
               : statusMessage}
           </p>
         </div>
@@ -499,13 +499,13 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
       </main>
 
       {/* Bottom Controls Toolbar (B-2 requirement 5) */}
-      <footer className="p-4 sm:p-5 border-t border-slate-800 bg-[#161D2A]/95 backdrop-blur-md">
+      <footer className="shrink-0 px-4 sm:px-5 pt-4 sm:pt-5 pb-safe border-t border-slate-800 bg-[#161D2A]/95 backdrop-blur-md">
         <div className="max-w-2xl mx-auto space-y-3">
           {/* 5 Core Control Buttons: Done / Feedback / Model answer / Pause / Slow
               Shown only once connected; before that, explain why. */}
           {status !== "connected" ? (
             <p className="text-center text-[11px] text-slate-400 py-1">
-              {status === "reconnecting" ? "다시 연결되면 버튼을 쓸 수 있어요." : "튜터와 연결되면 끝내기·피드백·모범답 버튼이 나와요."}
+              {status === "reconnecting" ? "다시 연결되면 버튼을 쓸 수 있어요." : "튜터와 연결되면 답변 끝·피드백·모범답 버튼이 나와요."}
             </p>
           ) : (
           <div className="grid grid-cols-5 gap-2">
@@ -515,7 +515,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
               title="답변 종료 및 핵심 피드백 요청"
             >
               <CheckCircle2 className="w-4 h-4 text-amber-400" />
-              <span>끝내기</span>
+              <span>답변 끝</span>
             </button>
 
             <button

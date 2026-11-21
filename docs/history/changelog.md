@@ -4,6 +4,18 @@
 
 ---
 
+### [2026-11-21 KST] P0-5 통화 화면 모바일 레이아웃 (v2.10.0 묶음) (브랜치 `fix/p0-5-call-mobile-layout`, 설계 Claude CLI Opus 5.5 high, 구현 agy Gemini 4 Hydrogen high)
+- **배경**: 모바일 환경(특히 iOS Safari 노치/홈 인디케이터 및 동적 주소창)에서 통화 대화창(`transcripts`)이 길어지면 하단 제어 버튼과 「통화 종료」 버튼이 화면 아래로 밀려 사라질 수 있었음. 또한 `Done` 제어 버튼 라벨(「끝내기」)이 「통화 종료」와 혼동될 소지가 있었음.
+- **원인과 수정**:
+  - 루트 컨테이너가 `min-h-screen`과 `justify-between`만 사용하여 본문이 길어지면 전체 페이지가 늘어나 푸터가 뷰포트 밖으로 밀림 → `src/ui/call/NewCallScreen.tsx` 루트를 `min-h-screen h-screen h-dvh supports-[height:100dvh]:min-h-0 overflow-hidden flex flex-col`로 변경, 헤더와 푸터에 `shrink-0` 부여, `<main>`을 `flex-1 min-h-0 overflow-y-auto overscroll-contain`으로 제한해 내부 스크롤만 허용. 자동 스크롤은 `scrollIntoView({ behavior: "smooth", block: "end" })`로 고정.
+  - 노치/홈 인디케이터 영역 침범 방지: `index.html`의 `viewport` 메타에 `viewport-fit=cover` 추가, `src/index.css`에 기존 여백(`1rem` / `sm:1.25rem`)을 보존하며 안전 영역을 더하는 `.pt-safe`, `.pb-safe`, `.bottom-safe` 유틸리티 추가 후 `NewCallScreen.tsx` 헤더·푸터 및 `src/App.tsx` 미완료 통화 고정 버튼(`bottom-safe`)에 적용.
+  - 버튼 라벨 충돌 해소: `NewCallScreen.tsx`의 `COMMAND_LABELS.Done`, 연결 전 안내 문구, 음성 안내 문구, 버튼 표시 텍스트의 「끝내기」를 모두 「답변 끝」으로 변경(`LiveCommand` 타입 및 프롬프트의 `"Done"` 값은 유지).
+- **방어 조치 (Safeguards)**:
+  - `tests/mobileShell.test.ts`(신규): `index.html`의 `viewport-fit=cover` 포함 여부, `NewCallScreen.tsx`에서 `"끝내기"` 비노출 및 `"답변 끝"`/`COMMAND_LABELS.Done`/뷰포트 고정 클래스(`h-dvh`, `min-h-0`, `pt-safe`, `pb-safe`) 존재를 소스 검사로 검증.
+- **검증**: `npm test` 27/27 통과, `npm run lint`·`npx tsc --noEmit`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 오류 없음.
+
+---
+
 ### [2026-11-10 KST] v2.9.0 — 전체 코드 리뷰 2차 반영 (GitHub 브랜치 `claude/full-review-2026-11`, Claude)
 - **배경**: 2026-11-10에 `main`(`24901cb`, v2.8.1) 전체 약 14,100줄을 다시 리뷰. 빌드·타입 검사·테스트 18개는 통과했지만, 약한 인터넷·앱을 중간에 닫음·버튼 두 번 누름 같은 실제 사용 상황에서 학습 기록이 빠지는 문제 9개(높음), 8개(중간), 6개(낮음)를 찾음. 전체 목록과 근거: [`docs/reviews/2026-11-full-code-review.md`](../reviews/2026-11-full-code-review.md).
 - **문제 원인과 적용된 수정 내역 — 높음**
