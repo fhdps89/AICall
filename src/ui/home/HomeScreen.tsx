@@ -75,6 +75,8 @@ interface HomeScreenProps {
   onStartCall: (goal: GoalData, lessonIndex: number) => void;
   onOpenSettings: () => void;
   onLogout: () => void;
+  /** When the fixed "끝나지 않은 통화" pill is visible, reserve scroll space so it cannot cover content. */
+  reserveBottomForPill?: boolean;
 }
 
 export const HomeScreen: React.FC<HomeScreenProps> = ({
@@ -88,6 +90,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   onStartCall,
   onOpenSettings,
   onLogout,
+  reserveBottomForPill = false,
 }) => {
   const devMode = useDevMode();
   const [selectedPromptGoal, setSelectedPromptGoal] = useState<GoalData | null>(null);
@@ -920,6 +923,9 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
         </div>
           </div>
         </section>
+              {reserveBottomForPill && (
+          <div data-testid="unfinished-pill-spacer" className="unfinished-pill-space" aria-hidden="true" />
+        )}
       </main>
 
       {/* Tutor Prompt Viewer Modal */}

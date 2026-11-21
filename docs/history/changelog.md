@@ -4,6 +4,22 @@
 
 ---
 
+### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA 5차 30·29·24행: 강의 오디오 404, 실수 묶음 혼입, 복기 알약 겹침 (브랜치 `englead/qa5-r30-29-24`)
+- **배경**:
+  - QA봇이 라이브 main `7b1be51`에서 재현한 3건을 Draft PR로 고침. 머지·배포는 하지 않음.
+- **원인**:
+  - **30행(높음)**: 아침 강의 WAV는 서버 `.data/lectures/{uid}/{date}.wav`에만 있고, Firestore에는 `status=ready`와 대본이 남을 수 있음. AI Studio 재배포로 `.data/`가 지워지면 `GET /api/lecture/audio`가 `lectureAudioPath()`에서 404를 내고, Cloud Storage `audioUrl`이 없으면 클라이언트가 죽은 오류 「강의 오디오를 불러오지 못했어요.」만 보여 줌. `INTERRUPTED` 처리는 `generating`만 다루고 ready 강의의 오디오 복구가 없었음(`PROJECT_CONTEXT.md`의 `.data/` 휘발 한계).
+  - **29행(보통)**: `clusterBySimilarity`가 단일 연결(threshold 0.80)이라 A~B, B~C이면 A!~C도 한 묶음이 됨. 잘린 전사(「while discussing o」)와 짧은 비영어 원문(「A ver.」)을 걸러내지 않아 어휘 묶음에 섞임.
+  - **24행(보통)**: `App.tsx`의 `fixed bottom-safe` 「끝나지 않은 통화」 알약이 홈 흐름 밖이라 데스크톱에서 「더 보기 · 주간 루틴…」 행을, iPhone 16 폭에서 「반복되는 실수」 카드 하단을 가림.
+- **수정**:
+  - **강의 오디오 복구 (`server/lecture.ts`, `server.ts`, `src/services/lecture/lectureService.ts`, `src/ui/lecture/LectureModal.tsx`)**: `startLectureAudioRebuild`가 로컬 대본 또는 클라이언트가 보낸 Firestore 대본으로 TTS만 다시 만들고, 강의 `status`는 `ready`로 유지함(`audioStatus: rebuilding|ready|missing`). WAV는 임시 파일에 쓴 뒤 rename. `POST /api/lecture/audio/rebuild`, 404 본문에 `code: LECTURE_AUDIO_MISSING`와 `hasLocalScript`. 모달은 「오디오를 다시 만드는 중…」과 「다시 시도」를 보여 줌. 대본이 없으면 409 `LECTURE_AUDIO_SCRIPT_MISSING`.
+  - **실수 묶음 (`server/clusterMath.ts`, `server/mistakeClusters.ts`)**: 군집 전 `isClusterableMistake`로 잘린 조각·짧은 비영어 원문을 제외. `clusterBySimilarity`를 결정적 complete-linkage로 바꿔 연쇄 병합을 막음. 임베딩 문구를 오류 유형 중심으로 다듬고 `EMBED_TEXT_VERSION = 2`로 캐시를 무효화. 크기 1 묶음은 기존처럼 이름·카드에 넣지 않음.
+  - **복기 알약 레이아웃 (`src/App.tsx`, `src/ui/home/HomeScreen.tsx`, `src/index.css`)**: 알약 표시와 같은 `showUnfinishedPill` 값으로 홈 `main` 끝에 `unfinished-pill-space` 높이 여백을 넣어 콘텐츠가 알약 위로 스크롤되게 함. 알약은 고정 유지, `whitespace-nowrap`.
+- **방어 조치 (Safeguards)**:
+  - 재생성 중 Firestore/로컬 `status`를 `generating`으로 바꾸지 않아 재시작 시 대본이 `INTERRUPTED`로 지워지지 않음. 클라이언트 대본은 항목 수(최대 9)·필드 길이 상한으로 검증. 동시 재생성은 한 작업만 수행. TTS 실패 시 반쪽 WAV를 남기지 않음.
+  - `tests/lectureAudio.test.ts`, `tests/unfinishedPillLayout.test.ts` 추가, `tests/mistakeClusters.test.ts`에 필터·complete-linkage·정크 제외 테스트 추가.
+- **검증**: `npm test`(240/240), `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build` 모두 통과. 박스에서 SIE 실호출로 전후 비교(샘플 11문장): 수정 전 「while discussing o」가 어휘 문장과 묶였고, 수정 후 「A ver.」·잘린 전사는 제외, 「Can you fix it?」는 단독(카드 미표시), 과거시제 3개·비교급 어휘 2개·동사 선택 2개가 각각 묶임. 데스크톱 1280×800·iPhone 16 393×852 목업 스크린샷에서 알약과 「더 보기」/실수 카드의 겹침이 없었음.
+
 ### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — 실수 노트 반복 패턴 묶기(SIE 임베딩) 추가 (브랜치 `englead/mistake-clusters`)
 - **배경**:
   - 실수 노트가 쌓여도 사용자가 어떤 문법·표현 실수를 반복하는지 한눈에 파악하기 어려워, 홈 화면에 유사한 실수를 묶어 보여 주는 「반복되는 실수」 카드를 추가함.

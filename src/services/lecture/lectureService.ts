@@ -177,12 +177,56 @@ export async function syncLectureFromServer(uid: string, date = getKSTToday()): 
   return readyDoc;
 }
 
-/** Get a playable URL: Cloud Storage first, server stream (authed blob) as fallback. */
-export async function resolveLectureAudio(lecture: LectureDoc): Promise<string> {
+export async function rebuildLectureAudio(lecture: LectureDoc): Promise<void> {
+  const body: Record<string, unknown> = { date: lecture.date };
+  if (lecture.script && lecture.script.length > 0) {
+    body.script = lecture.script;
+    body.title = lecture.title;
+    body.coachNote = lecture.coachNote;
+    body.newMistakeIds = lecture.newMistakeIds;
+    body.reviewMistakeIds = lecture.reviewMistakeIds;
+    body.ttsEngine = lecture.ttsEngine;
+    body.createdAt = lecture.createdAt;
+    body.textTokens = lecture.textTokens;
+    body.itemCount = lecture.itemCount;
+  }
+  await authJson<{ lecture: unknown }>("/api/lecture/audio/rebuild", body);
+}
+
+export async function waitForLectureAudio(
+  date: string,
+  opts: { timeoutMs?: number; intervalMs?: number; signal?: AbortSignal } = {}
+): Promise<boolean> {
+  const timeoutMs = opts.timeoutMs ?? 180_000;
+  const intervalMs = opts.intervalMs ?? 3000;
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (opts.signal?.aborted) return false;
+    const res = await authFetch(`/api/lecture/audio?date=${date}`);
+    if (res.ok) return true;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  return false;
+}
+
+/** Get a playable URL: Cloud Storage first, server stream as fallback. If the WAV was lost on the server, rebuild TTS from the saved script and poll until ready. */
+export async function resolveLectureAudio(
+  lecture: LectureDoc,
+  opts: { onRebuilding?: () => void; signal?: AbortSignal } = {}
+): Promise<string> {
   if (lecture.audioUrl) return lecture.audioUrl;
   const res = await authFetch(`/api/lecture/audio?date=${lecture.date}`);
-  if (!res.ok) throw new Error("강의 오디오를 불러오지 못했어요.");
-  return URL.createObjectURL(await res.blob());
+  if (res.ok) return URL.createObjectURL(await res.blob());
+  if (res.status === 404 && (lecture.script?.length || 0) > 0) {
+    opts.onRebuilding?.();
+    await rebuildLectureAudio(lecture);
+    const ready = await waitForLectureAudio(lecture.date, { signal: opts.signal });
+    if (ready) {
+      const again = await authFetch(`/api/lecture/audio?date=${lecture.date}`);
+      if (again.ok) return URL.createObjectURL(await again.blob());
+    }
+  }
+  throw new Error("강의 오디오를 불러오지 못했어요.");
 }
 
 const CACHE_NAME = "onecall-lectures-v1";

@@ -15,6 +15,7 @@ import {
   cleanEmbeddingField,
   clusterBySimilarity,
   clusterKey,
+  isClusterableMistake,
   decodeVecBase64,
   encodeVecBase64,
   sha256Hex,
@@ -341,6 +342,17 @@ export async function computeMistakeClusters(
       usage: zeroUsage(),
     };
   }
+
+  const clusterable = items.filter((item) => isClusterableMistake(item).ok);
+  if (clusterable.length < 2) {
+    return {
+      ok: true,
+      enabled: true,
+      clusters: [],
+      usage: zeroUsage(),
+    };
+  }
+  items = clusterable;
 
   const dataDir = deps.dataDir ?? DATA_DIR;
   const cacheFile = clusterCachePath(uid, dataDir);

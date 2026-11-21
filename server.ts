@@ -10,7 +10,7 @@ import { requireAuth, verifyFirebaseIdToken, setAfterAuthHook } from './server/a
 import { ensureUserGeminiKey, getUserSuppliedKey } from './server/userKey.ts';
 import { saveFeedBackup, deleteFeedBackup } from './server/feedStore.ts';
 import { geminiLimit, clusterLimit, checkLiveSessionStart } from './server/rateLimit.ts';
-import { DATA_DIR, startLectureJob, readLectureState, lectureAudioPath, kstToday } from './server/lecture.ts';
+import { DATA_DIR, startLectureJob, startLectureAudioRebuild, readLectureState, lectureAudioPath, lectureHasLocalScript, kstToday, LECTURE_AUDIO_MISSING, LECTURE_AUDIO_SCRIPT_MISSING } from './server/lecture.ts';
 import { computeMistakeClusters, validateClusterRequestBody } from './server/mistakeClusters.ts';
 import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive } from './server/sttBench.ts';
 import { LIVE_MODEL, TEXT_MODEL, GEMINI_STT_MODEL, GEMINI_TTS_LITE_MODEL } from './src/config/models.ts';
@@ -1110,12 +1110,47 @@ app.get('/api/lecture/audio', requireAuth, (req: Request, res: Response) => {
     const date = typeof req.query.date === 'string' ? req.query.date : kstToday();
     const file = lectureAudioPath(uid, date);
     if (!file) {
-      res.status(404).json({ ok: false, error: '강의 오디오가 없습니다.' });
+      res.status(404).json({
+        ok: false,
+        error: '강의 오디오가 없습니다.',
+        code: LECTURE_AUDIO_MISSING,
+        hasLocalScript: lectureHasLocalScript(uid, date),
+      });
       return;
     }
     res.type('audio/wav').sendFile(file, SEND_DATA_FILE);
   } catch (err: any) {
     apiError(res, 400, 'BAD_REQUEST', '날짜 형식이 올바르지 않아요.');
+  }
+});
+
+
+app.post('/api/lecture/audio/rebuild', requireAuth, geminiLimit, (req: Request, res: Response) => {
+  const uid = res.locals.user.uid as string;
+  const { date, script, title, coachNote, newMistakeIds, reviewMistakeIds, ttsEngine, createdAt, textTokens, itemCount } = req.body || {};
+  const ai = createGenAI();
+  if (!ai) {
+    noKey(res);
+    return;
+  }
+  try {
+    const day = typeof date === 'string' ? date : kstToday();
+    const payload = script
+      ? { script, title, coachNote, newMistakeIds, reviewMistakeIds, ttsEngine, createdAt, textTokens, itemCount }
+      : undefined;
+    const state = startLectureAudioRebuild(ai, uid, day, payload);
+    if (state.audioStatus === 'missing' && state.error === LECTURE_AUDIO_SCRIPT_MISSING) {
+      res.status(409).json({ ok: false, error: '강의 대본이 없어 오디오를 다시 만들 수 없어요.', code: LECTURE_AUDIO_SCRIPT_MISSING, lecture: state });
+      return;
+    }
+    if (state.audioStatus === 'missing' && state.error && state.error !== 'GENERATION_FAILED') {
+      apiError(res, 400, 'BAD_REQUEST', '강의 대본 형식이 올바르지 않아요.');
+      return;
+    }
+    res.json({ ok: true, lecture: state });
+  } catch (err: any) {
+    console.warn('[Lecture] audio rebuild failed to start:', err?.message || err);
+    apiError(res, 400, 'LECTURE_FAILED', '강의 오디오를 다시 만들지 못했어요.');
   }
 });
 
