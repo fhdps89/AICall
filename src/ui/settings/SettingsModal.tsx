@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useDevMode, setDevMode } from "../../data/devMode";
 import {
   X,
@@ -12,14 +12,21 @@ import {
   HardDrive,
   CheckCircle2,
   AlertCircle,
+  Trash2,
 } from "lucide-react";
 import { PromptPlaceholders } from "../../data/promptCustomizer";
 import { CURRENT_MODEL_CONFIG } from "../../config/models";
 import { collection, getDocs, query, orderBy, limit } from "firebase/firestore";
 import { db } from "../../services/firebase/config";
 import { SessionData, getUserSettings, saveUserSettings } from "../../services/firebase/db";
-import { getAllPendingChunks, LocalRecordingChunk } from "../../services/recording/chunkIndexedDb";
+import {
+  deletePendingChunks,
+  getAllPendingChunks,
+  LocalRecordingChunk,
+  retryPendingUploadsDetailed,
+} from "../../services/recording/chunkIndexedDb";
 import { ALLOWED_USER_EMAIL } from "../../services/firebase/auth";
+import { friendlyError } from "../common/friendlyError";
 import { FeedSettingsPanel } from "./FeedSettingsPanel";
 import { UsagePanel } from "./UsagePanel";
 import { GeminiKeyPanel } from "./GeminiKeyPanel";
@@ -34,6 +41,18 @@ interface SettingsModalProps {
   onResetProgressRequest: () => void;
 }
 
+type SettingsTabId = "prompts" | "models" | "recordings" | "feed" | "usage" | "coach" | "geminiKey";
+
+const SETTINGS_TABS: ReadonlyArray<{ id: SettingsTabId; label: string; devOnly?: boolean }> = [
+  { id: "prompts", label: "프롬프트 변수 입력 (빈칸 채우기)" },
+  { id: "models", label: "개발자: 모델·보안", devOnly: true },
+  { id: "recordings", label: "녹음 보관함" },
+  { id: "feed", label: "그록봇 피드" },
+  { id: "usage", label: "사용량·예상 비용" },
+  { id: "coach", label: "코치 알림 (넛지)" },
+  { id: "geminiKey", label: "Gemini 키" },
+];
+
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   userId,
   isOpen,
@@ -45,7 +64,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [formData, setFormData] = useState<PromptPlaceholders>(placeholders);
   const [saving, setSaving] = useState(false);
   const devMode = useDevMode();
-  const [activeTab, setActiveTab] = useState<"prompts" | "models" | "recordings" | "feed" | "usage" | "coach" | "geminiKey">("prompts");
+  const [activeTab, setActiveTab] = useState<SettingsTabId>("prompts");
+  const tabRefs = useRef<Partial<Record<SettingsTabId, HTMLButtonElement | null>>>({});
   const [coachNudges, setCoachNudges] = useState<string[]>(["weekly", "absence2d"]);
   const [enablePartialStt, setEnablePartialStt] = useState<boolean>(() => {
     return localStorage.getItem("onecall_enable_partial_transcribe") !== "false";
@@ -53,10 +73,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [sessionsList, setSessionsList] = useState<SessionData[]>([]);
   const [pendingLocalChunks, setPendingLocalChunks] = useState<LocalRecordingChunk[]>([]);
   const [loadingRecordings, setLoadingRecordings] = useState(false);
+  const [retryingPending, setRetryingPending] = useState(false);
+  const [deletingPending, setDeletingPending] = useState(false);
+  const [pendingActionStatus, setPendingActionStatus] = useState<{
+    message: string;
+    isError: boolean;
+  } | null>(null);
 
   // Show the latest saved values each time the modal opens
   useEffect(() => {
-    if (isOpen) setFormData(placeholders);
+    if (isOpen) {
+      setFormData(placeholders);
+      setPendingActionStatus(null);
+    }
   }, [isOpen]);
 
   useEffect(() => {
@@ -110,9 +139,71 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   }, [activeTab, userId]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    tabRefs.current[activeTab]?.scrollIntoView?.({ inline: "nearest", block: "nearest" });
+  }, [activeTab, isOpen]);
+
   // Must stay below every hook: returning before a hook changes the hook count when the
   // modal opens, and React then throws instead of showing the settings screen.
   if (!isOpen) return null;
+
+  const pendingActionBusy = retryingPending || deletingPending;
+
+  const handleRetryPendingNow = async () => {
+    if (!userId || pendingActionBusy) return;
+    setRetryingPending(true);
+    setPendingActionStatus(null);
+    try {
+      const result = await retryPendingUploadsDetailed(userId, { force: true });
+      const refreshed = await getAllPendingChunks();
+      setPendingLocalChunks(refreshed);
+      setPendingActionStatus({
+        message: result.skipped
+          ? "이미 다시 올리는 중이에요. 잠시 뒤 다시 확인해 주세요."
+          : `${result.uploaded}개 올렸어요 / ${result.failed}개는 아직 못 올렸어요`,
+        isError: false,
+      });
+    } catch (err) {
+      setPendingActionStatus({
+        message: `다시 올리기에 실패했어요: ${friendlyError(err)}`,
+        isError: true,
+      });
+    } finally {
+      setRetryingPending(false);
+    }
+  };
+
+  const handleDeletePendingChunks = async () => {
+    if (pendingActionBusy) return;
+    const ids = new Set(pendingLocalChunks.map((c) => c.id));
+    const count = ids.size;
+    if (
+      !window.confirm(
+        `서버에 올라가지 않은 녹음 조각 ${count}개를 이 기기에서 지워요. 지운 조각은 되돌릴 수 없어요. 계속할까요?`
+      )
+    ) {
+      return;
+    }
+    setDeletingPending(true);
+    setPendingActionStatus(null);
+    try {
+      const deleted = await deletePendingChunks((c) => ids.has(c.id));
+      const refreshed = await getAllPendingChunks();
+      setPendingLocalChunks(refreshed);
+      setPendingActionStatus({
+        message: `남은 조각 ${deleted}개를 이 기기에서 지웠어요.`,
+        isError: false,
+      });
+    } catch (err) {
+      setPendingActionStatus({
+        message: `조각을 지우지 못했어요: ${friendlyError(err)}`,
+        isError: true,
+      });
+    } finally {
+      setDeletingPending(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -136,7 +227,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
             <div>
               <h2 className="text-base font-bold text-white">환경 설정 & 프롬프트 변수</h2>
-              <p className="text-xs text-slate-400">튜터 프롬프트 슬롯 채우기 및 모델 구성</p>
+              <p className="text-xs text-slate-400">튜터 프롬프트 슬롯 채우기 및 학습 설정</p>
             </div>
           </div>
           <button
@@ -148,86 +239,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
 
         {/* Tab Navigation */}
-        <div className="flex border-b border-slate-800 px-5 bg-slate-900/40">
-          <button
-            type="button"
-            onClick={() => setActiveTab("prompts")}
-            className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
-              activeTab === "prompts"
-                ? "border-amber-400 text-amber-300"
-                : "border-transparent text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            프롬프트 변수 입력 (빈칸 채우기)
-          </button>
-          {devMode && (
-          <button
-            type="button"
-            onClick={() => setActiveTab("models")}
-            className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
-              activeTab === "models"
-                ? "border-amber-400 text-amber-300"
-                : "border-transparent text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            개발자: 모델·보안
-          </button>
-          )}
-          <button
-            type="button"
-            onClick={() => setActiveTab("recordings")}
-            className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
-              activeTab === "recordings"
-                ? "border-amber-400 text-amber-300"
-                : "border-transparent text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            녹음 보관함
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("feed")}
-            className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
-              activeTab === "feed"
-                ? "border-amber-400 text-amber-300"
-                : "border-transparent text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            그록봇 피드
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("usage")}
-            className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
-              activeTab === "usage"
-                ? "border-amber-400 text-amber-300"
-                : "border-transparent text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            사용량·예상 비용
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("coach")}
-            className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
-              activeTab === "coach"
-                ? "border-amber-400 text-amber-300"
-                : "border-transparent text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            코치 알림 (넛지)
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("geminiKey")}
-            className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
-              activeTab === "geminiKey"
-                ? "border-amber-400 text-amber-300"
-                : "border-transparent text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            Gemini 키
-          </button>
+        <div className="flex flex-nowrap shrink-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden border-b border-slate-800 px-5 bg-slate-900/40">
+          {SETTINGS_TABS.filter((tab) => !tab.devOnly || devMode).map((tab) => (
+            <button
+              key={tab.id}
+              ref={(el) => {
+                tabRefs.current[tab.id] = el;
+              }}
+              type="button"
+              onClick={() => setActiveTab(tab.id)}
+              className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                activeTab === tab.id
+                  ? "border-amber-400 text-amber-300"
+                  : "border-transparent text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
 
         {/* Body */}
@@ -237,7 +266,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs">
                 <span className="font-bold flex items-center gap-1.5 mb-1">
                   <Sparkles className="w-4 h-4 text-amber-400" />
-                  B-9 AI 코치 먼저 말 걸기 설정:
+                  AI 코치 먼저 말 걸기 설정:
                 </span>
                 <p className="text-[11px] text-amber-300/80 leading-relaxed">
                   학습자가 꾸준히 통화를 이어갈 수 있도록 상황에 맞춰 홈 화면 배너나 주간 리뷰로 부드럽게 넛지를 제공합니다.
@@ -247,8 +276,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div className="space-y-3">
                 <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex items-center justify-between">
                   <div className="pr-4">
-                    <h4 className="text-xs font-bold text-white">일요일 주간 리뷰 알림 (`weekly`)</h4>
-                    <p className="text-[11px] text-slate-400 mt-0.5">일요일 아침 강의 coachNote를 한 주 성과와 격려 중심의 주간 리뷰 톤으로 생성합니다.</p>
+                    <h4 className="text-xs font-bold text-white">일요일 주간 리뷰 알림{devMode && " (weekly)"}</h4>
+                    <p className="text-[11px] text-slate-400 mt-0.5">일요일 아침 강의의 코치 한마디를 한 주 성과와 격려 중심의 주간 리뷰 톤으로 생성합니다.</p>
                   </div>
                   <input
                     type="checkbox"
@@ -260,7 +289,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                 <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex items-center justify-between">
                   <div className="pr-4">
-                    <h4 className="text-xs font-bold text-white">2일 연속 결석 알림 (`absence2d`)</h4>
+                    <h4 className="text-xs font-bold text-white">2일 연속 결석 알림{devMode && " (absence2d)"}</h4>
                     <p className="text-[11px] text-slate-400 mt-0.5">한국시간 기준 어제와 그제 통화가 없으면 홈 상단에 가벼운 복귀 응원 배너를 노출합니다.</p>
                   </div>
                   <input
@@ -273,7 +302,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                 <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex items-center justify-between">
                   <div className="pr-4">
-                    <h4 className="text-xs font-bold text-white">시험/목표 마감 4주 전 알림 (`deadline4w`)</h4>
+                    <h4 className="text-xs font-bold text-white">시험/목표 마감 4주 전 알림{devMode && " (deadline4w)"}</h4>
                     <p className="text-[11px] text-slate-400 mt-0.5">OPIc 등 설정된 시험일 4주 전부터 홈 상단에 D-day 배너를 표시합니다. (기본 OFF)</p>
                   </div>
                   <input
@@ -286,7 +315,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                 <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex items-center justify-between">
                   <div className="pr-4">
-                    <h4 className="text-xs font-bold text-white">시험/목표 마감 2주 전 알림 (`deadline2w`)</h4>
+                    <h4 className="text-xs font-bold text-white">시험/목표 마감 2주 전 알림{devMode && " (deadline2w)"}</h4>
                     <p className="text-[11px] text-slate-400 mt-0.5">시험일 2주 전부터 실전 모의고사 집중 배치를 제안하는 배너를 표시합니다. (기본 OFF)</p>
                   </div>
                   <input
@@ -482,20 +511,52 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2 text-slate-200 text-xs font-bold">
                     <FileAudio className="w-4 h-4 text-emerald-400" />
-                    <span>B-3 10초 분할 녹음 파일 (Cloud Storage & IndexedDB)</span>
+                    <span>통화 녹음 (10초 단위로 저장)</span>
                   </div>
                   <span className="text-[11px] text-slate-400 font-mono">
                     최근 {sessionsList.length}개 세션 보존됨
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-400 leading-relaxed">
-                  통화 중 마이크 소리가 10초 단위로 나뉘어 IndexedDB에 임시 기록된 후, 즉시 Cloud Storage로 업로드됩니다.
+                  통화 중 소리는 10초씩 나뉘어 이 기기에 먼저 저장된 뒤 서버에 올라가요.
                 </p>
+                {devMode && (
+                  <p className="text-[11px] text-slate-500 font-mono">
+                    개발자 참고: B-3 · IndexedDB 임시 기록 후 Cloud Storage 업로드
+                  </p>
+                )}
                 {pendingLocalChunks.length > 0 && (
-                  <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center gap-2">
-                    <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
-                    <span>업로드 대기 중인 로컬 조각: {pendingLocalChunks.length}개</span>
+                  <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs space-y-2">
+                    <div className="flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+                      <span>아직 올라가지 못한 녹음 조각: {pendingLocalChunks.length}개</span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleRetryPendingNow}
+                        disabled={pendingActionBusy || !userId}
+                        className="px-2.5 py-1.5 rounded-md bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 text-[11px] font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${retryingPending ? "animate-spin" : ""}`} />
+                        지금 다시 올리기
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleDeletePendingChunks}
+                        disabled={pendingActionBusy}
+                        className="px-2.5 py-1.5 rounded-md bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-slate-200 text-[11px] font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        남은 조각 지우기
+                      </button>
+                    </div>
                   </div>
+                )}
+                {pendingActionStatus && (
+                  <p className={`text-[11px] ${pendingActionStatus.isError ? "text-rose-300" : "text-slate-300"}`}>
+                    {pendingActionStatus.message}
+                  </p>
                 )}
               </div>
 
@@ -532,8 +593,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       {/* Chunks summary */}
                       <div className="text-[11px] text-slate-300 flex items-center justify-between">
                         <span>10초 녹음 조각: <strong>{sess.recordingChunks?.length || 0}개</strong></span>
-                        <span>1분 전사: <strong>{sess.sttPartial?.length || 0}건</strong></span>
-                        <span className="text-slate-400 font-mono text-[10px]">{sess.connectionPath || "direct"}</span>
+                        <span>1분 받아쓰기: <strong>{sess.sttPartial?.length || 0}건</strong></span>
+                        {devMode && (
+                          <span className="text-slate-400 font-mono text-[10px]">{sess.connectionPath || "direct"}</span>
+                        )}
                       </div>
 
                       {/* Chunks list details */}
@@ -546,11 +609,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                                 <span className="font-mono text-slate-300">
                                   #{chunk.index} ({chunk.durationSeconds || 10}초)
                                 </span>
-                                <span className="truncate max-w-[180px] text-slate-400 font-mono">
-                                  {chunk.path}
-                                </span>
+                                {devMode && (
+                                  <span className="truncate max-w-[180px] text-slate-400 font-mono">
+                                    {chunk.path}
+                                  </span>
+                                )}
                                 <span className="text-emerald-400 font-bold">
-                                  {chunk.uploaded ? "업로드 완료" : "로컬 대기"}
+                                  {chunk.uploaded ? "업로드 완료" : "대기 중"}
                                 </span>
                               </div>
                             ))}

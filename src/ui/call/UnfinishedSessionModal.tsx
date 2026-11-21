@@ -1,6 +1,11 @@
 import React, { useState } from "react";
 import { SessionData, finalizeCallSession } from "../../services/firebase/db";
 import {
+  describeRecordingState,
+  formatRecordingChunksSummary,
+  formatSessionChipLabel,
+} from "./unfinishedSessionSummary";
+import {
   AlertCircle,
   Clock,
   FileAudio,
@@ -27,14 +32,18 @@ export const UnfinishedSessionModal: React.FC<UnfinishedSessionModalProps> = ({
   onResolved,
   onStartReview,
 }) => {
-  const [selectedSession, setSelectedSession] = useState<SessionData | null>(
-    unfinishedSessions[0] || null
+  const [selectedId, setSelectedId] = useState<string | null>(
+    unfinishedSessions[0]?.id ?? null
   );
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
 
+  const selectedSession =
+    unfinishedSessions.find((s) => s.id === selectedId) || unfinishedSessions[0] || null;
+
   if (!selectedSession) return null;
 
-  const chunkCount = selectedSession.recordingChunks?.length || 0;
+  const chunksSummary = formatRecordingChunksSummary(selectedSession.recordingChunks);
+  const recordingState = describeRecordingState(selectedSession);
   const transcriptCount = selectedSession.liveTranscript?.length || 0;
   const partialSttCount = selectedSession.sttPartial?.length || 0;
 
@@ -70,6 +79,20 @@ export const UnfinishedSessionModal: React.FC<UnfinishedSessionModalProps> = ({
     }
   };
 
+  const stateIconColor =
+    recordingState.tone === "saved"
+      ? "text-emerald-400"
+      : recordingState.tone === "uploading"
+      ? "text-amber-400"
+      : recordingState.tone === "transcript_only"
+      ? "text-sky-400"
+      : "text-amber-400";
+
+  const stateTextColor =
+    recordingState.tone === "uploading" || recordingState.tone === "empty"
+      ? "text-amber-300"
+      : "text-slate-400";
+
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
       <div className="bg-[#161D2A] border border-amber-500/40 rounded-2xl max-w-lg w-full p-5 sm:p-6 shadow-2xl relative text-slate-200 animate-in fade-in zoom-in-95 duration-200">
@@ -95,6 +118,29 @@ export const UnfinishedSessionModal: React.FC<UnfinishedSessionModalProps> = ({
           </div>
         </div>
 
+        {/* Session Selector Chips (shown when 2+ unfinished sessions exist) */}
+        {unfinishedSessions.length >= 2 && (
+          <div className="flex flex-wrap gap-1.5 mb-3">
+            {unfinishedSessions.map((session) => {
+              const isSelected = session.id === selectedSession.id;
+              return (
+                <button
+                  key={session.id}
+                  type="button"
+                  onClick={() => setSelectedId(session.id)}
+                  className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border transition-colors cursor-pointer ${
+                    isSelected
+                      ? "bg-amber-500/20 border-amber-400 text-amber-200"
+                      : "bg-slate-800/70 border-slate-700 text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  {formatSessionChipLabel(session)}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         {/* Session Card Info */}
         <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-4 space-y-3 mb-5">
           <div className="flex items-center justify-between text-xs">
@@ -112,7 +158,7 @@ export const UnfinishedSessionModal: React.FC<UnfinishedSessionModalProps> = ({
               <span className="block text-[10px] text-slate-400">10초 녹음 조각</span>
               <span className="text-xs font-bold text-emerald-400 flex items-center justify-center gap-1 mt-0.5">
                 <FileAudio className="w-3 h-3" />
-                {chunkCount}개 ({Math.round((chunkCount * 10) / 60)}분)
+                {chunksSummary}
               </span>
             </div>
             <div className="bg-slate-800/40 p-2 rounded-lg">
@@ -122,16 +168,16 @@ export const UnfinishedSessionModal: React.FC<UnfinishedSessionModalProps> = ({
               </span>
             </div>
             <div className="bg-slate-800/40 p-2 rounded-lg">
-              <span className="block text-[10px] text-slate-400">1분 단위 전사</span>
+              <span className="block text-[10px] text-slate-400">1분 단위 받아쓰기</span>
               <span className="text-xs font-bold text-purple-400 mt-0.5 block font-mono">
                 {partialSttCount}구간
               </span>
             </div>
           </div>
 
-          <div className="text-[11px] text-slate-400 flex items-center gap-1.5 pt-1">
-            <Database className="w-3.5 h-3.5 text-emerald-400" />
-            <span>녹음은 안전하게 저장돼 있어요.</span>
+          <div className={`text-[11px] ${stateTextColor} flex items-start gap-1.5 pt-1`}>
+            <Database className={`w-3.5 h-3.5 ${stateIconColor} shrink-0 mt-0.5`} />
+            <span>{recordingState.text}</span>
           </div>
         </div>
 

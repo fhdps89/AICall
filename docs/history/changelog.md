@@ -26,6 +26,121 @@
 - **남은 리스크**:
   - 이번 수정 전에 저장된 짧은 받아쓰기 복기는 `lessonAdvanced: true`·레벨이 남아 있어 화면이 빈 복기 문구와 어긋날 수 있음.
   - 스피커폰에서 튜터 목소리가 마이크로 새면 튜터만 말한 통화도 발화로 판정될 수 있음 [미확인].
+### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — 사용자 화면의 내부 용어 정리(개발자 모드로 이동) (브랜치 `fix/qa-x5-hide-internal-terms`)
+- **배경**:
+  - 일반 학습자 화면(`src/ui/**/*.tsx`)에 기획 단계 번호(`B-3`, `B-9`, `3단계`), 소스 경로(`src/config/models.ts`), 상수·필드·키 이름(`PRICING_RATES`, `weekly`, `absence2d`, `deadline4w`, `deadline2w`, `coachNote`, `VERBATIM`, `Graduated`), 저장소·인프라 명칭(`IndexedDB`, `Cloud Storage`, `Firestore`, `AI Studio Publish`/`Secrets`, `chunk.path`, `connectionPath`) 등이 그대로 노출되고 있었음.
+- **원인과 수정**:
+  - `src/ui/settings/UsagePanel.tsx`: `useDevMode()`를 연결해 하단 안내문의 기본 문구를 `예상 비용은 추정치예요. 실제 청구액과 다를 수 있어요.`로 단순화하고, `src/config/models.ts`·`PRICING_RATES`·분당 단가 수치는 `devMode`일 때만 덧붙이도록 수정(하단 안내문 `div`만 변경).
+  - `src/ui/settings/SettingsModal.tsx`: 헤더 부제를 `튜터 프롬프트 슬롯 채우기 및 모델 구성` → `튜터 프롬프트 슬롯 채우기 및 학습 설정`으로 정리하고, 코치 알림 설정 탭에서 `B-9`·`coachNote`를 제거하며 알림 키(`weekly`, `absence2d`, `deadline4w`, `deadline2w`)는 `devMode`일 때만 병기. 녹음 보관함 탭의 `B-3 10초 분할 녹음 파일 (Cloud Storage & IndexedDB)`·`업로드 대기 중인 로컬 조각`·`1분 전사`·`로컬 대기`를 사용자 말(`통화 녹음 (10초 단위로 저장)`, `통화 중 소리는 10초씩 나뉘어 이 기기에 먼저 저장된 뒤 서버에 올라가요.`, `아직 올라가지 못한 녹음 조각`, `1분 받아쓰기`, `대기 중`)로 교체하고, `IndexedDB`·`Cloud Storage` 보조 설명과 `sess.connectionPath`·`chunk.path`를 `devMode` 조건 안으로 이동(`activeTab === "models"`는 303행 `!devMode ? null` 분기에서 이미 차단되므로 411행 중복 `devMode` 가드 없이 탭 줄·레이아웃 구조 유지).
+  - `src/ui/settings/GeminiKeyPanel.tsx`: `useDevMode()`를 연결해 기본 안내에서 `AI Studio Publish`/`Secrets`/`Firestore` 용어를 걷어내고 `서버에 기본 키가 없을 때 대신 쓰는 개인 키예요. 입력한 키는 내 계정에만 안전하게 저장돼요.`로 정리했으며, 개발자 참고 문구는 `devMode`일 때만 노출.
+  - `src/ui/home/HomeScreen.tsx`: `3단계 AI 전담 학습 코치`/`3단계 AI 전담 코치` → `AI 전담 학습 코치`/`AI 전담 코치`, `맞춤 Plan 반영` → `맞춤 계획 반영`으로 정리(이미 `devMode`로 가려진 `B-2 통화 엔진: gemini-3.8-live...` 및 `showPromptModal`·`showSttBench` 여는 버튼 등은 유지).
+  - `src/ui/quiz/QuizModal.tsx`, `src/ui/review/ReviewModal.tsx`, `src/ui/call/UnfinishedSessionModal.tsx`: `VERBATIM` 표기는 `devMode`에만 노출하고, `(Graduated)`·`STT 오인식`·`1분 단위 전사`를 사용자 표현(`통과! 즉시 졸업 🎉`, `음성 인식 오류`, `1분 단위 받아쓰기`)으로 정리. `ReviewModal` 「이건 내가 한 말이 아니에요」 버튼 `title`도 품질 리포트 기록 사실을 포함해 `음성 인식 오류 등으로 내가 말하지 않은 문장이면 목록에서 숨기고, 품질 개선을 위해 기록해요`로 변경.
+- **방어 조치 (Safeguards)**:
+  - `tests/userFacingText.test.ts`(신규): TypeScript AST 파서로 `src/ui/**/*.tsx`의 JSX 텍스트·문자열·템플릿 리터럴(주석·`import/export` 모듈 경로 제외)을 전수 검사해 `devMode` 조건 밖에 `B-\d`, `src/config`, `PRICING_RATES`, `IndexedDB`, `Cloud Storage`, `Firestore`, `컬렉션`이 있으면 실패하도록 검증(`SettingsModal.tsx` `models` 탭 내 `B-1`/`B-3` 3건은 303행 `!devMode ? null` 및 163행 탭 버튼 가드 사유를 명시해 `ALLOWLIST`에 등록). 또한 `scanFile`에 문자열 입력을 지원해 노출된 금지 용어 위반, `devMode &&` 내부 허용, `!devMode &&` 내부 위반을 검증하는 검사기 자체 테스트 추가.
+- **검증**: `npm test` 39/39 통과, `npm run lint`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 오류 없음.
+### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA-2 녹음 조각 업로드: 직접 업로드 시간 제한·실패 기억·서버 중계 우선 전환 (브랜치 `fix/qa-r2-chunk-upload-timeout`)
+- **배경**:
+  - 통화 중 10초 녹음 조각 업로드가 계속 실패하고 콘솔 오류가 대량 발생하며 IndexedDB(`OneCallRecordingsDB`)에 미업로드 조각이 쌓이는 QA 버그가 보고됨.
+- **원인**:
+  - `firebase-applet-config.json`의 `storageBucket`(`gen-lang-client-0592656565.firebasestorage.app`)이 GCS JSON API에서 404(버킷 미프로비저닝) 상태라 브라우저의 Firebase SDK 직접 업로드(`firebasestorage.googleapis.com`)가 프리플라이트부터 실패함(콘솔에서 CORS 오류로 관측, Firebase 콘솔에서 Storage 시작 필요).
+  - `src/services/firebase/storage.ts`의 `uploadAudioFile`이 직접 업로드(`uploadBytes`)를 먼저 시도할 때 Firebase Storage SDK의 `maxUploadRetryTime` 기본값(10분) 때문에 조각마다 최대 10분간 재시도하느라 서버 중계(`/api/recordings/upload-chunk`)로 넘어가지 못함. `chunkIndexedDb.ts`의 `retryPendingUploads`도 같은 함수를 직렬 호출해 재시도가 사실상 끝나지 않았으며, 직접·중계 경로가 모두 실패할 때 `directErr`만 던져 중계 실패 원인을 숨기고 있었음.
+- **수정**:
+  - `src/services/firebase/config.ts`: `STORAGE_RETRY_TIMEOUT_MS = 8000` 상수를 두고 `storage.maxUploadRetryTime`과 `storage.maxOperationRetryTime`을 8초로 제한.
+  - `src/services/firebase/uploadPolicy.ts`(신규 순수 모듈, Firebase·DOM 의존 없음): `createChunkUploader({ direct, relay, now, directTimeoutMs, cooldownMs })` 추가. `direct`는 `Promise.race`와 타이머 정리로 기본 12초(`DEFAULT_DIRECT_TIMEOUT_MS`) 제한, 실패 시 기본 10분(`DEFAULT_DIRECT_COOLDOWN_MS`) 동안 `direct`를 건너뛰고 바로 `relay`를 사용하며 쿨다운 진입 시에만 1회 경고 로그 출력. 쿨다운 만료 후 `direct`를 1회 재시도해 성공하면 기억을 해제하고, 양쪽이 모두 실패하면 두 오류 메시지를 모두 포함한 `Error`를 던짐. 함께 `selectRetryableChunks`·`createPendingRetryRunner`를 분리해 30초(`RECENT_CHUNK_GRACE_MS`) 이내 조각 건너뛰기(`force: true` 시 생략), 동시 실행 가드(`skipped: true`), 조각별 실패 격리 및 상세 결과(`{ total, uploaded, failed, skipped }`) 반환을 구현.
+  - `src/services/firebase/storage.ts`: `uploadAudioFile` 시그니처를 유지한 채 `createChunkUploader` 기반으로 교체(응답 `!response.ok` 시 HTTP 상태코드 포함 오류 발생), `getStorageFileUrl`도 `isDirectBlocked()` 확인 시 `getDownloadURL` 호출 없이 즉시 서버 중계 URL(`/api/recordings/file?path=...`)을 반환하도록 변경.
+  - `src/services/recording/chunkIndexedDb.ts`: `createPendingRetryRunner`를 감싼 모듈 전역 실행기(`pendingRetryRunner`)로 `retryPendingUploadsDetailed`와 `retryPendingUploads`(`number` 반환 유지)를 제공해 동시 실행 가드(이미 실행 중이면 `skipped: true`, `retryPendingUploads`는 `0`)와 30초 이내 조각 건너뛰기를 적용(기존 조각별 오류 격리 유지).
+  - `src/App.tsx`: 로그인 상태에서 60초 간격 `setInterval`로 `retryPendingUploads`를 주기 호출하고 `useEffect` 정리 함수에서 `clearInterval` 수행(대기 조각이 없으면 즉시 `0` 반환).
+  - `docs/troubleshooting/firebase-storage-setup.md`(신규): 프로젝트 소유자용 Storage 버킷 확인(`curl`), Firebase 콘솔 Storage 시작 절차, `storage.rules` 보안 규칙 예시 코드블록, 필요 시 `cors.json` 적용 명령, 서버 중계 저장소(`.data/recordings`)의 한계 안내 문서 작성.
+- **방어 조치 (Safeguards)**:
+  - `tests/uploadPolicy.test.ts`(신규): direct 성공 시 relay 미호출, direct 실패→relay 폴백 및 쿨다운 동안 direct 미호출·경고 1회, 무응답(never-resolving) 타임아웃 후 relay 전환, 쿨다운 경과 후 재시도 성공 및 기억 해제, 양쪽 실패 시 두 원인 메시지 포함, 동시 호출들의 쿨다운 상태 일관성, `selectRetryableChunks` 30초 경계, `createPendingRetryRunner` 동시 실행 가드(`skipped: true`) 및 부분 실패 격리를 검증.
+  - `server.ts`, `src/services/recording/chunkRecorder.ts`, `tests/chunkRecorder.test.ts`, `firebase-applet-config.json`, `package.json` 버전은 변경하지 않고, 루트 `storage.rules` 파일도 생성하지 않음.
+- **검증**: `npm test` 49/49 통과, `npm run lint`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 모두 오류 없이 통과.
+- **QA-2 후속: 녹음 보관함 「지금 다시 올리기」·막힌 조각 정리 (2026-11-21 KST, `v2.10.0 이후 수정(미배포)`)**:
+  - **배경**: QA-2 수정 이전에 이미 IndexedDB에 쌓여 있던 미업로드 로컬 조각을 사용자가 설정 > 녹음 보관함에서 직접 즉시 재업로드하거나 정리할 수단이 없었음.
+  - **원인**: `retryPendingUploads`가 30초 유예 건너뛰기(`force`)와 성공/실패/건너뜀 구분 반환을 지원하지 않았고, 대기 조각 삭제 API(`deletePendingChunks`)와 설정 화면 버튼이 없었음.
+  - **수정**:
+    - `src/services/firebase/uploadPolicy.ts` · `src/services/recording/chunkIndexedDb.ts`: 중복되어 있던 대기 조각 실행기를 `uploadPolicy.ts`의 `createPendingRetryRunner` 하나로 통합해 `force`·30초 유예·동시 실행 가드(`skipped: true`)·`RetryPendingResult`(`{ total, uploaded, failed, skipped }`)를 처리하고, `chunkIndexedDb.ts`는 이를 감싸 `retryPendingUploadsDetailed(userId, options?)` 및 `retryPendingUploads(userId, options?)`(`number` 반환 유지)를 제공. 순수 필터 선택 함수 `selectChunksToDelete` 및 `deletePendingChunks(filter?)` 추가.
+    - `src/ui/settings/SettingsModal.tsx`: 녹음 보관함 「업로드 대기 중인 로컬 조각」 경고 박스 내부에 「지금 다시 올리기」(스피너·비활성, `retryPendingUploadsDetailed(userId, { force: true })` 실행 후 `skipped`면 「이미 다시 올리는 중이에요. 잠시 뒤 다시 확인해 주세요.」, 아니면 `N개 올렸어요 / M개는 아직 못 올렸어요` 한 줄 표시 및 목록 갱신)와 「남은 조각 지우기」(확인 후 스냅샷 `ids`만 `deletePendingChunks(c => ids.has(c.id))`로 삭제 및 목록 갱신) 버튼 추가, 실패 시 한 줄 오류 표시.
+    - `docs/troubleshooting/firebase-storage-setup.md`: (d)항 `cors.json` 안내에서 미사용 `5173` 포트 언급 제거(`3000`만 유지).
+  - **방어 조치 (Safeguards)**:
+    - `tests/pendingChunks.test.ts`(신규): `selectChunksToDelete`·`deletePendingChunks` 필터 선택 및 삭제, 통합된 `createPendingRetryRunner` 경로의 `force: true` 30초 유예 건너뛰기·동시 실행 가드(`skipped: true`)·`total === uploaded + failed` 일치, `retryPendingUploadsDetailed`/`retryPendingUploads` 빈 DB 래퍼 동작을 검증.
+    - `tests/uploadPolicy.test.ts`: 기존 동시 호출 테스트(6)에 첫 동시 묶음의 `directCalls === 3` 단언 추가, `createPendingRetryRunner` 가드 테스트에 `skipped: true`/`false` 단언 반영.
+  - **남은 리스크**:
+    - `force` 재시도가 막 끝난 통화의 마지막 조각과 겹치면 `recordingChunks` 메타데이터를 덮어쓸 수 있음(기존 경로에도 있던 경쟁, 후속 과제).
+  - **검증**: `npm test` 49/49 통과, `npm run lint`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 모두 오류 없이 통과.
+### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA-4~6 뒤로가기 처리·설정 탭 한 줄 스크롤·통화 중 새로고침 경고와 끝나지 않은 통화 안내 정정 (브랜치 `fix/qa-r4-6-back-tabs-recovery`)
+- **배경**:
+  - 실기기 QA(시트 원콜 탭 4·5·6행)에서 3가지 문제가 보고됨.
+  - (4행) 통화 준비 화면(`PreCallScreen`)에서 브라우저 뒤로가기를 누르면 홈으로 돌아오지 않고 `about:blank`로 앱을 이탈함.
+  - (5행) 393px 모바일 폭에서 설정 모달(`SettingsModal`)의 탭 7개가 줄바꿈 없이 접혀 `녹/음/보/관/함`처럼 한 글자씩 세로로 깨짐.
+  - (6행) 통화 중 F5/창 닫기 시 확인 경고가 없고, 새로고침 직후 「끝나지 않은 통화」 창이 방금 끊긴 통화가 아니라 예전 통화만 보여 주며, 녹음 조각이 0개인데도 「녹음은 안전하게 저장돼 있어요.」와 `0분`을 표시함.
+- **원인**:
+  - (4행) 앱 전체에 `history.pushState`/`popstate` 처리가 없고 `App.tsx`의 React 상태(`prepCall`, `activeCallGoal`, 모달 상태)로만 화면을 전환해 브라우저 history가 항상 첫 항목 1개뿐이었음.
+  - (5행) `SettingsModal.tsx` 탭 줄(`flex border-b ... px-5`)이 줄바꿈·오버플로우 제어를 두지 않아 좁은 폭에서 버튼 텍스트가 강제 줄바꿈됨.
+  - (6행) `NewCallScreen.tsx`에 `beforeunload` 리스너가 없었고, `db.ts`의 `checkAndMarkInterruptedSessions`가 `lastChunkAt`이 2분을 넘긴 통화만 `pending_review`로 전환해 새로고침 직후 방금 끊긴 통화가 빠졌으며, `UnfinishedSessionModal.tsx`는 목록 첫 항목만 고정 표시하고 `Math.round(chunkCount * 10 / 60)`분 계산 및 고정 문구만 사용함.
+- **수정**:
+  - **4행 뒤로가기**: React·DOM 전역 의존 없이 history 유사 객체와 `popstate` 구독 함수를 주입받는 순수 모듈 `src/services/navigation/historySync.ts`(`HistoryDepthSync`)와 닫을 대상 우선순위 판정 순수 모듈 `src/services/navigation/backTarget.ts`(`pickBackTarget`, `getNavigationDepth`)를 신규 작성. 마운트 시 `replaceState({ onecallDepth: 0 })`로 정규화, `setDepth`로 0→1 `pushState`·1→0 `go(-1)`(프로그래밍적 `popstate` 무시)·1→1 무동작 처리, 사용자 뒤로가기 시 `onUserBack()` 호출 후 상태 변화로 깊이가 줄지 않으면 `pushState`로 복구. `src/App.tsx`에서 `depth`를 계산해 동기화하고 `pickBackTarget` 우선순위(통화 중/복기 로딩·실패 카드/초기 진도 모달은 닫지 않음 → 복구, `prepCall`, 복기 모달, 끝나지 않은 통화 모달, 설정 모달)로 1개씩 닫음.
+  - **5행 설정 탭**: `src/ui/settings/SettingsModal.tsx` 탭 줄에 `overflow-x-auto flex-nowrap [scrollbar-width:none] [&::-webkit-scrollbar]:hidden`을, 각 탭 버튼에 `whitespace-nowrap shrink-0`을 적용하고 `SETTINGS_TABS` 배열 `map`으로 정리(`devMode` 조건 및 라벨 유지). `activeTab` 변경 시 `scrollIntoView({ inline: "nearest", block: "nearest" })` 호출.
+  - **6행 통화 중 새로고침 및 미완료 통화 안내**:
+    - `src/ui/call/NewCallScreen.tsx`: `status`가 `connecting`/`connected`/`reconnecting`이고 종료 중(`hangingUp`)이 아닐 때 `window` `beforeunload` 리스너를 등록(`event.preventDefault(); event.returnValue = ""`)하고 종료 처리 시작·오류/종료·언마운트 시 해제.
+    - `src/services/session/interruptedSession.ts`(신규, 순수 모듈): `DEFAULT_STALE_SESSION_MS`, `isInterruptedSession`을 services 계층으로 분리(`services` → `ui` import 제거).
+    - `src/ui/call/unfinishedSessionSummary.ts`(신규, 순수 모듈): `describeRecordingState`, `formatRecordingChunksSummary`(반올림한 초 기준으로 60초 미만/이상 구분해 59.5~59.9초도 `1분` 표기), `formatSessionChipLabel` 구현.
+    - `src/services/firebase/db.ts` & `src/App.tsx`: `checkAndMarkInterruptedSessions(userId, options?: { staleAfterMs?: number })`는 기본 2분 임계값을 유지하되 `App.tsx` 로그인 직후 호출만 `staleAfterMs: 0`을 전달해 페이지 새로 열림 시 남은 `in-progress` 통화를 즉시 `pending_review`로 전환.
+    - `src/ui/call/UnfinishedSessionModal.tsx`: 2개 이상일 때 상단 선택 칩(`11/21 13:13 · 4과` 형식, 기본은 첫 항목)을 노출해 선택한 통화 기준으로 정보·「복기 시작」·「보관만 하기」를 수행하고, 60초 미만 `N개 (M초)`/이상 `N개 (M분)` 표기 및 4가지 상태(`empty`/`transcript_only`/`saved`/`uploading`) 안내 문구 적용.
+- **방어 조치**:
+  - `tests/historySync.test.ts`(신규): 7개 시나리오(0→1 `pushState`, 사용자 뒤로가기 `onUserBack`, 앱 닫기 `go(-1)` 시 `onUserBack` 미호출, 1→1 0회, 미변경 시 `pushState` 복구, 마운트 `replaceState` 정규화, `dispose` 후 무시) 검증.
+  - `tests/backTarget.test.ts`(신규): `pickBackTarget` 우선순위(통화 중·로딩·실패 카드·초기 진도 모달 보호 및 `prepCall`→복기→끝나지 않은 통화→설정 모달 순) 검증.
+  - `tests/mobileShell.test.ts`: `SettingsModal.tsx`의 `{/* Tab Navigation */}` ~ `{/* Body */}` 구간만 잘라 `overflow-x-auto`, `flex-nowrap`, `whitespace-nowrap`, `shrink-0`을 검사하고 `scrollIntoView` 호출을 함께 검증.
+  - `tests/unfinishedSessionSummary.test.ts`(신규): `describeRecordingState` 4가지 문구, `formatRecordingChunksSummary` 초/분 분기(59.4초 vs 59.5~59.9초 경계 포함), `isInterruptedSession` 2분·`staleAfterMs: 0` 임계값, 칩 라벨 검증.
+- **남은 리스크**:
+  - 실기기(Android Chrome·iOS Safari)에서 Chrome 의 history 개입 때문에 사용자 조작 없는 `pushState` 항목을 뒤로가기가 건너뛸 수 있음 [미확인]
+  - 새로고침 직후 뒤로가기가 한 번 반응 없을 수 있음(깊이 정규화)
+  - `staleAfterMs` 0 은 다른 탭·기기에서 진행 중인 통화도 끝난 통화로 표시함
+- **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build` 모두 통과.
+### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — 마이크 점검 무한 로딩 해소: 제한 시간·실패 이유·다시 점검·건너뛰기, 통화 중 글로 답하기 (브랜치 `fix/qa-x1-mic-check-fallback`)
+- **배경**:
+  - 마이크가 없거나 브라우저 권한 안내 창이 응답하지 않는 환경에서 통화 준비 화면(`PreCallScreen`)의 「마이크 점검하기」가 무한 로딩에 빠져 「전화 걸기」가 영영 켜지지 않았음.
+  - 또한 마이크 없이 통화를 시작해 튜터 음성을 들으면서 글로 답하고, 그 답변을 대화 기록·통화 후 복기까지 남길 수 있는 경로가 없었음.
+- **원인**:
+  - `src/ui/call/PreCallScreen.tsx`의 `checkMic`이 `navigator.mediaDevices.getUserMedia`를 제한 시간 없이 `await`하여 Promise가 끝나지 않으면 `"checking"` 상태에 영원히 머물렀고, 실패 문구도 2종뿐이며 건너뛰기 경로가 없었음.
+  - `src/ui/call/NewCallScreen.tsx`는 마이크 실패 시 경고 배너만 띄우고 텍스트 입력/전송 UI가 없었으며, `LiveProvider`에도 사용자 텍스트 입력을 `transcriptItems`에 기록하는 공개 메서드가 없었음.
+- **수정**:
+  - `src/ui/call/micCheck.ts`(신규): React·DOM 전역 import 없는 순수 주입식 모듈로 `checkMicrophone(getUserMedia, timeoutMs = 8000)`, `mapMicErrorReason`, `stopStreamTracks`, `MIC_FAIL_MESSAGES`, 글 답변 정규화 순수 함수 `formatWrittenAnswer(text)`(`WRITTEN_ANSWER_MAX_LENGTH = 500`, `WRITTEN_ANSWER_PREFIX = "The learner answers in writing: "`)를 추가. 오류 `name`을 `unsupported`·`denied`·`not_found`·`in_use`·`timeout`·`unknown` 6종으로 매핑하고, 타임아웃 뒤 늦게 도착한 `MediaStream`은 즉시 모든 트랙을 `stop()` 처리함.
+  - `src/ui/call/PreCallScreen.tsx`: `checkMicrophone(..., 8000)`을 사용하도록 변경하고, 점검 중 「취소」 버튼, 실패 시 사유별 문구 + 「다시 점검」 + 「마이크 없이 진행 (글로 답하기)」 버튼을 추가했으며, 최초 `idle` 및 점검 취소 후 `idle` 상태에서도 「마이크 없이 진행 (글로 답하기)」 링크를 노출함. 건너뛰기 선택 시 「마이크 없이 전화 걸기 (글로 답해요)」가 활성화되며 `onStart({ micSkipped: true })`(성공 시 `false`)를 호출함.
+  - `src/App.tsx`: `activeCallTextOnly` 상태를 추가해 `handlePrepConfirmed({ micSkipped })`가 `NewCallScreen`에 `textOnly` prop을 전달하고 통화 종료/이탈 시 초기화함.
+  - `src/services/providers/types.ts` · `src/services/providers/geminiLiveProvider.ts`: `LiveSessionOptions`에 `skipMic?: boolean` 추가(지정 시 `initAudioCapture()` 건너뛰고 재생만 초기화), `sendTextPrompt(prompt)`가 소켓 전송 성공 여부(`boolean`)를 반환하도록 변경(소켓이 `OPEN`이 아니거나 전송 실패 시 `false`), `LiveProvider`에 `appendUserText(text)` 추가(기존 `appendTranscript("user", ...)` 재사용 및 `onTranscript`·`onTranscriptLogged` 호출).
+  - `src/ui/call/NewCallScreen.tsx`: `textOnly` 시 `skipMic: true` 전달 및 `onMicWarning` 비노출, 하단 고정 푸터(연결된 상태)에 `formatWrittenAnswer` 기반 500자 제한·공백 무시·IME 조합 중 Enter 무시(`!e.nativeEvent.isComposing`) 「글로 답하기」 입력창과 「보내기」 버튼을 추가. `sendTextPrompt`가 `true`일 때만 `ensureSessionCreated()`·`appendUserText`를 호출하고 입력을 비우며, `false`이면 기록에 남기지 않고 입력을 유지한 채 「연결이 끊겨 보내지 못했어요」 한 줄 안내를 표시함.
+- **방어 조치 (Safeguards)**:
+  - `PreCallScreen.tsx`에서 `checkSeqRef`·`mountedRef` 가드로 취소·재점검·언마운트 이후 늦게 도착한 스트림은 React 상태를 갱신하지 않고 트랙만 정지함.
+  - `NewCallScreen.tsx`에서 `ensureSessionCreated`와 `hasMicRecordingRef`로 텍스트 전용 통화에서도 첫 글 답변 전송 성공 시 세션 문서를 생성해 `liveTranscript` 저장 및 종료 복기(`liveTranscript_fallback`)가 누락되지 않게 하고, 이전 통화의 `ChunkRecorder` 녹음 조각이 섞이지 않도록 차단함. `tests/mobileShell.test.ts` 레이아웃 규칙(`h-screen`, `supports-[height:100dvh]:h-dvh`, `shrink-0`, `select-none`, `"끝내기"` 비포함)을 유지함.
+  - `tests/micCheck.test.ts`(신규): 성공, 무응답 타임아웃, 타임아웃 후 지연 스트림 `track.stop()`, 오류 `name`별 `reason` 매핑 전체, `mediaDevices` 부재 시 `unsupported`, 사유별 메시지 비어있지 않음·고유성, `formatWrittenAnswer` 공백/트림/500자 자르기/접두어, `GeminiLiveProvider`의 `skipMic: true` 시 가짜 `navigator.mediaDevices.getUserMedia` 0회 호출·`sendTextPrompt` 소켓 상태별 `boolean` 반환·`appendUserText` 기록 8개 테스트 추가.
+- **남은 리스크**:
+  - 통화 중 실시간 기록 저장 조건이 `sessionCreated` 이후로 바뀜(다음 저장에서 전체 복구).
+  - 글 답변이 서버에서 입력 전사로 다시 와 두 번 기록될 가능성은 [미확인].
+  - 모바일 키보드에서 입력창 가시성은 실기기 QA 필요 [미확인].
+- **검증**: `npm test` 45/45 통과, `npm run lint`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 오류 없음 (`package.json` 버전 `2.10.0` 유지).
+### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA-3 통화 시작 침묵: 직접 연결 Blob 프레임 해석·연결 직후 튜터 첫 인사 트리거 (브랜치 `fix/qa-r3-live-blob-greeting`)
+- **배경**:
+  - 통화를 연결해도 튜터가 13~40초 동안 먼저 말하지 않고, 콘솔에 `Direct parse message error: SyntaxError… [object Blob]` 와 `setupComplete timeout` 이 반복 기록되는 QA 버그가 발생함.
+  - 사용자가 「답변 끝」 버튼이나 음성을 먼저 보내기 전까지 튜터가 첫 인사를 시작하지 못하는 증상도 함께 확인됨.
+- **원인**:
+  - `src/services/providers/geminiLiveProvider.ts`의 `connectDirect()` 및 `wireWebSocketEvents()` `onmessage`가 `event.data`를 바로 `JSON.parse`하고 있었음. Gemini Live 직접 연결 서버는 JSON을 바이너리(`Blob`) 프레임으로 내려보내 `JSON.parse(Blob)`이 `"[object Blob]"` `SyntaxError`로 실패하고, `setupComplete`를 읽지 못해 5초 타임아웃 후 서버 프록시로 폴백되며 추가 지연이 발생함.
+  - 시스템 프롬프트(`src/data/lessonPromptBuilder.ts`)에는 첫 마디 인사 지시가 있으나, Live 모델은 클라이언트 입력이 도착하기 전에는 먼저 발화하지 않아 연결 직후 첫 마디를 트리거하는 신호가 없었음.
+  - 직접 연결 경로의 `sendTextPrompt`가 `clientContent.turns`, `sendAudioChunk`가 deprecated 인 `realtimeInput.mediaChunks`를 사용하고 있어 프록시 SDK(`sendRealtimeInput({ text })` / `({ audio })`)와 와이어 형식이 달랐음.
+- **수정**:
+  - `src/services/providers/liveMessage.ts`(신규, DOM·Firebase 비의존 순수 모듈): `decodeLiveMessage(data)`가 `string`, `Blob`, `ArrayBuffer`, `ArrayBufferView`(오프셋 있는 뷰 포함)를 UTF-8 문자열로 디코딩한 뒤 `JSON.parse`하도록 구현(실패 시 reject). `createSerialQueue()`가 비동기 디코딩(`Blob.text()`) 중 프레임 순서가 뒤집히지 않도록 작업을 들어온 순서대로 직렬 실행하고, 앞 작업 실패 뒤에도 다음 작업을 이어서 실행.
+  - `src/services/providers/geminiLiveProvider.ts`: `connectDirect`, `connectViaServerProxy`('ready' 대기), `wireWebSocketEvents`의 `onmessage`를 모두 `decodeLiveMessage` + 프로바이더 단위 직렬 큐(`messageQueue`)로 감싸고, `connectionGeneration` 및 소켓 일치 가드로 핸들러 전환(`setupComplete`/`ready` → `wireWebSocketEvents`)과 재연결·종료 간 프레임 유실·혼선을 차단(기존 5초 타임아웃·프록시 폴백 로직은 유지).
+  - 직접 경로의 `sendTextPrompt`를 `{ realtimeInput: { text: prompt } }`로, `sendAudioChunk`를 `{ realtimeInput: { audio: { mimeType: "audio/pcm;rate=16000", data: base64 } } }`로 통일(프록시 형식 유지).
+  - `CALL_KICKOFF_PROMPT` 상수를 export 하고, `connect()`에서 `establishConnection()` 직후 `!options.resumeToken && this.isConnected`일 때만 `sendTextPrompt(CALL_KICKOFF_PROMPT)`를 1회 전송하도록 추가(마이크 준비와 독립, `transcriptItems`·Firestore `liveTranscript` 미기록, `resumeToken` 연결 및 `triggerReconnection`/GoAway 재연결에서는 미전송).
+  - **1차 리뷰 반영(연결 중 종료 시 프록시 폴백·첫 인사 오발송 차단)**: `connectionGeneration`(연결·재연결·종료 세대)과 `socketGeneration`(개별 소켓 시도)을 분리하고, 연결 대기 중 `disconnect()` 호출 시 대기 중인 소켓 Promise를 즉시 취소(`LIVE_CONNECT_CANCELLED`)하도록 정리. `connectDirect`·`connectViaServerProxy`의 `onopen`·`onerror`·`onclose` 세대 불일치 분기 및 `setupTimer`/`readyTimer` 콜백 안에서 즉시 취소 reject 처리(기존 5초 뒤 `setupTimer`가 reject 되어 프록시 폴백으로 넘어가던 경합 차단). `establishConnection()` 시작 시점 세대를 기억해 토큰 조회 후·프록시 폴백 전·반환 전과 `connect()`의 kickoff 전에 세대가 바뀌었으면 오류(`onStatusChange("error")`)나 예외 대신 기존 `disconnect` 흐름과 맞춰 조용히 종료하도록 수정.
+- **방어 조치 (Safeguards)**:
+  - `tests/liveMessage.test.ts`(신규): `decodeLiveMessage`의 `string`/`Blob`/`ArrayBuffer`/`Uint8Array`(오프셋 뷰 포함)/한글 멀티바이트 파싱 및 잘못된 JSON reject 검증, `createSerialQueue`의 순서 보존 및 앞 작업 실패 후 계속 실행 검증.
+  - 소스 검사로 `geminiLiveProvider.ts` 내 `JSON.parse(event.data)` 직접 호출 부재, `CALL_KICKOFF_PROMPT` export 및 `!options.resumeToken` 조건 가드를 검증하고, 가짜 `WebSocket`/`fetch`/`auth.currentUser` 환경에서 `Blob` `setupComplete` 직결 성공·프레임 순서 유지·마이크 미준비 시 `CALL_KICKOFF_PROMPT` 1회 전송·`realtimeInput` 형식·대화 로그 미기록·`resumeToken` 및 `GoAway` 재연결 시 미전송(`t.mock.timers`로 1000ms 타이머 대체)까지 단위 테스트로 검증.
+  - 1차 리뷰 반영 테스트 보강: (a) 직접 소켓이 열리기(`onopen`) 전 또는 `setupComplete` 전 `disconnect()` 시 프록시 소켓 미생성·kickoff 0회·오류 상태 미전환(`closed` 유지) 검증, (b) 토큰 응답 `{ok:false}` 프록시 경로에서 `Blob` `ready` 처리·`{type:"text_prompt"}` kickoff 정확히 1회 전송·`ready` 직후 후속 프레임 유실 없음 검증.
+- **남은 리스크**:
+  - 실기기 직접 연결에서 `realtimeInput.text`로 첫 인사가 실제로 나오는지, 서버가 `Blob` 프레임을 보내는지는 `[미확인]`(실기기 QA 필요).
+  - 같은 인스턴스로 다시 시도할 때 `resumeHandle`이 남아 있는 기존 동작은 이번 범위 밖.
+- **검증**: `npm test` 45/45 통과, `npm run lint`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 오류 없음.
 
 ---
 

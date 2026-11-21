@@ -17,6 +17,12 @@ import {
 import { db, auth } from "./config";
 import { sanitizePlanChangeAfter, isEmptyPlanChange } from "../../data/planValidation";
 import type { ReviewTiming } from "../review/reviewTiming";
+import {
+  DEFAULT_STALE_SESSION_MS,
+  isInterruptedSession,
+} from "../session/interruptedSession";
+
+export { isInterruptedSession };
 
 export enum OperationType {
   CREATE = "create",
@@ -525,11 +531,15 @@ export async function markSessionPendingReview(userId: string, sessionId: string
 
 /**
  * B-4 Requirement 0: Firestore-based interrupted session watchdog.
- * If status is in-progress and lastChunkAt is > 2 minutes ago, automatically transitions status to pending_review.
+ * If status is in-progress and lastChunkAt exceeds staleAfterMs (default 2 minutes),
+ * automatically transitions status to pending_review.
  */
-export async function checkAndMarkInterruptedSessions(userId: string): Promise<SessionData[]> {
+export async function checkAndMarkInterruptedSessions(
+  userId: string,
+  options?: { staleAfterMs?: number }
+): Promise<SessionData[]> {
   const sessionsCol = collection(db, "users", userId, "sessions");
-  const TWO_MINUTES_MS = 2 * 60 * 1000;
+  const staleAfterMs = options?.staleAfterMs ?? DEFAULT_STALE_SESSION_MS;
   const now = Date.now();
 
   try {
@@ -541,10 +551,10 @@ export async function checkAndMarkInterruptedSessions(userId: string): Promise<S
 
     for (const s of sessions) {
       if (s.status === "in-progress") {
-        const lastActivity = s.lastChunkAt || s.startedAt;
-        const diff = now - new Date(lastActivity).getTime();
-        if (diff > TWO_MINUTES_MS) {
-          console.log(`[Watchdog] Session ${s.id} in-progress but lastChunkAt > 2m (${Math.round(diff / 1000)}s ago). Marking as pending_review.`);
+        if (isInterruptedSession(s, now, staleAfterMs)) {
+          const lastActivity = s.lastChunkAt || s.startedAt;
+          const diffSec = lastActivity ? Math.round((now - new Date(lastActivity).getTime()) / 1000) : 0;
+          console.log(`[Watchdog] Session ${s.id} in-progress (${diffSec}s ago, threshold ${staleAfterMs}ms). Marking as pending_review.`);
           await markSessionPendingReview(userId, s.id);
           s.status = "pending_review";
           result.push(s);
