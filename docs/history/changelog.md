@@ -4,6 +4,20 @@
 
 ---
 
+### [2026-11-21 KST] P0-1 복기 단계별 소요 시간 계측 (v2.10.0 묶음) (GitHub 브랜치 `fix/p0-1-review-timing`, 기획 Claude CLI Opus 5.5 high · 구현 agy Gemini 4 Hydrogen high)
+- **배경**: 통화 후 복기 파이프라인(`runPostCallReview`)에서 어느 단계(녹음 조각 수집·최종 받아쓰기·폴백·AI 복기·저장)가 얼마나 걸리는지 세션 단위로 관측할 수 있도록 계측을 추가함. 복기 동작·받아쓰기·세션 상태 전이(`pending_review` → `done`)는 변경하지 않는 순수 계측 PR.
+- **원인과 수정**:
+  - `src/services/review/reviewTiming.ts`(신규): Firebase 값 import 없는 순수 모듈로 `ReviewStep`, `ReviewTiming`, `createStepTimer(now?)` 추가. 테스트에서 가짜 시계를 주입할 수 있도록 `now` 기본값만 `() => Date.now()`로 두고, 종료되지 않은 단계는 `snapshot()`에서 제외하며, 동일 단계의 누적 합계로 `totalMs`를 계산.
+  - `src/services/firebase/db.ts`: `SessionData`에 선택 필드 `reviewTiming?: ReviewTiming` 추가. `saveSessionReview` 옆에 `saveReviewTiming(userId, sessionId, timing)` 추가(`reviewTiming`과 `updatedAt`만 갱신하고 `status`는 유지, 기존 오류 도우미 패턴 `handleFirestoreError` 사용).
+  - `src/services/review/reviewPipeline.ts`: `ReviewPipelineResult`에 `timing?: ReviewTiming` 추가. `runPostCallReview`의 5단계(`collectChunks`, `transcribe`, 실제 실행 시 `fallback`, `review`, `save`), 1분 묶음 수(`minutes`), 재시도 포함 전사 요청 횟수(`transcribeRequests`), 결과(`ok` / `empty` / `failed`), 확인된 `sourceStt`를 계측. 전체 본문을 `try/finally`로 감싸 성공·빈 통화·예외 전파(`failed`) 모든 경로에서 `saveReviewTiming`을 호출(저장 실패 시 `console.warn` 후 삼켜 복기 결과/예외 흐름에 영향 없음).
+  - `src/ui/review/ReviewModal.tsx` · `src/App.tsx`: `ReviewModalProps` 및 `ActiveReviewState`에 `timing?: ReviewTiming` 전달. `useDevMode()`가 켜져 있고 `timing`이 있을 때만 복기 모달 상단에 `복기 소요: 받아쓰기 n초 · AI n초`(없는 단계 생략) 한 줄을 표시.
+- **방어 조치 (Safeguards)**:
+  - `tests/reviewTiming.test.ts`(신규): 가짜 시계 기준 단계별 ms 및 `totalMs` 일치, `start` 후 `end` 없는 단계 제외, 동일 단계 2회 누적 합산 검증.
+  - 계측 저장 실패가 복기 완료·실패 전파나 세션 상태(`pending_review` → `done`)를 방해하지 않도록 `finally`에서 `saveReviewTiming`을 기다리지 않고 `.catch`로만 경고한다(오프라인 `updateDoc` 대기 방지). `package.json` 버전 및 `server.ts`·기존 테스트는 변경하지 않음.
+- **검증**: `npm test` 28/28 통과, `npx tsc --noEmit` 및 `npx tsc -p tsconfig.server.json --noEmit` 오류 없음.
+
+---
+
 ### [2026-11-10 KST] v2.9.0 — 전체 코드 리뷰 2차 반영 (GitHub 브랜치 `claude/full-review-2026-11`, Claude)
 - **배경**: 2026-11-10에 `main`(`24901cb`, v2.8.1) 전체 약 14,100줄을 다시 리뷰. 빌드·타입 검사·테스트 18개는 통과했지만, 약한 인터넷·앱을 중간에 닫음·버튼 두 번 누름 같은 실제 사용 상황에서 학습 기록이 빠지는 문제 9개(높음), 8개(중간), 6개(낮음)를 찾음. 전체 목록과 근거: [`docs/reviews/2026-11-full-code-review.md`](../reviews/2026-11-full-code-review.md).
 - **문제 원인과 적용된 수정 내역 — 높음**
