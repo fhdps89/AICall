@@ -8,6 +8,7 @@ import {
 import { authFetch } from "../api/authFetch";
 import { auth } from "../firebase/config";
 import { decodeLiveMessage, createSerialQueue } from "./liveMessage";
+import { LIVE_STATUS_TEXT } from "./liveStatusText";
 import {
   LiveWireKind,
   LiveClientMessage,
@@ -132,7 +133,7 @@ export class GeminiLiveProvider implements LiveProvider {
 
     this.options = options;
     this.activeSystemPrompt = options.systemPrompt;
-    this.options.onStatusChange("connecting", "Gemini Live 연결 준비 중...");
+    this.options.onStatusChange("connecting", LIVE_STATUS_TEXT.preparing);
 
     if (options.resumeToken) {
       this.resumeHandle = options.resumeToken;
@@ -193,7 +194,7 @@ export class GeminiLiveProvider implements LiveProvider {
     // 1. Try Ephemeral Token direct connection (2-1 requirement 1, 2, 3)
     let directSucceeded = false;
     console.log("[Live] stage=token_fetch");
-    this.options?.onStatusChange("connecting", "Gemini Live 연결 준비 중...");
+    this.options?.onStatusChange("connecting", LIVE_STATUS_TEXT.preparing);
 
     try {
       const tokenAbort = new AbortController();
@@ -209,7 +210,7 @@ export class GeminiLiveProvider implements LiveProvider {
 
       if (tokenData.ok && tokenData.token) {
         console.log("[GeminiLiveProvider] Ephemeral token acquired. Attempting direct connection...");
-        this.options?.onStatusChange("connecting", "Gemini Live 직접 연결 중...");
+        this.options?.onStatusChange("connecting", LIVE_STATUS_TEXT.connecting);
         try {
           await this.connectDirect(tokenData.token);
           directSucceeded = true;
@@ -233,7 +234,7 @@ export class GeminiLiveProvider implements LiveProvider {
     // 2. Fallback to server proxy WebSocket
     if (!directSucceeded) {
       console.log("[GeminiLiveProvider] Connecting via server proxy WebSocket...");
-      this.options?.onStatusChange("connecting", "서버 중계로 Gemini Live 연결 중...");
+      this.options?.onStatusChange("connecting", LIVE_STATUS_TEXT.connecting);
       try {
         await this.connectViaServerProxy();
       } catch (proxyErr) {
@@ -372,7 +373,7 @@ export class GeminiLiveProvider implements LiveProvider {
                 this.reconnectFailures = 0;
                 this.connectionPath = "direct";
                 console.log("[Live] path=direct (setupComplete received)");
-                this.options?.onStatusChange("connected", "Gemini Live 직접 연결 완료");
+                this.options?.onStatusChange("connected", LIVE_STATUS_TEXT.connected);
 
                 // Switch to full message handler
                 this.wireWebSocketEvents(c);
@@ -590,7 +591,7 @@ export class GeminiLiveProvider implements LiveProvider {
             this.reconnectFailures = 0;
             this.connectionPath = "proxy";
             console.log("[Live] path=proxy model=" + (data.model || "?"));
-            this.options?.onStatusChange("connected", "Gemini 3.8 Live 연결됨 (서버 중계)");
+            this.options?.onStatusChange("connected", LIVE_STATUS_TEXT.connected);
             resolve();
           } else if (data.type === "fallback_required" || data.type === "error") {
             fail(

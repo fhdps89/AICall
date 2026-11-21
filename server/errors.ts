@@ -4,7 +4,7 @@
  */
 import type { Response } from 'express';
 
-export const NO_KEY_MESSAGE = '서버에 Gemini 키가 없어요. 앱 설정 → Gemini 키에서 키를 저장해 주세요.';
+export const NO_KEY_MESSAGE = '튜터 서버에 연결 키가 없어요. 설정 맨 아래 「고급 설정 보기」를 누른 뒤 「연결 키」 탭에서 키를 저장해 주세요.';
 
 export type ApiErrorCode =
   | 'NO_SERVER_KEY'
