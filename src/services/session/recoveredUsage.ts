@@ -16,11 +16,43 @@ export function toKstDateStr(ms: number): string {
 }
 
 /**
+ * liveTranscript 항목의 timestamp 값을 UTC ms 숫자로 정규화한다.
+ * 유한 number는 그대로, string은 숫자 문자열(ms) 또는 ISO 날짜 문자열을 파싱하며 그 외는 null.
+ */
+export function parseTranscriptTimestamp(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const asNum = Number(trimmed);
+    if (Number.isFinite(asNum)) return asNum;
+    const parsed = Date.parse(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+export interface RecoveredTranscriptItem {
+  role?: string;
+  text?: string;
+  timestamp?: unknown;
+}
+
+export type RecoveredUsageSession = Pick<
+  SessionData,
+  "startedAt" | "endedAt" | "lastChunkAt" | "lastTranscriptAt" | "usageRecordedAt"
+> & {
+  liveTranscript?: ReadonlyArray<RecoveredTranscriptItem>;
+};
+
+/**
  * 정상 종료(`endedAt`)나 복구 집계(`usageRecordedAt`)가 없는 오늘(KST) 통화의 사용량을 산출한다.
  * 다른 날 시작한 통화나 길이 0 이하 통화는 null을 반환한다.
  */
 export function recoveredCallUsage(
-  s: Pick<SessionData, "startedAt" | "endedAt" | "lastChunkAt" | "liveTranscript"> & { usageRecordedAt?: string },
+  s: RecoveredUsageSession,
   todayKst: string
 ): { liveMinutes: number; calls: number } | null {
   if (s.endedAt || s.usageRecordedAt) return null;
@@ -30,15 +62,18 @@ export function recoveredCallUsage(
   if (toKstDateStr(startMs) !== todayKst) return null;
 
   let endMs = startMs;
-  if (s.lastChunkAt) {
-    const chunkMs = Date.parse(s.lastChunkAt);
-    if (Number.isFinite(chunkMs) && chunkMs > endMs) {
-      endMs = chunkMs;
+  for (const iso of [s.lastChunkAt, s.lastTranscriptAt]) {
+    if (!iso) continue;
+    const ms = Date.parse(iso);
+    if (Number.isFinite(ms) && ms > endMs) {
+      endMs = ms;
     }
   }
+  const maxEndMs = startMs + MAX_RECOVERED_CALL_SEC * 1000;
   for (const item of s.liveTranscript ?? []) {
-    if (typeof item.timestamp === "number" && Number.isFinite(item.timestamp) && item.timestamp > endMs) {
-      endMs = item.timestamp;
+    const ts = parseTranscriptTimestamp(item?.timestamp);
+    if (ts !== null && ts > endMs && ts <= maxEndMs) {
+      endMs = ts;
     }
   }
 
@@ -51,11 +86,6 @@ export function recoveredCallUsage(
     calls: callsForDuration(sec),
   };
 }
-
-export type RecoveredUsageSession = Pick<
-  SessionData,
-  "startedAt" | "endedAt" | "lastChunkAt" | "liveTranscript"
-> & { usageRecordedAt?: string };
 
 export interface RecoveredUsageRecorderDeps {
   getSession: (uid: string, sessionId: string) => Promise<RecoveredUsageSession | null>;
