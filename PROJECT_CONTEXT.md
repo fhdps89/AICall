@@ -116,7 +116,9 @@
    - 최근 취약점은 OPIc·필리·여행 3개를 따로 저장(`opicWeakPoints`, `phillyWeakPoints`, `travelWeakPoints`, v2.8.0 전에는 저장되지 않았음). 필리와 여행 원문 프롬프트가 같은 자리 표시(`[복기 프롬프트 결과 3줄 또는 "none yet"]`)를 써서, `hydrateTutorPrompt(prompt, placeholders, goalId)`가 트랙에 맞는 값을 넣음(예전엔 여행에도 필리 값이 들어갔음).
 9. **첫 실행 진도 설정 & 오늘 수업 카드 UI (`src/ui/onboarding/`, `src/ui/home/`)**:
    - 첫 실행 시 OPIc 10/10 1과, 10/11 2과, 10/12 3과 히스토리를 반영한 진도 설정 모달 제공.
-   - 홈 화면 요일별 루틴 뱃지, 오늘 요일에 해당하는 수업 카드 및 즉시 통화 시작 버튼.
+   - 홈 화면 「오늘 할 것」 메인 루프: 오늘 수업 카드 → 아침 강의 카드(`MorningLectureCard`) → 복습 & 퀴즈 카드 순서로 상시 노출(`showMore` 접힘 영역에서 아침 강의 분리). 헤더 이메일은 개발자 모드(`devMode`)일 때만 표시.
+   - 일요일(주간 복기일) 카드에는 「오늘 퀴즈」(복습 대상 0개 시 비활성)·「오늘 강의」(강의 카드로 스크롤)·「트랙 골라 통화」(더 보기 펼친 뒤 트랙 섹션으로 스크롤) 3개 액션 제공.
+   - 오늘 수업 카드와 4대 트랙 카드의 인라인 진도 `<select>`를 「진도 바꾸기」 버튼 + 확인 시트(`LessonChangeSheet.tsx`, 「확인」 누르기 전 미저장·동일 과 선택 시 비활성)로 교체. (`README.md` 1단계 홈 항목에도 반영)
 
 ---
 10. **B-7 아침 강의 · B-8 그록봇 피드 (`server/lecture.ts`, `server/feed.ts`, `src/ui/lecture/`)**:
@@ -155,6 +157,7 @@
 ---
 
 ## 5. 버전 히스토리
+- **P0-3 (v2.10.0 묶음, 2026-11-21 KST)**: 홈 「오늘 할 것」 루프 재배치(`HomeScreen.tsx`, `LessonChangeSheet.tsx`). 아침 강의 카드를 「더 보기」 밖 메인 흐름(오늘 수업 카드 뒤·복습 퀴즈 카드 앞)으로 꺼내고, 일요일 주간 복기 카드에 「오늘 퀴즈」·「오늘 강의」·「트랙 골라 통화」 액션 3종 추가, 오늘 수업/트랙 카드의 인라인 진도 `<select>`를 확인 시트(`LessonChangeSheet`)로 교체해 오작동 방지, 헤더 이메일은 개발자 모드에만 노출. `README.md` 1단계 홈 설명 함께 갱신.
 - **2026-11-21 KST (P0-2, v2.10.0 묶음 — 버전 표기 유지)**: `reviewView.ts` 추가 및 `SessionReviewData`에 `usedCorrectlyItems`·`repeatedItems` 저장, `ReviewModal`에 「이번 통화 성과」(졸업·재복습·진도 반영)·빈 통화 안내·`—` 레벨 배지·한국어 출처 라벨·개발자 모드 전용 문구 분리·진행 문구 정리 적용 (`README.md` 1단계 복기 항목 함께 갱신).
 - **2026-11-21 KST (P0-1, v2.10.0 묶음 — 버전 표기 유지)**: `reviewTiming.ts` 추가 및 `reviewPipeline.ts` 단계별(`collectChunks`·`transcribe`·`fallback`·`review`·`save`) 소요 시간 계측, `sessions.reviewTiming` 저장(`saveReviewTiming`), 개발자 모드 `ReviewModal` 한 줄 소요 시간 표시.
 - **v2.9.0 (2026-11-10 KST)**: [전체 코드 리뷰 2차 반영] 통화 종료는 `pending_review`, 복기 저장 시에만 `done`(복기 중 앱을 닫아도 다시 복기 가능, 홈 아래 「끝나지 않은 통화」 버튼). 복기 직후 피드 동기화. 1분 임시 받아쓰기 묶음을 녹음 순서대로(업로드와 무관). 기록용 받아쓰기는 분 단위 재시도 + 실패한 분만 임시 받아쓰기로 보충. 통화 종료 중복 방지, 연결 끊김 시 복기로 이어 가기, 화면 꺼짐 방지 재요청, 「다시 시도」 경합 방지. 내 말이 없는 통화는 진도 유지. 복기 AI가 준 실수 id 검사, 요청 크기 제한. 코치 메시지 최신 50개. 오류 응답 표준화(`server/errors.ts`, 내부 문구 비노출)와 화면용 `friendlyError`. 보안 헤더 2종. 테스트 25개. 기록: `docs/reviews/2026-11-full-code-review.md`, 실기기 QC: `docs/qc/2026-11-android-qc-checklist.html`.

@@ -11,7 +11,7 @@ AI 튜터와 영어로 통화하고, 통화에서 **틀린 말을 틀린 그대�
 | 단계 | 기능 | 주요 파일 |
 |---|---|---|
 | 1단계 | Google 로그인(허용된 1개 계정만), Firestore·Cloud Storage | `src/services/firebase/`, `firestore.rules`, `server/auth.ts` |
-| 1단계 | 4개 목표(OPIc AL·필리조선소 업무·미국/호주 여행·Bluey 듣기)와 요일 루틴, 오늘 수업 카드 | `src/data/defaultGoals.ts`, `src/ui/home/` |
+| 1단계 | 4개 목표(OPIc AL·필리조선소 업무·미국/호주 여행·Bluey 듣기)와 요일 루틴, 오늘 수업 카드(아침 강의를 홈 루프에 노출, 진도 변경은 확인 시트에서 확정) | `src/data/defaultGoals.ts`, `src/ui/home/` |
 | 1단계 | 실시간 통화 `gemini-3.8-live`: 임시 토큰 직접 연결 → 실패 시 서버 중계, 세션 재개, 재연결(5번 실패하면 멈추고 안내). 통화마다 새 연결 객체라 앞 통화가 섞이지 않음 | `src/services/providers/geminiLiveProvider.ts`, `server.ts` `/live` |
 | 1단계 | 10초 조각 녹음(IndexedDB 먼저 저장 → Storage 업로드, 통화 마지막 조각까지 포함), 1분 단위 임시 받아쓰기(설정에서 끄기 가능), 끊긴 통화 복구 | `src/services/recording/` |
 | 1단계 | 통화 후 복기: 녹음을 1분 WAV로 합쳐 `gemini-3.5-transcribe` VERBATIM 받아쓰기 → `gemini-3.8-flash` 복기(`myPhrase`는 틀린 그대로). "내가 한 말 아님" 신고 시 그 실수는 복습 목록에서 빠짐. 다시 복기해도 중복·진도 후퇴 없음. 복기 화면에서 이번 통화 성과(졸업·재복습·다음 수업 진행)도 함께 표시 | `src/services/review/reviewPipeline.ts`, `/api/review` |
