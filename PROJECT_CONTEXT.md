@@ -77,6 +77,7 @@
    - **다시 복기해도 안전** (v2.8.0): 같은 통화를 다시 복기하면 이전 실행이 저장한 실수를 지우고 새 결과로 바꿈(중복 없음). 진도(`nextLessonIndex`)는 앞으로만 움직여서, 오래된 미완료 통화를 나중에 복기해도 진도가 뒤로 가지 않음. 복기가 끝나면 홈의 목표 목록을 다시 불러와 "오늘 수업"이 바로 다음 과로 바뀜.
    - **Keep 양식 복사**: `[내가 한 말] -> [자연스러운 표현]` 줄 단위 일괄 복사.
    - **미완료 통화 복기 연결**: 지시서 3의 "끝나지 않은 통화" 모달에서 "복기 시작" 클릭 시 즉시 복기 파이프라인 가동.
+   - **오늘 강의 연결 (`ReviewModal.tsx`, `App.tsx`, `HomeScreen.tsx`)**: 복기 모달 하단 왼쪽 버튼 「오늘 강의 보기」는 복기를 닫고 홈 강의 카드(`MorningLectureCard`)로 초점(`pendingHomeFocus="lecture"`)을 옮기며, 오늘 강의가 이미 `ready`(오디오 포함)일 때만 강의 창을 연다(미준비 시 생성 시작 없이 홈 강의 카드로만 스크롤).
    - **mistakes 컬렉션 자동 저장**: stage 1, status reviewing, source call 메타데이터 저장.
    - **통화 마지막 말 포함** (v2.8.0): 통화 종료 시 녹음기가 마지막(10초 미만) 조각이 다 만들어질 때까지 기다린 뒤(최대 3초) 복기에 넘김.
    - **단계별 소요 시간 계측 (`reviewTiming.ts`, P0-1)**: `sessions` 문서에 `reviewTiming`(단계별 소요 ms·총합·1분 묶음 수·전사 요청 수·결과 `ok`/`empty`/`failed`·`sourceStt`)을 저장하며, 개발자 모드에서 `ReviewModal` 상단에 한 줄 요약을 표시함.
@@ -126,6 +127,7 @@
    - 그록봇은 `/feed/{비밀키}/today(.json)`만 열면 됨. 앱이 홈 화면을 열 때마다 비밀키·후보 실수를 서버에 다시 보냄(`syncFeed`). 강의가 없으면 피드 요청 때 생성 시작, 실패한 강의는 30분에 한 번만 다시 시도.
    - **한계**: 강의 음성·피드 설정은 서버의 `.data/` 폴더에 저장되어, Cloud Run 서버가 다시 켜지면 지워질 수 있음.
    - **만들던 중 서버가 다시 켜진 강의** (v2.8.0): 서버 기록이 "생성 중"인데 실제 작업이 없으면 `failed`/`INTERRUPTED`로 알려 줌. 서버 기록 자체가 지워졌으면 앱이 Firestore의 "생성 중"을 같은 상태로 바꿈. 홈 카드는 "서버가 다시 시작되어 만들던 강의가 멈췄어요"와 **오늘 강의 만들기** 버튼을 보여 주고, 그록봇 피드는 30분 기다리지 않고 바로 다시 만듦.
+   - **복기에서 오늘 강의로 연결** (P0-4): 복기 모달 「오늘 강의 보기」는 복기를 닫고 홈 강의 카드로 이동해 첫 `refresh()` 완료 후 스크롤하며, 이미 `ready`(오디오 포함)인 경우에만 `LectureModal`을 연다. 준비 전이면 `startLecture`를 부르지 않고 카드의 「오늘 강의 만들기」 버튼만 노출된 상태로 둔다.
 11. **B-10 Keep 가져오기 · 사용량 · 1-F 받아쓰기 품질 시험**:
    - Keep "English mistake log" 붙여넣기 → `gemini-3.8-flash`로 [내가 한 말/자연스러운 표현/이유] 미리보기 → 저장(1일 단계부터).
    - 통화 분·받아쓰기 분·토큰·TTS 글자 수 기록, 설정에 이번 달 예상 비용(단가표 `models.ts` `PRICING_RATES`, 기획 v4 단가와 재확인 필요).
@@ -157,6 +159,7 @@
 ---
 
 ## 5. 버전 히스토리
+- **P0-4 (v2.10.0 묶음, 2026-11-21 KST)**: 복기 모달에서 오늘 강의로 연결(`ReviewModal.tsx`, `App.tsx`, `HomeScreen.tsx`, `MorningLectureCard.tsx`). 하단 「오늘 강의 보기」 버튼으로 복기를 닫고 홈 강의 카드로 스크롤하며, 첫 `refresh()` 결과가 이미 `ready`(오디오 포함)일 때만 `LectureModal`을 자동 열기(미준비 시 생성 시작 안 함, `pendingHomeFocus` 1회 처리 후 초기화). `tests/reviewLectureLink.test.ts` 추가.
 - **P0-3 (v2.10.0 묶음, 2026-11-21 KST)**: 홈 「오늘 할 것」 루프 재배치(`HomeScreen.tsx`, `LessonChangeSheet.tsx`). 아침 강의 카드를 「더 보기」 밖 메인 흐름(오늘 수업 카드 뒤·복습 퀴즈 카드 앞)으로 꺼내고, 일요일 주간 복기 카드에 「오늘 퀴즈」·「오늘 강의」·「트랙 골라 통화」 액션 3종 추가, 오늘 수업/트랙 카드의 인라인 진도 `<select>`를 확인 시트(`LessonChangeSheet`)로 교체해 오작동 방지, 헤더 이메일은 개발자 모드에만 노출. `README.md` 1단계 홈 설명 함께 갱신.
 - **2026-11-21 KST (P0-2, v2.10.0 묶음 — 버전 표기 유지)**: `reviewView.ts` 추가 및 `SessionReviewData`에 `usedCorrectlyItems`·`repeatedItems` 저장, `ReviewModal`에 「이번 통화 성과」(졸업·재복습·진도 반영)·빈 통화 안내·`—` 레벨 배지·한국어 출처 라벨·개발자 모드 전용 문구 분리·진행 문구 정리 적용 (`README.md` 1단계 복기 항목 함께 갱신).
 - **2026-11-21 KST (P0-1, v2.10.0 묶음 — 버전 표기 유지)**: `reviewTiming.ts` 추가 및 `reviewPipeline.ts` 단계별(`collectChunks`·`transcribe`·`fallback`·`review`·`save`) 소요 시간 계측, `sessions.reviewTiming` 저장(`saveReviewTiming`), 개발자 모드 `ReviewModal` 한 줄 소요 시간 표시.
