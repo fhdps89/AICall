@@ -4,6 +4,18 @@
 
 ---
 
+### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — 사용자 화면의 내부 용어 정리(개발자 모드로 이동) (브랜치 `fix/qa-x5-hide-internal-terms`)
+- **배경**:
+  - 일반 학습자 화면(`src/ui/**/*.tsx`)에 기획 단계 번호(`B-3`, `B-9`, `3단계`), 소스 경로(`src/config/models.ts`), 상수·필드·키 이름(`PRICING_RATES`, `weekly`, `absence2d`, `deadline4w`, `deadline2w`, `coachNote`, `VERBATIM`, `Graduated`), 저장소·인프라 명칭(`IndexedDB`, `Cloud Storage`, `Firestore`, `AI Studio Publish`/`Secrets`, `chunk.path`, `connectionPath`) 등이 그대로 노출되고 있었음.
+- **원인과 수정**:
+  - `src/ui/settings/UsagePanel.tsx`: `useDevMode()`를 연결해 하단 안내문의 기본 문구를 `예상 비용은 추정치예요. 실제 청구액과 다를 수 있어요.`로 단순화하고, `src/config/models.ts`·`PRICING_RATES`·분당 단가 수치는 `devMode`일 때만 덧붙이도록 수정(하단 안내문 `div`만 변경).
+  - `src/ui/settings/SettingsModal.tsx`: 헤더 부제를 `튜터 프롬프트 슬롯 채우기 및 모델 구성` → `튜터 프롬프트 슬롯 채우기 및 학습 설정`으로 정리하고, 코치 알림 설정 탭에서 `B-9`·`coachNote`를 제거하며 알림 키(`weekly`, `absence2d`, `deadline4w`, `deadline2w`)는 `devMode`일 때만 병기. 녹음 보관함 탭의 `B-3 10초 분할 녹음 파일 (Cloud Storage & IndexedDB)`·`업로드 대기 중인 로컬 조각`·`1분 전사`·`로컬 대기`를 사용자 말(`통화 녹음 (10초 단위로 저장)`, `통화 중 소리는 10초씩 나뉘어 이 기기에 먼저 저장된 뒤 서버에 올라가요.`, `아직 올라가지 못한 녹음 조각`, `1분 받아쓰기`, `대기 중`)로 교체하고, `IndexedDB`·`Cloud Storage` 보조 설명과 `sess.connectionPath`·`chunk.path`를 `devMode` 조건 안으로 이동(`activeTab === "models"`는 303행 `!devMode ? null` 분기에서 이미 차단되므로 411행 중복 `devMode` 가드 없이 탭 줄·레이아웃 구조 유지).
+  - `src/ui/settings/GeminiKeyPanel.tsx`: `useDevMode()`를 연결해 기본 안내에서 `AI Studio Publish`/`Secrets`/`Firestore` 용어를 걷어내고 `서버에 기본 키가 없을 때 대신 쓰는 개인 키예요. 입력한 키는 내 계정에만 안전하게 저장돼요.`로 정리했으며, 개발자 참고 문구는 `devMode`일 때만 노출.
+  - `src/ui/home/HomeScreen.tsx`: `3단계 AI 전담 학습 코치`/`3단계 AI 전담 코치` → `AI 전담 학습 코치`/`AI 전담 코치`, `맞춤 Plan 반영` → `맞춤 계획 반영`으로 정리(이미 `devMode`로 가려진 `B-2 통화 엔진: gemini-3.8-live...` 및 `showPromptModal`·`showSttBench` 여는 버튼 등은 유지).
+  - `src/ui/quiz/QuizModal.tsx`, `src/ui/review/ReviewModal.tsx`, `src/ui/call/UnfinishedSessionModal.tsx`: `VERBATIM` 표기는 `devMode`에만 노출하고, `(Graduated)`·`STT 오인식`·`1분 단위 전사`를 사용자 표현(`통과! 즉시 졸업 🎉`, `음성 인식 오류`, `1분 단위 받아쓰기`)으로 정리. `ReviewModal` 「이건 내가 한 말이 아니에요」 버튼 `title`도 품질 리포트 기록 사실을 포함해 `음성 인식 오류 등으로 내가 말하지 않은 문장이면 목록에서 숨기고, 품질 개선을 위해 기록해요`로 변경.
+- **방어 조치 (Safeguards)**:
+  - `tests/userFacingText.test.ts`(신규): TypeScript AST 파서로 `src/ui/**/*.tsx`의 JSX 텍스트·문자열·템플릿 리터럴(주석·`import/export` 모듈 경로 제외)을 전수 검사해 `devMode` 조건 밖에 `B-\d`, `src/config`, `PRICING_RATES`, `IndexedDB`, `Cloud Storage`, `Firestore`, `컬렉션`이 있으면 실패하도록 검증(`SettingsModal.tsx` `models` 탭 내 `B-1`/`B-3` 3건은 303행 `!devMode ? null` 및 163행 탭 버튼 가드 사유를 명시해 `ALLOWLIST`에 등록). 또한 `scanFile`에 문자열 입력을 지원해 노출된 금지 용어 위반, `devMode &&` 내부 허용, `!devMode &&` 내부 위반을 검증하는 검사기 자체 테스트 추가.
+- **검증**: `npm test` 39/39 통과, `npm run lint`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 오류 없음.
 ### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA-2 녹음 조각 업로드: 직접 업로드 시간 제한·실패 기억·서버 중계 우선 전환 (브랜치 `fix/qa-r2-chunk-upload-timeout`)
 - **배경**:
   - 통화 중 10초 녹음 조각 업로드가 계속 실패하고 콘솔 오류가 대량 발생하며 IndexedDB(`OneCallRecordingsDB`)에 미업로드 조각이 쌓이는 QA 버그가 보고됨.

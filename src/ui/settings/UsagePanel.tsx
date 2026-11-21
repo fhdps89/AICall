@@ -3,9 +3,11 @@ import { Loader2 } from "lucide-react";
 import { getUsageMonth, UsageMonth } from "../../services/usage/usageService";
 import { getKSTToday } from "../../services/firebase/db";
 import { PRICING_RATES } from "../../config/models";
+import { useDevMode } from "../../data/devMode";
 
 /** B-10 이번 달 사용량·예상 비용 */
 export const UsagePanel: React.FC<{ userId?: string }> = ({ userId }) => {
+  const devMode = useDevMode();
   const [usage, setUsage] = useState<UsageMonth | null>(null);
   const [loading, setLoading] = useState(true);
   const today = getKSTToday();
@@ -51,7 +53,10 @@ export const UsagePanel: React.FC<{ userId?: string }> = ({ userId }) => {
         </tbody>
       </table>
       <div className="text-[11px] text-slate-500">
-        예상 비용은 src/config/models.ts 단가표(PRICING_RATES) 기준 추정치예요. 실제 청구액과 다를 수 있어요. 통화 1분 ${PRICING_RATES.livePerMinute} · 받아쓰기 1분 ${PRICING_RATES.sttPerMinuteGemini}
+        예상 비용은 추정치예요. 실제 청구액과 다를 수 있어요.
+        {devMode && (
+          <> (src/config/models.ts · PRICING_RATES 기준 · 통화 1분 ${PRICING_RATES.livePerMinute} · 받아쓰기 1분 ${PRICING_RATES.sttPerMinuteGemini})</>
+        )}
       </div>
     </div>
   );

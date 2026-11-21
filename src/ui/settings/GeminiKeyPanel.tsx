@@ -3,21 +3,25 @@ import { friendlyError } from "../common/friendlyError";
 import { KeyRound, Loader2, Trash2 } from "lucide-react";
 import { saveUserGeminiKey, deleteUserGeminiKey, getUserGeminiKeyHint } from "../../services/firebase/db";
 import { authJson } from "../../services/api/authFetch";
+import { useDevMode } from "../../data/devMode";
 
 interface KeyStatus {
   hasServerKey: boolean;
   keySource: string;
 }
 
-function describe(st: KeyStatus | null): string {
+function describe(st: KeyStatus | null, devMode: boolean): string {
   if (!st) return "확인 중…";
   if (!st.hasServerKey) return "서버에 쓸 수 있는 키가 없어요. 아래에 키를 저장해 주세요.";
   if (st.keySource === "firestore:user-settings") return "여기 저장한 키로 통화하고 있어요.";
-  return "배포 서버 자체 키(AI Studio Secrets)로 통화하고 있어요. 여기 저장한 키는 쓰지 않아요.";
+  return devMode
+    ? "배포 서버 자체 키(AI Studio Secrets)로 통화하고 있어요. 여기 저장한 키는 쓰지 않아요."
+    : "서버에 등록된 기본 키로 통화하고 있어요. 여기 저장한 키는 쓰지 않아요.";
 }
 
 /** Fallback for AI Studio Publish not passing Secrets to the server: save the key in your own Firestore. */
 export const GeminiKeyPanel: React.FC<{ userId?: string }> = ({ userId }) => {
+  const devMode = useDevMode();
   const [status, setStatus] = useState<KeyStatus | null>(null);
   const [hint, setHint] = useState<string | null>(null);
   const [input, setInput] = useState("");
@@ -59,7 +63,7 @@ export const GeminiKeyPanel: React.FC<{ userId?: string }> = ({ userId }) => {
   };
 
   const remove = async () => {
-    if (!userId || !confirm("저장한 키를 지울까요? 배포 서버에 자체 키가 없으면 통화가 안 돼요.")) return;
+    if (!userId || !confirm("저장한 키를 지울까요? 서버에 기본 키가 없으면 통화가 안 돼요.")) return;
     setBusy(true);
     try {
       await deleteUserGeminiKey(userId);
@@ -78,15 +82,20 @@ export const GeminiKeyPanel: React.FC<{ userId?: string }> = ({ userId }) => {
       <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs">
         <span className="font-bold flex items-center gap-1.5 mb-1">
           <KeyRound className="w-4 h-4 text-amber-400" />
-          Gemini API 키 (배포 서버에 키가 없을 때만 사용)
+          Gemini API 키 (서버에 기본 키가 없을 때만 사용)
         </span>
         <p className="text-[11px] text-amber-300/80 leading-relaxed">
-          AI Studio에서 Publish한 서버에 Secrets 키가 전달되지 않는 문제가 있어서 만든 우회 방법이에요. 키는 내 계정의 Firestore에만 저장되고, 서버는 메모리에만 들고 있어요.
+          서버에 기본 키가 없을 때 대신 쓰는 개인 키예요. 입력한 키는 내 계정에만 안전하게 저장돼요.
         </p>
+        {devMode && (
+          <p className="text-[11px] text-amber-300/60 font-mono mt-1">
+            개발자 참고: AI Studio Publish 서버에 Secrets 키가 전달되지 않을 때 사용하는 우회 저장소(내 계정 Firestore)이며, 서버는 메모리에만 보관해요.
+          </p>
+        )}
       </div>
 
       <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 text-xs text-slate-300 space-y-1">
-        <div>현재 상태: {describe(status)}</div>
+        <div>현재 상태: {describe(status, devMode)}</div>
         <div>저장된 키: {hint ? `…${hint}` : "없음"}</div>
       </div>
 
