@@ -319,6 +319,7 @@ export interface SessionData {
   endedAt?: string;
   usageRecordedAt?: string;
   lastChunkAt?: string;
+  lastTranscriptAt?: string;
   status: "in-progress" | "pending_review" | "done";
   liveTranscript: Array<{ role: "user" | "model"; text: string; timestamp?: number }>;
   recordingChunks: RecordingChunkMeta[];
@@ -453,10 +454,12 @@ export async function updateSessionLiveTranscript(
   liveTranscript: Array<{ role: "user" | "model"; text: string; timestamp?: number }>
 ): Promise<void> {
   const sessionRef = doc(db, "users", userId, "sessions", sessionId);
+  const now = new Date().toISOString();
   try {
     await updateDoc(sessionRef, {
       liveTranscript,
-      updatedAt: new Date().toISOString(),
+      lastTranscriptAt: now,
+      updatedAt: now,
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `users/${userId}/sessions/${sessionId}`);

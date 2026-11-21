@@ -4,6 +4,21 @@
 
 ---
 
+### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA 재확인 21행: 무마이크 복구 통화 사용량 집계 누락·과소 집계 수정 (브랜치 `fix/qa4-r21`)
+- **배경**:
+  - 마이크 없이 진행한 통화가 새로고침 등으로 끊긴 뒤 복구 복기를 진행하면 복기 토큰 비용은 기록되지만 학습 기록의 통화 횟수(`calls`)와 통화 분(`liveMinutes`)이 빠지거나 0.0x분으로 과소 집계되는 문제가 확인됨.
+- **원인**:
+  - 무마이크 통화는 `onMediaStreamReady`가 호출되지 않아 10초 조각 녹음기가 돌지 않으므로 `lastChunkAt`이 `createCallSession`이 넣은 `startedAt`과 같은 값으로 고정됨.
+  - `liveTranscript[].timestamp`는 항목이 처음 생성될 때(턴 시작)만 찍혀 마지막 발화가 끝난 시각을 반영하지 못하며, `recoveredUsage.ts`는 `lastChunkAt`과 유한 `number` 타입의 `timestamp`만 끝 시각 후보로 보고 있었음.
+- **수정**:
+  - `src/services/firebase/db.ts`: `SessionData`에 `lastTranscriptAt?: string`(ISO) 선택 필드를 추가하고, `updateSessionLiveTranscript`가 `liveTranscript`·`updatedAt`과 함께 `lastTranscriptAt: now`를 저장하도록 수정(`createCallSession`에는 넣지 않아 전사 없는 통화가 시작 시각 기준으로 집계되지 않게 유지).
+  - `src/services/session/recoveredUsage.ts`: `parseTranscriptTimestamp` 순수 함수를 export해 유한 `number`, 숫자 문자열(ms), ISO 날짜 문자열을 정규화하고 `null`·객체·빈 문자열·`NaN`은 무시하도록 구현. `RecoveredUsageSession`(및 `RecoveredTranscriptItem`)에 `lastTranscriptAt`과 정규화 가능한 `liveTranscript[].timestamp`를 반영하고, `recoveredCallUsage`가 `lastChunkAt`·`lastTranscriptAt`·`startMs < t <= startMs + MAX_RECOVERED_CALL_SEC * 1000` 범위의 `liveTranscript[].timestamp` 최댓값을 끝 시각으로 사용하도록 수정(`lastChunkAt == startedAt`은 자동 제외, `updatedAt`·`endedAt`·`usageRecordedAt`은 끝 시각으로 미사용, 3시간 상한 및 10초 미만 `calls: 0`·후보 없음 `null` 유지).
+  - `PROJECT_CONTEXT.md`: §4 복구 사용량 집계 설명 갱신 및 §5 버전 히스토리 추가.
+- **방어 조치 (Safeguards)**:
+  - `createCallSession`에 `lastTranscriptAt`을 넣지 않고 `startMs < t` 조건을 적용해 전사 없는 빈 세션은 `null`을 반환하며 `markRecorded`도 호출하지 않음.
+  - `tests/recoveredUsage.test.ts`에 무마이크(`lastChunkAt == startedAt`, `liveTranscript` 비어 있음, `lastTranscriptAt = +105s` → 1.75분/`calls: 1`), `timestamp` 없음 + `lastTranscriptAt` 유무, 숫자/ISO 문자열 및 비정상 값 무시, 시작 이전 및 시작+3시간 초과 `timestamp` 무시, `updatedAt` 불변, `endedAt` 우선 `null`, `createRecoveredUsageRecorder` 무마이크 동시 2회 1회 기록·재호출 0회, 6초 무마이크(`calls: 0`, 0.1분) 테스트를 추가.
+- **검증**: `npm test`(188/188), `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build` 모두 통과 확인.
+
 ### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA 재확인 20행: 연속 학습일·휴식 배너를 같은 일별 사용 기록(KST)에서 파생 (브랜치 `fix/qa2-d`)
 - **배경**:
   - 홈 화면에서 10초 이상 통화 직후나 복기를 닫고 홈으로 돌아왔을 때 「연속 학습 N일」과 「이틀째 쉬었어요. 오늘 수업만 해도 좋아요」 배너가 동시에 표시되거나, 배너가 잠깐 사라졌다가 다시 나타나는 문제가 보고됨(QA 재확인 20행).
