@@ -51,3 +51,16 @@ test('NewCallScreen uses "답변 끝" instead of "끝내기" and keeps fixed vie
   assert.equal(rootTokens.includes('h-screen'), true, 'h-screen is the fallback for browsers without dvh');
   assert.equal(rootTokens.includes('select-none'), true, 'call screen keeps select-none');
 });
+
+test('SettingsModal tab bar scrolls horizontally on one line without wrapping', () => {
+  const src = fs.readFileSync(path.join(rootDir, 'src/ui/settings/SettingsModal.tsx'), 'utf-8');
+  const navStart = src.indexOf('{/* Tab Navigation */}');
+  const bodyStart = src.indexOf('{/* Body */}', navStart);
+  assert.ok(navStart !== -1 && bodyStart > navStart, 'SettingsModal should have Tab Navigation before Body');
+  const tabBarSrc = src.slice(navStart, bodyStart);
+  assert.match(tabBarSrc, /overflow-x-auto/);
+  assert.match(tabBarSrc, /flex-nowrap/);
+  assert.match(tabBarSrc, /whitespace-nowrap/);
+  assert.match(tabBarSrc, /shrink-0/);
+  assert.match(src, /scrollIntoView/);
+});
