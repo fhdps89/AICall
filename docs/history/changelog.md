@@ -4,6 +4,18 @@
 
 ---
 
+### [2026-11-21 KST] P0-5 통화 화면 모바일 레이아웃 (v2.10.0 묶음) (브랜치 `fix/p0-5-call-mobile-layout`, 설계 Claude CLI Opus 5.5 high, 구현 agy Gemini 4 Hydrogen high)
+- **배경**: 모바일 환경(동적 주소창·하단 시스템 바와 안전 영역)에서 통화 대화창(`transcripts`)이 길어지면 하단 제어 버튼과 「통화 종료」 버튼이 화면 아래로 밀려 사라질 수 있었음. 또한 `Done` 제어 버튼 라벨(「끝내기」)이 「통화 종료」와 혼동될 소지가 있었음.
+- **원인과 수정**:
+  - 루트 컨테이너가 `min-h-screen`과 `justify-between`만 사용하여 본문이 길어지면 전체 페이지가 늘어나 푸터가 뷰포트 밖으로 밀림 → `src/ui/call/NewCallScreen.tsx` 루트를 `h-screen supports-[height:100dvh]:h-dvh overflow-hidden flex flex-col`로 변경(dvh 미지원 시 100vh, 지원 시 100dvh가 100vh를 덮어씀), 헤더와 푸터에 `shrink-0` 부여, `<main>`을 `flex-1 min-h-0 overflow-y-auto overscroll-contain`으로 제한해 내부 스크롤만 허용. 자동 스크롤은 `scrollIntoView({ behavior: "smooth", block: "end" })`로 고정.
+  - 노치/홈 인디케이터 영역 침범 방지: `index.html`의 `viewport` 메타에 `viewport-fit=cover` 추가, `src/index.css`에 기존 여백(`1rem` / `sm:1.25rem`)을 보존하며 안전 영역을 더하는 `.pt-safe`, `.pb-safe`, `.bottom-safe` 유틸리티 추가 후 `NewCallScreen.tsx` 헤더·푸터 및 `src/App.tsx` 미완료 통화 고정 버튼(`bottom-safe`)에 적용.
+  - 버튼 라벨 충돌 해소: `NewCallScreen.tsx`의 `COMMAND_LABELS.Done`, 연결 전 안내 문구, 음성 안내 문구, 버튼 표시 텍스트의 「끝내기」를 모두 「답변 끝」으로 변경(`LiveCommand` 타입 및 프롬프트의 `"Done"` 값은 유지).
+- **방어 조치 (Safeguards)**:
+  - `tests/mobileShell.test.ts`(신규): `index.html`의 `viewport-fit=cover` 포함 여부, `NewCallScreen.tsx`에서 `"끝내기"` 비노출 및 `"답변 끝"`/`COMMAND_LABELS.Done`/뷰포트 고정 클래스(`supports-[height:100dvh]:h-dvh`, `min-h-0`, `pt-safe`, `pb-safe`) 존재를 소스 검사로 검증. 맨 `h-screen`과 맨 `h-dvh`를 같이 두지 않는다.
+- **검증**: `npm test` 27/27 통과, `npm run lint`·`npx tsc --noEmit`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 오류 없음.
+
+---
+
 ### [2026-11-21 KST] P0-4 복기에서 오늘 강의로 연결 (v2.10.0 묶음)
 - **브랜치**: `fix/p0-4-review-to-lecture` · **모델**: 계획 Claude CLI Opus 5.5 high · 구현 agy Gemini 4 Hydrogen high
 - **배경**: `ReviewModal`에 선택 콜백 `onOpenPodcast`와 하단 버튼(`🎧 아침 복습 오디오 듣기`)이 있었으나 `App.tsx`에서 콜백을 연결하지 않아 버튼이 보이지 않았음. 통화 복기를 마친 뒤 홈의 오늘 강의 카드로 바로 이어지고, 강의가 이미 준비된 경우에만 강의 창을 열며 준비 전에는 생성 요청을 자동으로 시작하지 않아야 했음.

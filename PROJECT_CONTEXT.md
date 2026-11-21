@@ -102,7 +102,7 @@
      - 재연결 시 신규 토큰 발급 및 `resumeHandle` 지속 유지.
      - 연결 경로 콘솔 로깅(`[Live] path=direct` / `[Live] path=proxy`) 및 Firestore `sessions` 문서에 `connectionPath`, `directFailCount` 저장.
    - 오늘 수업 지시서 주입 (`src/data/lessonPromptBuilder.ts`): 목표, 과 내용, 복습 대상 실수 최대 3개.
-   - 5대 제어 버튼: Done / Feedback / Model answer / Pause / Slow.
+   - 5대 제어 버튼: Done(화면 표시 「답변 끝」, `LiveCommand` 값은 `"Done"` 유지) / Feedback / Model answer / Pause / Slow. 통화 화면은 고정 뷰포트 높이(`h-screen`, dvh 지원 시 `h-dvh`) 내부 스크롤과 상·하단 safe-area 여백(`pt-safe`/`pb-safe`)으로 대화창이 길어져도 하단 명령·「통화 종료」 바가 화면에 고정 유지됨.
    - Live 자체 받아쓰기 실시간 화면 롤링 표시 및 `sessions.liveTranscript`에 보조 저장.
 6. **Firebase 1인 전용 보안 및 클라우드 동기화**:
    - `episode.kim@gmail.com` 단일 계정 엄격 화이트리스트 검증 (`src/services/firebase/auth.ts`).
@@ -159,6 +159,7 @@
 ---
 
 ## 5. 버전 히스토리
+- **P0-5 (v2.10.0 묶음, 2026-11-21 KST)**: 통화 화면 모바일 레이아웃 고정(`NewCallScreen.tsx` `supports-[height:100dvh]:h-dvh`·내부 스크롤·`block: "end"`, `index.html` `viewport-fit=cover`, `src/index.css` `.pt-safe`/`.pb-safe`/`.bottom-safe`, `App.tsx` 미완료 통화 버튼 safe-area 적용) 및 제어 버튼 라벨 「끝내기」→「답변 끝」 통일(「통화 종료」와 혼동 방지).
 - **P0-4 (v2.10.0 묶음, 2026-11-21 KST)**: 복기 모달에서 오늘 강의로 연결(`ReviewModal.tsx`, `App.tsx`, `HomeScreen.tsx`, `MorningLectureCard.tsx`). 하단 「오늘 강의 보기」 버튼으로 복기를 닫고 홈 강의 카드로 스크롤하며, 첫 `refresh()` 결과가 이미 `ready`(오디오 포함)일 때만 `LectureModal`을 자동 열기(미준비 시 생성 시작 안 함, `pendingHomeFocus` 1회 처리 후 초기화). `tests/reviewLectureLink.test.ts` 추가.
 - **P0-3 (v2.10.0 묶음, 2026-11-21 KST)**: 홈 「오늘 할 것」 루프 재배치(`HomeScreen.tsx`, `LessonChangeSheet.tsx`). 아침 강의 카드를 「더 보기」 밖 메인 흐름(오늘 수업 카드 뒤·복습 퀴즈 카드 앞)으로 꺼내고, 일요일 주간 복기 카드에 「오늘 퀴즈」·「오늘 강의」·「트랙 골라 통화」 액션 3종 추가, 오늘 수업/트랙 카드의 인라인 진도 `<select>`를 확인 시트(`LessonChangeSheet`)로 교체해 오작동 방지, 헤더 이메일은 개발자 모드에만 노출. `README.md` 1단계 홈 설명 함께 갱신.
 - **2026-11-21 KST (P0-2, v2.10.0 묶음 — 버전 표기 유지)**: `reviewView.ts` 추가 및 `SessionReviewData`에 `usedCorrectlyItems`·`repeatedItems` 저장, `ReviewModal`에 「이번 통화 성과」(졸업·재복습·진도 반영)·빈 통화 안내·`—` 레벨 배지·한국어 출처 라벨·개발자 모드 전용 문구 분리·진행 문구 정리 적용 (`README.md` 1단계 복기 항목 함께 갱신).
