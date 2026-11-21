@@ -99,7 +99,7 @@
      - 재연결 시 신규 토큰 발급 및 `resumeHandle` 지속 유지.
      - 연결 경로 콘솔 로깅(`[Live] path=direct` / `[Live] path=proxy`) 및 Firestore `sessions` 문서에 `connectionPath`, `directFailCount` 저장.
    - 오늘 수업 지시서 주입 (`src/data/lessonPromptBuilder.ts`): 목표, 과 내용, 복습 대상 실수 최대 3개.
-   - 5대 제어 버튼: Done(화면 표시 「답변 끝」, `LiveCommand` 값은 `"Done"` 유지) / Feedback / Model answer / Pause / Slow. 통화 화면은 고정 뷰포트 높이(`h-dvh`) 내부 스크롤과 상·하단 safe-area 여백(`pt-safe`/`pb-safe`)으로 대화창이 길어져도 하단 명령·「통화 종료」 바가 화면에 고정 유지됨.
+   - 5대 제어 버튼: Done(화면 표시 「답변 끝」, `LiveCommand` 값은 `"Done"` 유지) / Feedback / Model answer / Pause / Slow. 통화 화면은 고정 뷰포트 높이(`h-screen`, dvh 지원 시 `h-dvh`) 내부 스크롤과 상·하단 safe-area 여백(`pt-safe`/`pb-safe`)으로 대화창이 길어져도 하단 명령·「통화 종료」 바가 화면에 고정 유지됨.
    - Live 자체 받아쓰기 실시간 화면 롤링 표시 및 `sessions.liveTranscript`에 보조 저장.
 6. **Firebase 1인 전용 보안 및 클라우드 동기화**:
    - `episode.kim@gmail.com` 단일 계정 엄격 화이트리스트 검증 (`src/services/firebase/auth.ts`).
@@ -153,7 +153,7 @@
 ---
 
 ## 5. 버전 히스토리
-- **P0-5 (v2.10.0 묶음, 2026-11-21 KST)**: 통화 화면 모바일 레이아웃 고정(`NewCallScreen.tsx` `h-dvh`·내부 스크롤·`block: "end"`, `index.html` `viewport-fit=cover`, `src/index.css` `.pt-safe`/`.pb-safe`/`.bottom-safe`, `App.tsx` 미완료 통화 버튼 safe-area 적용) 및 제어 버튼 라벨 「끝내기」→「답변 끝」 통일(「통화 종료」와 혼동 방지).
+- **P0-5 (v2.10.0 묶음, 2026-11-21 KST)**: 통화 화면 모바일 레이아웃 고정(`NewCallScreen.tsx` `supports-[height:100dvh]:h-dvh`·내부 스크롤·`block: "end"`, `index.html` `viewport-fit=cover`, `src/index.css` `.pt-safe`/`.pb-safe`/`.bottom-safe`, `App.tsx` 미완료 통화 버튼 safe-area 적용) 및 제어 버튼 라벨 「끝내기」→「답변 끝」 통일(「통화 종료」와 혼동 방지).
 - **v2.9.0 (2026-11-10 KST)**: [전체 코드 리뷰 2차 반영] 통화 종료는 `pending_review`, 복기 저장 시에만 `done`(복기 중 앱을 닫아도 다시 복기 가능, 홈 아래 「끝나지 않은 통화」 버튼). 복기 직후 피드 동기화. 1분 임시 받아쓰기 묶음을 녹음 순서대로(업로드와 무관). 기록용 받아쓰기는 분 단위 재시도 + 실패한 분만 임시 받아쓰기로 보충. 통화 종료 중복 방지, 연결 끊김 시 복기로 이어 가기, 화면 꺼짐 방지 재요청, 「다시 시도」 경합 방지. 내 말이 없는 통화는 진도 유지. 복기 AI가 준 실수 id 검사, 요청 크기 제한. 코치 메시지 최신 50개. 오류 응답 표준화(`server/errors.ts`, 내부 문구 비노출)와 화면용 `friendlyError`. 보안 헤더 2종. 테스트 25개. 기록: `docs/reviews/2026-11-full-code-review.md`, 실기기 QC: `docs/qc/2026-11-android-qc-checklist.html`.
 - **v2.8.1 (2026-10-19 KST)**: [피드 404] 피드 설정과 사용자 Gemini 키를 Firestore `feeds/{id}`에 암호화 백업, 새로 뜬 서버가 복원해 그록봇만으로 아침 강의 생성. `firestore.rules`에 feeds 규칙 추가(배포 필요).
 - **v2.8.0 (2026-10-19 KST)**: [전체 코드 리뷰 반영] 통화마다 새 Live 인스턴스(앞 통화 섞임 해결), 통화 마지막 말 복기 포함, "다시 시도" 시 녹음 번호 이어 가기, Firestore `ignoreUndefinedProperties`(코치 답장·업로드 실패 조각 기록 저장), 복기·코치 승인 뒤 목표 다시 불러오기, 코치 되돌리기는 바꾼 항목만, 오인식 신고 시 실수 삭제, 서버 재시작으로 멈춘 강의 복구, 다시 복기해도 중복·진도 후퇴 없음, 1분 받아쓰기 스위치 연결, 퀴즈 녹음 형식 자동 선택, 취약점 3개 저장(여행 치환 수정), 코치 제안 검사, 키 탐색 1분 캐시·부모 프로세스만, 상태 API 경로 비노출, 미완료 통화만 읽기, 안 쓰는 코드 삭제, 빌드 파일 나누기, 자동 테스트 17개. 상세: [`docs/reviews/2026-10-full-code-review.md`](./docs/reviews/2026-10-full-code-review.md).
