@@ -7,6 +7,26 @@ import {
 } from "./types";
 import { authFetch } from "../api/authFetch";
 import { auth } from "../firebase/config";
+import { decodeLiveMessage, createSerialQueue } from "./liveMessage";
+
+/**
+ * 새 통화 연결 직후 튜터가 사용자 발화를 기다리지 않고 먼저 인사하도록 유도하는 초기 신호.
+ * transcriptItems / Firestore liveTranscript 에는 기록하지 않는다.
+ */
+export const CALL_KICKOFF_PROMPT =
+  "(The call has just connected. Greet me now and start today's lesson exactly as your instructions say. Do not wait for me to speak first.)";
+
+const CONNECT_CANCELLED_CODE = "LIVE_CONNECT_CANCELLED";
+
+function createConnectCancelledError(): Error {
+  const err: any = new Error("Live connection cancelled");
+  err.code = CONNECT_CANCELLED_CODE;
+  return err;
+}
+
+function isConnectCancelledError(err: unknown): boolean {
+  return Boolean(err && typeof err === "object" && (err as any).code === CONNECT_CANCELLED_CODE);
+}
 
 /**
  * GeminiLiveProvider
@@ -34,6 +54,14 @@ export class GeminiLiveProvider implements LiveProvider {
   private reconnectFailures = 0;
   private static readonly MAX_RECONNECT_FAILURES = 5;
   private resumeHandle: string | null = null;
+  /** 프로바이더 단위 메시지 처리 직렬 큐(비동기 Blob 디코딩 시 프레임 순서 보존). */
+  private messageQueue = createSerialQueue();
+  /** 연결·재연결·종료 간 이전 연결 흐름을 무효화하는 세대 번호. */
+  private connectionGeneration = 0;
+  /** 개별 WebSocket 시도(direct/proxy) 간 잔여 이벤트를 분리하는 소켓 세대 번호. */
+  private socketGeneration = 0;
+  /** 연결 대기 중 disconnect()가 호출되면 대기 중인 소켓 Promise를 즉시 취소한다. */
+  private cancelPendingConnect: (() => void) | null = null;
 
   // Connection path tracking (2-1 requirement 5)
   private connectionPath: "direct" | "proxy" = "direct";
@@ -73,6 +101,10 @@ export class GeminiLiveProvider implements LiveProvider {
     // otherwise the new call could adopt the old mic / speaker objects just before they are closed
     // and end up connected with no sound in either direction.
     if (this.teardown) await this.teardown.catch(() => {});
+    const connectGen = ++this.connectionGeneration;
+    this.cancelPendingConnect?.();
+    this.cancelPendingConnect = null;
+
     this.options = options;
     this.activeSystemPrompt = options.systemPrompt;
     this.options.onStatusChange("connecting", "Gemini Live 연결 준비 중...");
@@ -88,6 +120,7 @@ export class GeminiLiveProvider implements LiveProvider {
     const micPromise = this.initAudioCapture()
       .then(() => console.log("[Live] stage=mic_ready"))
       .catch((err: any) => {
+        if (connectGen !== this.connectionGeneration) return;
         console.warn("[Live] stage=mic_failed", err?.cause || err);
         this.options?.onMicWarning?.(
           err?.message || "마이크를 쓸 수 없어요. 튜터 목소리는 들을 수 있지만 말하려면 마이크를 확인해 주세요."
@@ -98,10 +131,21 @@ export class GeminiLiveProvider implements LiveProvider {
       await this.initAudioPlayback().catch((err) => {
         console.warn("[Live] stage=playback_init_failed", err);
       });
+      if (connectGen !== this.connectionGeneration) return;
       console.log("[Live] stage=establish_connection");
-      await this.establishConnection();
+      const established = await this.establishConnection();
+      // kickoff 전에 세대가 바뀌었거나 연결이 중단됐으면 오류 없이 조용히 종료한다.
+      if (!established || connectGen !== this.connectionGeneration || !this.isConnected) return;
       console.log("[Live] stage=connected path=" + this.connectionPath);
+      // 새 통화(resumeToken 없음)일 때만 연결 직후 튜터 첫 인사를 한 번 트리거한다(마이크 준비 여부와 독립).
+      if (!options.resumeToken && this.isConnected) {
+        console.log("[Live] stage=kickoff_greeting");
+        this.sendTextPrompt(CALL_KICKOFF_PROMPT);
+      }
     } catch (err: any) {
+      if (connectGen !== this.connectionGeneration || isConnectCancelledError(err)) {
+        return;
+      }
       console.error("[GeminiLiveProvider] Connect failed:", err);
       // Release anything half-opened so a retry starts clean, without overwriting error status.
       await this.disconnect(false).catch(() => {});
@@ -115,7 +159,8 @@ export class GeminiLiveProvider implements LiveProvider {
     micPromise.catch(() => {});
   }
 
-  private async establishConnection(): Promise<void> {
+  private async establishConnection(): Promise<boolean> {
+    const startGen = this.connectionGeneration;
     // 1. Try Ephemeral Token direct connection (2-1 requirement 1, 2, 3)
     let directSucceeded = false;
     console.log("[Live] stage=token_fetch");
@@ -129,7 +174,9 @@ export class GeminiLiveProvider implements LiveProvider {
         headers: { "Content-Type": "application/json" },
         signal: tokenAbort.signal,
       }).finally(() => clearTimeout(tokenTimer));
+      if (this.connectionGeneration !== startGen) return false;
       const tokenData = await tokenRes.json();
+      if (this.connectionGeneration !== startGen) return false;
 
       if (tokenData.ok && tokenData.token) {
         console.log("[GeminiLiveProvider] Ephemeral token acquired. Attempting direct connection...");
@@ -138,21 +185,38 @@ export class GeminiLiveProvider implements LiveProvider {
           await this.connectDirect(tokenData.token);
           directSucceeded = true;
         } catch (directErr) {
+          if (this.connectionGeneration !== startGen || isConnectCancelledError(directErr)) {
+            return false;
+          }
           console.warn("[GeminiLiveProvider] Direct connection failed, switching to server proxy:", directErr);
         }
       } else {
         console.warn("[GeminiLiveProvider] Token endpoint returned fallback:", tokenData);
       }
     } catch (err) {
+      if (this.connectionGeneration !== startGen) return false;
       console.warn("[GeminiLiveProvider] Ephemeral token fetch error, switching to proxy:", err);
     }
+
+    // 프록시 폴백 전 세대 검사: 연결 중 disconnect/재연결이 발생했으면 프록시 세션을 열지 않는다.
+    if (this.connectionGeneration !== startGen) return false;
 
     // 2. Fallback to server proxy WebSocket
     if (!directSucceeded) {
       console.log("[GeminiLiveProvider] Connecting via server proxy WebSocket...");
       this.options?.onStatusChange("connecting", "서버 중계로 Gemini Live 연결 중...");
-      await this.connectViaServerProxy();
+      try {
+        await this.connectViaServerProxy();
+      } catch (proxyErr) {
+        if (this.connectionGeneration !== startGen || isConnectCancelledError(proxyErr)) {
+          return false;
+        }
+        throw proxyErr;
+      }
     }
+
+    if (this.connectionGeneration !== startGen) return false;
+    return true;
   }
 
   /**
@@ -161,6 +225,9 @@ export class GeminiLiveProvider implements LiveProvider {
    * Waits for setupComplete from server (5-second timeout).
    */
   private async connectDirect(token: string): Promise<void> {
+    const gen = this.connectionGeneration;
+    const sockGen = ++this.socketGeneration;
+
     return new Promise((resolve, reject) => {
       // 1) Direct connection URL with BidiGenerateContentConstrained?access_token=
       const directUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained?access_token=${encodeURIComponent(
@@ -169,50 +236,90 @@ export class GeminiLiveProvider implements LiveProvider {
 
       const socket = new WebSocket(directUrl);
       let setupCompleted = false;
+      let failed = false;
+
+      const rejectCancelled = () => {
+        if (setupCompleted || failed) return;
+        failed = true;
+        clearTimeout(setupTimer);
+        if (this.cancelPendingConnect === rejectCancelled) {
+          this.cancelPendingConnect = null;
+        }
+        this.detachAndCloseSocket(socket);
+        reject(createConnectCancelledError());
+      };
+      this.cancelPendingConnect = rejectCancelled;
 
       // 5-second timeout waiting for setupComplete
       const setupTimer = setTimeout(() => {
-        if (!setupCompleted) {
+        if (gen !== this.connectionGeneration || sockGen !== this.socketGeneration) {
+          rejectCancelled();
+          return;
+        }
+        if (!setupCompleted && !failed) {
+          failed = true;
+          if (this.cancelPendingConnect === rejectCancelled) {
+            this.cancelPendingConnect = null;
+          }
           this.directFailCount++;
           console.warn("[Live] Direct connection timeout (5s) waiting for setupComplete. Falling back to proxy.");
-          try {
-            socket.close();
-          } catch {
-            // ignore
-          }
+          this.detachAndCloseSocket(socket);
           reject(new Error("Direct setupComplete timeout"));
         }
       }, 5000);
 
       socket.onopen = () => {
+        if (gen !== this.connectionGeneration || sockGen !== this.socketGeneration) {
+          rejectCancelled();
+          return;
+        }
+        if (failed) {
+          try {
+            socket.close();
+          } catch {
+            // ignore
+          }
+          return;
+        }
         this.ws = socket;
 
         // Listen for setupComplete before attaching full event listeners
         socket.onmessage = (event) => {
-          try {
-            const raw = JSON.parse(event.data);
-            if (raw.setupComplete && !setupCompleted) {
-              setupCompleted = true;
-              clearTimeout(setupTimer);
-              this.isConnected = true;
-              this.isReconnecting = false;
-              this.reconnectFailures = 0;
-              this.connectionPath = "direct";
-              console.log("[Live] path=direct (setupComplete received)");
-              this.options?.onStatusChange("connected", "Gemini Live 직접 연결 완료");
-
-              // Switch to full message handler
-              this.wireWebSocketEvents(true);
-              resolve();
+          this.messageQueue.enqueue(async () => {
+            if (failed || gen !== this.connectionGeneration || sockGen !== this.socketGeneration || this.ws !== socket) {
               return;
             }
+            try {
+              const raw = await decodeLiveMessage(event.data);
+              if (failed || gen !== this.connectionGeneration || sockGen !== this.socketGeneration || this.ws !== socket) {
+                return;
+              }
+              if (raw.setupComplete && !setupCompleted) {
+                setupCompleted = true;
+                clearTimeout(setupTimer);
+                if (this.cancelPendingConnect === rejectCancelled) {
+                  this.cancelPendingConnect = null;
+                }
+                this.isConnected = true;
+                this.isReconnecting = false;
+                this.reconnectFailures = 0;
+                this.connectionPath = "direct";
+                console.log("[Live] path=direct (setupComplete received)");
+                this.options?.onStatusChange("connected", "Gemini Live 직접 연결 완료");
 
-            if (setupCompleted) {
-              this.handleIncomingMessage(raw, true);
+                // Switch to full message handler
+                this.wireWebSocketEvents(true);
+                resolve();
+                return;
+              }
+
+              if (setupCompleted) {
+                this.handleIncomingMessage(raw, true);
+              }
+            } catch (err) {
+              console.error("[GeminiLiveProvider] Direct parse message error:", err);
             }
-          } catch (err) {
-            console.error("[GeminiLiveProvider] Direct parse message error:", err);
-          }
+          });
         };
 
         // Send initial setup payload with session resumption & context compression
@@ -247,9 +354,19 @@ export class GeminiLiveProvider implements LiveProvider {
       };
 
       socket.onerror = (err) => {
+        if (gen !== this.connectionGeneration || sockGen !== this.socketGeneration) {
+          rejectCancelled();
+          return;
+        }
+        if (failed) return;
         if (!setupCompleted) {
+          failed = true;
           clearTimeout(setupTimer);
+          if (this.cancelPendingConnect === rejectCancelled) {
+            this.cancelPendingConnect = null;
+          }
           this.directFailCount++;
+          this.detachAndCloseSocket(socket);
           console.warn("[Live] Direct connection error before setupComplete:", err);
           reject(err);
         } else {
@@ -258,9 +375,19 @@ export class GeminiLiveProvider implements LiveProvider {
       };
 
       socket.onclose = (event) => {
+        if (gen !== this.connectionGeneration || sockGen !== this.socketGeneration) {
+          rejectCancelled();
+          return;
+        }
+        if (failed) return;
         if (!setupCompleted) {
+          failed = true;
           clearTimeout(setupTimer);
+          if (this.cancelPendingConnect === rejectCancelled) {
+            this.cancelPendingConnect = null;
+          }
           this.directFailCount++;
+          this.detachAndCloseSocket(socket);
           console.warn("[Live] Direct WebSocket closed before setupComplete:", event.code, event.reason);
           reject(new Error(`Direct WebSocket closed before setupComplete (${event.code})`));
         } else {
@@ -275,6 +402,7 @@ export class GeminiLiveProvider implements LiveProvider {
    */
   private async connectViaServerProxy(): Promise<void> {
     const PROXY_READY_TIMEOUT_MS = 20000;
+    const gen = this.connectionGeneration;
     // Server proxy requires the signed-in user's Firebase ID token (browsers can't set WS headers).
     let idToken = "";
     try {
@@ -282,6 +410,10 @@ export class GeminiLiveProvider implements LiveProvider {
     } catch (e) {
       console.warn("[Live] stage=id_token_failed", e);
     }
+    if (gen !== this.connectionGeneration) {
+      throw createConnectCancelledError();
+    }
+    const sockGen = ++this.socketGeneration;
     return new Promise((resolve, reject) => {
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const host = window.location.host;
@@ -291,28 +423,41 @@ export class GeminiLiveProvider implements LiveProvider {
       const wsUrl = `${baseUrl}?token=${encodeURIComponent(idToken)}`;
       const socket = new WebSocket(wsUrl);
       let settled = false;
+      let failed = false;
 
-      const fail = (reason: string, userMessage: string) => {
-        if (settled) return;
+      const rejectCancelled = () => {
+        if (settled || failed) return;
+        failed = true;
         settled = true;
         clearTimeout(readyTimer);
-        console.warn("[Live] stage=proxy_failed", reason);
-        socket.onopen = null;
-        socket.onmessage = null;
-        socket.onerror = null;
-        socket.onclose = null;
-        try {
-          socket.close();
-        } catch {
-          // ignore
+        if (this.cancelPendingConnect === rejectCancelled) {
+          this.cancelPendingConnect = null;
         }
-        if (this.ws === socket) this.ws = null;
+        this.detachAndCloseSocket(socket);
+        reject(createConnectCancelledError());
+      };
+      this.cancelPendingConnect = rejectCancelled;
+
+      const fail = (reason: string, userMessage: string) => {
+        if (settled || failed) return;
+        failed = true;
+        settled = true;
+        clearTimeout(readyTimer);
+        if (this.cancelPendingConnect === rejectCancelled) {
+          this.cancelPendingConnect = null;
+        }
+        console.warn("[Live] stage=proxy_failed", reason);
+        this.detachAndCloseSocket(socket);
         const e: any = new Error(reason);
         e.userMessage = userMessage;
         reject(e);
       };
 
       const readyTimer = setTimeout(() => {
+        if (gen !== this.connectionGeneration || sockGen !== this.socketGeneration) {
+          rejectCancelled();
+          return;
+        }
         fail(
           `proxy ready timeout (${PROXY_READY_TIMEOUT_MS / 1000}s)`,
           "튜터 연결이 너무 오래 걸려요. 잠시 후 다시 시도해 주세요."
@@ -320,6 +465,18 @@ export class GeminiLiveProvider implements LiveProvider {
       }, PROXY_READY_TIMEOUT_MS);
 
       socket.onopen = () => {
+        if (gen !== this.connectionGeneration || sockGen !== this.socketGeneration) {
+          rejectCancelled();
+          return;
+        }
+        if (failed) {
+          try {
+            socket.close();
+          } catch {
+            // ignore
+          }
+          return;
+        }
         console.log("[Live] stage=proxy_socket_open, sending init");
         socket.send(
           JSON.stringify({
@@ -336,43 +493,66 @@ export class GeminiLiveProvider implements LiveProvider {
       // onmessage, which previously swallowed the 'ready' message and made
       // the call hang forever on "연결 준비 중".
       socket.onmessage = (event) => {
-        let data: any;
-        try {
-          data = JSON.parse(event.data);
-        } catch (err) {
-          console.error("[GeminiLiveProvider] Failed to parse proxy message:", err);
-          return;
-        }
-        if (settled) return;
-        if (data.type === "ready") {
-          settled = true;
-          clearTimeout(readyTimer);
-          this.ws = socket;
-          this.wireWebSocketEvents(false);
-          this.isConnected = true;
-          this.isReconnecting = false;
-          this.reconnectFailures = 0;
-          this.connectionPath = "proxy";
-          console.log("[Live] path=proxy model=" + (data.model || "?"));
-          this.options?.onStatusChange("connected", "Gemini 3.8 Live 연결됨 (서버 중계)");
-          resolve();
-        } else if (data.type === "fallback_required" || data.type === "error") {
-          fail(
-            `server: ${data.type} ${data.error || ""}`,
-            data.userMessage || "튜터 서버에 연결하지 못했어요. 잠시 후 다시 시도해 주세요."
-          );
-        } else {
-          // Early audio/transcripts before ready are ignored.
-          console.log("[Live] proxy message before ready ignored:", data.type);
-        }
+        this.messageQueue.enqueue(async () => {
+          if (failed || gen !== this.connectionGeneration || sockGen !== this.socketGeneration) return;
+          let data: any;
+          try {
+            data = await decodeLiveMessage(event.data);
+          } catch (err) {
+            console.error("[GeminiLiveProvider] Failed to parse proxy message:", err);
+            return;
+          }
+          if (failed || gen !== this.connectionGeneration || sockGen !== this.socketGeneration) return;
+          if (settled) {
+            // ready 처리 직후 wireWebSocketEvents 교체 전에 큐에 들어온 후속 프레임을 유실 없이 처리한다.
+            if (this.ws === socket) {
+              this.handleIncomingMessage(data, false);
+            }
+            return;
+          }
+          if (data.type === "ready") {
+            settled = true;
+            clearTimeout(readyTimer);
+            if (this.cancelPendingConnect === rejectCancelled) {
+              this.cancelPendingConnect = null;
+            }
+            this.ws = socket;
+            this.wireWebSocketEvents(false);
+            this.isConnected = true;
+            this.isReconnecting = false;
+            this.reconnectFailures = 0;
+            this.connectionPath = "proxy";
+            console.log("[Live] path=proxy model=" + (data.model || "?"));
+            this.options?.onStatusChange("connected", "Gemini 3.8 Live 연결됨 (서버 중계)");
+            resolve();
+          } else if (data.type === "fallback_required" || data.type === "error") {
+            fail(
+              `server: ${data.type} ${data.error || ""}`,
+              data.userMessage || "튜터 서버에 연결하지 못했어요. 잠시 후 다시 시도해 주세요."
+            );
+          } else {
+            // Early audio/transcripts before ready are ignored.
+            console.log("[Live] proxy message before ready ignored:", data.type);
+          }
+        });
       };
 
       socket.onerror = (err) => {
+        if (gen !== this.connectionGeneration || sockGen !== this.socketGeneration) {
+          rejectCancelled();
+          return;
+        }
+        if (failed) return;
         console.warn("[Live] proxy socket error before ready", err);
         fail("proxy socket error", "튜터 서버에 연결하지 못했어요. 인터넷을 확인하고 다시 시도해 주세요.");
       };
 
       socket.onclose = (event) => {
+        if (gen !== this.connectionGeneration || sockGen !== this.socketGeneration) {
+          rejectCancelled();
+          return;
+        }
+        if (failed) return;
         fail(
           `proxy closed before ready (${event.code} ${event.reason || ""})`,
           "튜터 서버 연결이 끊겼어요. 다시 시도해 주세요."
@@ -381,24 +561,52 @@ export class GeminiLiveProvider implements LiveProvider {
     });
   }
 
-  private wireWebSocketEvents(isDirect: boolean): void {
-    if (!this.ws) return;
+  private detachAndCloseSocket(socket: WebSocket | null): void {
+    if (!socket) return;
+    socket.onopen = null;
+    socket.onmessage = null;
+    socket.onerror = null;
+    socket.onclose = null;
+    if (this.ws === socket) this.ws = null;
+    try {
+      socket.close();
+    } catch {
+      // ignore
+    }
+  }
 
-    this.ws.onmessage = (event) => {
-      try {
-        const raw = JSON.parse(event.data);
-        this.handleIncomingMessage(raw, isDirect);
-      } catch (err) {
-        console.error("[GeminiLiveProvider] Parse message error:", err);
-      }
+  private wireWebSocketEvents(isDirect: boolean): void {
+    const socket = this.ws;
+    if (!socket) return;
+    const gen = this.connectionGeneration;
+    const sockGen = this.socketGeneration;
+
+    socket.onmessage = (event) => {
+      this.messageQueue.enqueue(async () => {
+        if (gen !== this.connectionGeneration || sockGen !== this.socketGeneration || this.ws !== socket) return;
+        try {
+          const raw = await decodeLiveMessage(event.data);
+          if (gen !== this.connectionGeneration || sockGen !== this.socketGeneration || this.ws !== socket) return;
+          this.handleIncomingMessage(raw, isDirect);
+        } catch (err) {
+          console.error(
+            isDirect
+              ? "[GeminiLiveProvider] Parse message error:"
+              : "[GeminiLiveProvider] Failed to parse proxy message:",
+            err
+          );
+        }
+      });
     };
 
-    this.ws.onerror = (err) => {
+    socket.onerror = (err) => {
+      if (gen !== this.connectionGeneration || sockGen !== this.socketGeneration || this.ws !== socket) return;
       console.warn("[GeminiLiveProvider] WS error:", err);
       this.handleDisconnect("ws error");
     };
 
-    this.ws.onclose = () => {
+    socket.onclose = () => {
+      if (gen !== this.connectionGeneration || sockGen !== this.socketGeneration || this.ws !== socket) return;
       this.handleDisconnect("ws close");
     };
   }
@@ -506,29 +714,25 @@ export class GeminiLiveProvider implements LiveProvider {
     if (this.isReconnecting) return;
     this.isReconnecting = true;
     this.isConnected = false;
+    const reconnectGen = ++this.connectionGeneration;
+    this.cancelPendingConnect?.();
+    this.cancelPendingConnect = null;
 
     // Show "연결 유지 중" briefly as requested in B-2
     this.options?.onStatusChange("reconnecting", "연결 유지 중");
 
-    if (this.ws) {
-      try {
-        this.ws.onopen = null;
-        this.ws.onmessage = null;
-        this.ws.onerror = null;
-        this.ws.onclose = null;
-        this.ws.close();
-      } catch {
-        // ignore
-      }
-      this.ws = null;
-    }
+    this.detachAndCloseSocket(this.ws);
+    this.ws = null;
 
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = setTimeout(async () => {
+      if (reconnectGen !== this.connectionGeneration) return;
       try {
         console.log("[Live] Reconnecting... resume handle:", this.resumeHandle);
-        await this.establishConnection();
+        const connected = await this.establishConnection();
+        if (!connected || reconnectGen !== this.connectionGeneration) return;
       } catch (err) {
+        if (reconnectGen !== this.connectionGeneration) return;
         console.error("[Live] Reconnection attempt failed with handle:", this.resumeHandle, err);
         // B-3 Requirement 3: If session resumption fails, summarize dialogue so far and inject into new session system prompt
         if (this.resumeHandle) {
@@ -536,9 +740,11 @@ export class GeminiLiveProvider implements LiveProvider {
           this.resumeHandle = null;
           this.activeSystemPrompt = this.buildConversationSummaryPrompt();
           try {
-            await this.establishConnection();
+            const retried = await this.establishConnection();
+            if (!retried || reconnectGen !== this.connectionGeneration) return;
             return;
           } catch (retryErr) {
+            if (reconnectGen !== this.connectionGeneration) return;
             console.error("[Live] Fallback session creation also failed:", retryErr);
             err = retryErr;
           }
@@ -622,16 +828,14 @@ export class GeminiLiveProvider implements LiveProvider {
     const base64 = this.arrayBufferToBase64(pcm16kChunk);
 
     if (this.ws.url.includes("generativelanguage.googleapis.com")) {
-      // Direct message format
+      // Direct message format (LiveClientRealtimeInput)
       this.ws.send(
         JSON.stringify({
           realtimeInput: {
-            mediaChunks: [
-              {
-                mimeType: "audio/pcm;rate=16000",
-                data: base64,
-              },
-            ],
+            audio: {
+              mimeType: "audio/pcm;rate=16000",
+              data: base64,
+            },
           },
         })
       );
@@ -653,14 +857,8 @@ export class GeminiLiveProvider implements LiveProvider {
     if (this.ws.url.includes("generativelanguage.googleapis.com")) {
       this.ws.send(
         JSON.stringify({
-          clientContent: {
-            turns: [
-              {
-                role: "user",
-                parts: [{ text: prompt }],
-              },
-            ],
-            turnComplete: true,
+          realtimeInput: {
+            text: prompt,
           },
         })
       );
@@ -882,19 +1080,16 @@ export class GeminiLiveProvider implements LiveProvider {
 
   private async runDisconnect(notifyClosed: boolean): Promise<void> {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.connectionGeneration++;
+    this.cancelPendingConnect?.();
+    this.cancelPendingConnect = null;
     this.isConnected = false;
     this.isReconnecting = false;
     this.reconnectFailures = 0;
     this.onDirectSetupComplete = null;
 
-    if (this.ws) {
-      try {
-        this.ws.close();
-      } catch {
-        // ignore
-      }
-      this.ws = null;
-    }
+    this.detachAndCloseSocket(this.ws);
+    this.ws = null;
 
     this.stopAudioPlayback();
 

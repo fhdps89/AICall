@@ -159,6 +159,8 @@
 ---
 
 ## 5. 버전 히스토리
+- **v2.10.0 이후 수정(미배포) (2026-11-21 KST)**: **QA-3 통화 시작 침묵: 직접 연결 Blob 프레임 해석·연결 직후 튜터 첫 인사 트리거** — 순수 모듈 `src/services/providers/liveMessage.ts`(`decodeLiveMessage`·`createSerialQueue`) 신설 및 `src/services/providers/geminiLiveProvider.ts`의 직접 연결(`connectDirect`)·프록시(`connectViaServerProxy`)·메시지 핸들러(`wireWebSocketEvents`)를 비동기 디코딩 + 프로바이더 단위 직렬 큐(+ 세대·소켓 가드)로 교체해 `Blob` `setupComplete` 해석 실패와 5초 폴백 지연을 제거. 직접 경로 `sendTextPrompt`·`sendAudioChunk`를 공식 `LiveClientRealtimeInput`(`realtimeInput.text`·`realtimeInput.audio`) 규격으로 통일하고, 새 통화(`!options.resumeToken`) 연결 직후에만 `CALL_KICKOFF_PROMPT`를 1회 전송(마이크 독립, 대화 기록 미저장, 재연결·재개 시 미전송)하도록 추가.
+  - **1차 리뷰 반영(연결 중 종료 경합 차단)**: 연결 대기 중 `disconnect()`(`runDisconnect`)가 세대 번호(`connectionGeneration`)를 올리면 진행 중인 직접·프록시 소켓 Promise를 취소 오류로 즉시 reject 하고, `onopen`·`onerror`·`onclose` 및 `setupTimer`/`readyTimer` 콜백 안에서도 세대를 검사해 5초 타임아웃 폴백으로 이미 끝난 통화에 프록시 세션이 열리지 않게 차단. `establishConnection()` 시작 시점의 세대를 기준으로 프록시 폴백 전과 `connect()`의 kickoff 전에도 세대 일치를 확인하며, 세대 불일치·취소 시에는 오류 상태(`onStatusChange("error")`)나 예외를 내지 않고 기존 `disconnect` 흐름과 맞춰 조용히 종료. `tests/liveMessage.test.ts`로 검증(직접 소켓 열림 전/후 `disconnect` 시 프록시 미생성·kickoff 0회, 프록시 `{ok:false}` `Blob` `ready` 시 `text_prompt` kickoff 1회 및 직후 프레임 보존).
 - **v2.10.0 (P0-1~P0-6 묶음, 2026-11-21 KST)**: 승인된 P0 실기기 QC 후속 개선 묶음 (`README.md` 헤더·v2.10.0 요약 및 `package.json`/`package-lock.json` `2.10.0` 반영).
   - **P0-1**: 복기 단계별 소요 시간 계측.
   - **P0-2**: 복기 화면 「이번 통화 성과」 표시와 빈 통화 문구 정리.

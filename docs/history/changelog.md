@@ -4,6 +4,31 @@
 
 ---
 
+### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA-3 통화 시작 침묵: 직접 연결 Blob 프레임 해석·연결 직후 튜터 첫 인사 트리거 (브랜치 `fix/qa-r3-live-blob-greeting`)
+- **배경**:
+  - 통화를 연결해도 튜터가 13~40초 동안 먼저 말하지 않고, 콘솔에 `Direct parse message error: SyntaxError… [object Blob]` 와 `setupComplete timeout` 이 반복 기록되는 QA 버그가 발생함.
+  - 사용자가 「답변 끝」 버튼이나 음성을 먼저 보내기 전까지 튜터가 첫 인사를 시작하지 못하는 증상도 함께 확인됨.
+- **원인**:
+  - `src/services/providers/geminiLiveProvider.ts`의 `connectDirect()` 및 `wireWebSocketEvents()` `onmessage`가 `event.data`를 바로 `JSON.parse`하고 있었음. Gemini Live 직접 연결 서버는 JSON을 바이너리(`Blob`) 프레임으로 내려보내 `JSON.parse(Blob)`이 `"[object Blob]"` `SyntaxError`로 실패하고, `setupComplete`를 읽지 못해 5초 타임아웃 후 서버 프록시로 폴백되며 추가 지연이 발생함.
+  - 시스템 프롬프트(`src/data/lessonPromptBuilder.ts`)에는 첫 마디 인사 지시가 있으나, Live 모델은 클라이언트 입력이 도착하기 전에는 먼저 발화하지 않아 연결 직후 첫 마디를 트리거하는 신호가 없었음.
+  - 직접 연결 경로의 `sendTextPrompt`가 `clientContent.turns`, `sendAudioChunk`가 deprecated 인 `realtimeInput.mediaChunks`를 사용하고 있어 프록시 SDK(`sendRealtimeInput({ text })` / `({ audio })`)와 와이어 형식이 달랐음.
+- **수정**:
+  - `src/services/providers/liveMessage.ts`(신규, DOM·Firebase 비의존 순수 모듈): `decodeLiveMessage(data)`가 `string`, `Blob`, `ArrayBuffer`, `ArrayBufferView`(오프셋 있는 뷰 포함)를 UTF-8 문자열로 디코딩한 뒤 `JSON.parse`하도록 구현(실패 시 reject). `createSerialQueue()`가 비동기 디코딩(`Blob.text()`) 중 프레임 순서가 뒤집히지 않도록 작업을 들어온 순서대로 직렬 실행하고, 앞 작업 실패 뒤에도 다음 작업을 이어서 실행.
+  - `src/services/providers/geminiLiveProvider.ts`: `connectDirect`, `connectViaServerProxy`('ready' 대기), `wireWebSocketEvents`의 `onmessage`를 모두 `decodeLiveMessage` + 프로바이더 단위 직렬 큐(`messageQueue`)로 감싸고, `connectionGeneration` 및 소켓 일치 가드로 핸들러 전환(`setupComplete`/`ready` → `wireWebSocketEvents`)과 재연결·종료 간 프레임 유실·혼선을 차단(기존 5초 타임아웃·프록시 폴백 로직은 유지).
+  - 직접 경로의 `sendTextPrompt`를 `{ realtimeInput: { text: prompt } }`로, `sendAudioChunk`를 `{ realtimeInput: { audio: { mimeType: "audio/pcm;rate=16000", data: base64 } } }`로 통일(프록시 형식 유지).
+  - `CALL_KICKOFF_PROMPT` 상수를 export 하고, `connect()`에서 `establishConnection()` 직후 `!options.resumeToken && this.isConnected`일 때만 `sendTextPrompt(CALL_KICKOFF_PROMPT)`를 1회 전송하도록 추가(마이크 준비와 독립, `transcriptItems`·Firestore `liveTranscript` 미기록, `resumeToken` 연결 및 `triggerReconnection`/GoAway 재연결에서는 미전송).
+  - **1차 리뷰 반영(연결 중 종료 시 프록시 폴백·첫 인사 오발송 차단)**: `connectionGeneration`(연결·재연결·종료 세대)과 `socketGeneration`(개별 소켓 시도)을 분리하고, 연결 대기 중 `disconnect()` 호출 시 대기 중인 소켓 Promise를 즉시 취소(`LIVE_CONNECT_CANCELLED`)하도록 정리. `connectDirect`·`connectViaServerProxy`의 `onopen`·`onerror`·`onclose` 세대 불일치 분기 및 `setupTimer`/`readyTimer` 콜백 안에서 즉시 취소 reject 처리(기존 5초 뒤 `setupTimer`가 reject 되어 프록시 폴백으로 넘어가던 경합 차단). `establishConnection()` 시작 시점 세대를 기억해 토큰 조회 후·프록시 폴백 전·반환 전과 `connect()`의 kickoff 전에 세대가 바뀌었으면 오류(`onStatusChange("error")`)나 예외 대신 기존 `disconnect` 흐름과 맞춰 조용히 종료하도록 수정.
+- **방어 조치 (Safeguards)**:
+  - `tests/liveMessage.test.ts`(신규): `decodeLiveMessage`의 `string`/`Blob`/`ArrayBuffer`/`Uint8Array`(오프셋 뷰 포함)/한글 멀티바이트 파싱 및 잘못된 JSON reject 검증, `createSerialQueue`의 순서 보존 및 앞 작업 실패 후 계속 실행 검증.
+  - 소스 검사로 `geminiLiveProvider.ts` 내 `JSON.parse(event.data)` 직접 호출 부재, `CALL_KICKOFF_PROMPT` export 및 `!options.resumeToken` 조건 가드를 검증하고, 가짜 `WebSocket`/`fetch`/`auth.currentUser` 환경에서 `Blob` `setupComplete` 직결 성공·프레임 순서 유지·마이크 미준비 시 `CALL_KICKOFF_PROMPT` 1회 전송·`realtimeInput` 형식·대화 로그 미기록·`resumeToken` 및 `GoAway` 재연결 시 미전송(`t.mock.timers`로 1000ms 타이머 대체)까지 단위 테스트로 검증.
+  - 1차 리뷰 반영 테스트 보강: (a) 직접 소켓이 열리기(`onopen`) 전 또는 `setupComplete` 전 `disconnect()` 시 프록시 소켓 미생성·kickoff 0회·오류 상태 미전환(`closed` 유지) 검증, (b) 토큰 응답 `{ok:false}` 프록시 경로에서 `Blob` `ready` 처리·`{type:"text_prompt"}` kickoff 정확히 1회 전송·`ready` 직후 후속 프레임 유실 없음 검증.
+- **남은 리스크**:
+  - 실기기 직접 연결에서 `realtimeInput.text`로 첫 인사가 실제로 나오는지, 서버가 `Blob` 프레임을 보내는지는 `[미확인]`(실기기 QA 필요).
+  - 같은 인스턴스로 다시 시도할 때 `resumeHandle`이 남아 있는 기존 동작은 이번 범위 밖.
+- **검증**: `npm test` 45/45 통과, `npm run lint`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 오류 없음.
+
+---
+
 ### [2026-11-21 KST] v2.10.0 — P0-6 줌·텍스트 선택·배경색 통일 및 P0 묶음 릴리즈 (브랜치 `fix/p0-6-zoom-select-color`, 설계 Claude CLI Opus 5.5 high, 구현 agy Gemini 4 Hydrogen high)
 - **배경**:
   - `index.html` 뷰포트의 `maximum-scale=1.0, user-scalable=no`가 모바일 핀치 줌을 차단하고 있었으며, `index.html` `<body>`와 `CoachModal.tsx`의 `select-none`이 복기·강의·코치 텍스트 선택/복사를 막고 있었음.
