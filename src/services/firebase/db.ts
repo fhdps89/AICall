@@ -294,6 +294,8 @@ export interface SessionReviewData {
   }>;
   usedCorrectly: string[];
   repeatedMistakes: string[];
+  usedCorrectlyItems?: Array<{ id: string; myPhrase: string; naturalPhrase: string }>;
+  repeatedItems?: Array<{ id: string; myPhrase: string; naturalPhrase: string }>;
   keepSyncText: string;
   generatedAt: string;
   /** false when saving this call's mistakes to the app's review list failed */

@@ -4,6 +4,21 @@
 
 ---
 
+### [2026-11-21 KST] P0-2 복기 화면 정리와 이번 통화 성과 표시 (v2.10.0 묶음) (GitHub 브랜치 `fix/p0-2-review-outcomes`, 기획 Claude CLI Opus 5.5 high · 구현 agy Gemini 4 Hydrogen high)
+- **배경**: 통화 후 복기 모달(`ReviewModal`)에서 이번 통화로 인한 학습 성과(맞게 써서 졸업한 표현, 다시 복습으로 돌아간 표현, 다음 수업 진행 여부)가 드러나지 않고, 기록된 말이 없는 빈 통화에서도 "훌륭합니다!"·"오늘은 저장할 실수가 없어요." 및 아침 강의·퀴즈 할 일 목록이 모순되게 노출되거나, 레벨 미산출 시 임의의 `IH` 배지·영문 `sourceStt`·`mistakes 컬렉션 자동 저장됨·진행 문구 내 모델명 등 내부 구현 용어가 그대로 노출되는 문제가 있었음. 복기 채점·`keepKnownIds`·세션 상태 전이(`pending_review` → `done`)와 P0-1 계측 동작은 유지한 채 화면 표시와 문구만 정리함.
+- **원인과 수정**:
+  - `src/services/review/reviewView.ts`(신규): Firebase 값 import 없는 순수 모듈(`import type`만 사용)로 `isEmptyReview`, `sourceSttLabel`, `levelBadge`, `outcomeItems`를 추가.
+  - `src/services/firebase/db.ts`: `SessionReviewData`에 선택 필드 `usedCorrectlyItems?`, `repeatedItems?`(`{ id, myPhrase, naturalPhrase }[]`)를 추가(마이그레이션 없음).
+  - `src/services/review/reviewPipeline.ts`: B-5 `keepKnownIds` 적용 직후 `outcomeItems`로 `review.usedCorrectlyItems`·`review.repeatedItems`를 채워 `saveSessionReview` 전에 반영(리스트 할당 전 실패 시 미설정 유지). 진행 안내 문구 2곳(`1/3 녹음 조각 병합 및 최종 받아쓰기 진행 중...`, `2/3 AI 튜터 복기 리포트 생성 중...`)에서만 모델명을 제거하고, 주석·`engine` 필드·로그는 유지.
+  - `src/ui/review/ReviewModal.tsx`: `reviewView` 도우미와 `useDevMode()`를 연결해 레벨 배지(미산출/`-`/빈 값은 `—`), 「이번 통화 성과」 블록(해당 항목이 하나라도 있을 때만 표시, 예전 세션은 숨김), 빈 통화 시 실수 영역(`기록된 말이 없어 분석하지 않았어요`)·할 일 영역(`같은 과로 다시 걸어 주세요`, 아침 강의/퀴즈 2항목 숨김) 분기, 한국어 출처 라벨(`sourceSttLabel`, 개발자 모드에서만 원 코드 병기), `mistakes 컬렉션 자동 저장됨` 개발자 모드 전용화, 전문 보기 버튼 문구(`녹음 받아쓰기 전문 보기 (출처: …)`)를 적용.
+  - `README.md` · `PROJECT_CONTEXT.md`: 1단계 통화 후 복기 표 및 B-4·§5 히스토리에 P0-2 변경 반영(헤더 버전·날짜 `v2.9.0` 유지).
+- **방어 조치 (Safeguards)**:
+  - `tests/reviewView.test.ts`(신규): `sourceSttLabel` 4종 구분 및 기본값, `isEmptyReview` 판별(`none` 또는 `lessonAdvanced === false`), `levelBadge` 미정/`-`→`none`·`AL`→`good`, `outcomeItems` 미존재 ID 제거 및 순서 보존을 검증.
+  - `tests/reviewRules.test.ts`, `ReviewFlowScreen.tsx`, `server.ts`, `package.json` 버전 및 P0-1 소요 시간 계측 로직은 변경하지 않음.
+- **검증**: `npm test` 32/32 통과, `npm run lint`·`npx tsc --noEmit`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 오류 없음. 성과 영역은 졸업·재복습 항목이 하나라도 있을 때만 열리며, `lessonAdvanced`만으로는 열리지 않는다.
+
+---
+
 ### [2026-11-21 KST] P0-1 복기 단계별 소요 시간 계측 (v2.10.0 묶음) (GitHub 브랜치 `fix/p0-1-review-timing`, 기획 Claude CLI Opus 5.5 high · 구현 agy Gemini 4 Hydrogen high)
 - **배경**: 통화 후 복기 파이프라인(`runPostCallReview`)에서 어느 단계(녹음 조각 수집·최종 받아쓰기·폴백·AI 복기·저장)가 얼마나 걸리는지 세션 단위로 관측할 수 있도록 계측을 추가함. 복기 동작·받아쓰기·세션 상태 전이(`pending_review` → `done`)는 변경하지 않는 순수 계측 PR.
 - **원인과 수정**:

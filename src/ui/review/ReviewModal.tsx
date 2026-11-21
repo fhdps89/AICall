@@ -23,6 +23,7 @@ import {
 import { authFetch } from "../../services/api/authFetch";
 import { useDevMode } from "../../data/devMode";
 import type { ReviewTiming } from "../../services/review/reviewTiming";
+import { isEmptyReview, levelBadge, sourceSttLabel } from "../../services/review/reviewView";
 
 export interface ReviewModalProps {
   userId?: string;
@@ -157,16 +158,35 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
     }
   };
 
-  const getLevelColor = (level: string) => {
-    switch (level) {
-      case "AL":
-      case "Native":
+  const getLevelColor = (tone: "good" | "mid" | "base" | "none") => {
+    switch (tone) {
+      case "good":
         return "text-emerald-400 bg-emerald-950/60 border-emerald-500/40";
-      case "IH":
+      case "mid":
         return "text-amber-400 bg-amber-950/60 border-amber-500/40";
+      case "none":
+        return "text-slate-400 bg-slate-900/60 border-slate-700/60";
       default:
         return "text-sky-400 bg-sky-950/60 border-sky-500/40";
     }
+  };
+
+  const emptyReview = isEmptyReview(review, sttFinal?.sourceStt);
+  const badge = levelBadge(review?.estimatedLevel);
+  const usedCorrectlyItems: Array<{ id: string; myPhrase: string; naturalPhrase: string }> =
+    review?.usedCorrectlyItems || [];
+  const repeatedItems: Array<{ id: string; myPhrase: string; naturalPhrase: string }> =
+    review?.repeatedItems || [];
+  // Show the block only when at least one outcome item exists.
+  // lessonAdvanced alone must not open it: every non-empty review sets that flag,
+  // and older sessions without the new fields would otherwise show an empty block.
+  const hasOutcomes =
+    usedCorrectlyItems.length > 0 ||
+    repeatedItems.length > 0;
+
+  const formatSourceLabel = (src: string | undefined) => {
+    const label = sourceSttLabel(src);
+    return devMode && src ? `${label} (${src})` : label;
   };
 
   const timingParts: string[] = [];
@@ -233,10 +253,10 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
               <span className="text-xs text-slate-400 font-medium">AI 예상 레벨:</span>
               <span
                 className={`px-3 py-1 rounded-xl text-sm font-extrabold border ${getLevelColor(
-                  review?.estimatedLevel || "IH"
+                  badge.tone
                 )}`}
               >
-                {review?.estimatedLevel || "IH"}
+                {badge.text}
               </span>
             </div>
             <span className="text-[11px] text-slate-400 font-normal">
@@ -245,6 +265,63 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
           </div>
         </div>
 
+        {/* This-call outcomes (graduated, repeated, lesson advanced) */}
+        {hasOutcomes && (
+          <div className="bg-[#1C2433] border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-3">
+            <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
+              <ShieldCheck size={16} className="text-emerald-400" />
+              <span>이번 통화 성과</span>
+            </h3>
+
+            {review?.lessonAdvanced === true && (
+              <div className="text-xs font-semibold text-emerald-300 flex items-center gap-1.5">
+                <CheckCircle size={14} className="shrink-0" />
+                <span>다음 수업으로 넘어갔어요</span>
+              </div>
+            )}
+
+            {usedCorrectlyItems.length > 0 && (
+              <div className="space-y-1.5">
+                <div className="text-xs font-semibold text-emerald-400">
+                  통화에서 맞게 써서 졸업
+                </div>
+                <ul className="space-y-1.5">
+                  {usedCorrectlyItems.map((item, idx) => (
+                    <li
+                      key={item.id || idx}
+                      className="text-xs bg-emerald-950/30 border border-emerald-900/40 rounded-xl px-3 py-2 flex flex-wrap items-center gap-1.5"
+                    >
+                      <span className="text-slate-400">{item.myPhrase}</span>
+                      <span className="text-slate-500">→</span>
+                      <span className="text-emerald-200 font-semibold">{item.naturalPhrase}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {repeatedItems.length > 0 && (
+              <div className="space-y-1.5">
+                <div className="text-xs font-semibold text-amber-400">
+                  다시 복습으로
+                </div>
+                <ul className="space-y-1.5">
+                  {repeatedItems.map((item, idx) => (
+                    <li
+                      key={item.id || idx}
+                      className="text-xs bg-amber-950/30 border border-amber-900/40 rounded-xl px-3 py-2 flex flex-wrap items-center gap-1.5"
+                    >
+                      <span className="text-amber-200 font-mono">{item.myPhrase}</span>
+                      <span className="text-slate-500">→</span>
+                      <span className="text-slate-200">{item.naturalPhrase}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Mistake Log Table (B-4 requirement 3: 내가 한 말 -> 자연스러운 표현 -> 이유) */}
         <div className="space-y-3">
           <div className="flex items-center justify-between">
@@ -252,14 +329,18 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
               <span className="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
               오늘의 실수 교정 내역 ({visibleMistakes.length}개)
             </h3>
-            <span className="text-xs text-slate-400">
-              mistakes 컬렉션 자동 저장됨
-            </span>
+            {devMode && (
+              <span className="text-xs text-slate-400">
+                mistakes 컬렉션 자동 저장됨
+              </span>
+            )}
           </div>
 
           {visibleMistakes.length === 0 ? (
             <div className="p-6 text-center text-sm text-slate-400 bg-[#1C2433]/50 rounded-2xl">
-              오늘 대화에서는 큰 문법적 실수가 발견되지 않았습니다. 훌륭합니다!
+              {emptyReview
+                ? "기록된 말이 없어 분석하지 않았어요"
+                : "오늘 대화에서는 큰 문법적 실수가 발견되지 않았습니다. 훌륭합니다!"}
             </div>
           ) : (
             <div className="space-y-3">
@@ -279,7 +360,7 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
                               내가 한 말 (녹음 전사 원본)
                             </span>
                             <span className="text-[10px] font-mono text-slate-500">
-                              {m.sourceStt || sttFinal?.sourceStt || "sttFinal"}
+                              {formatSourceLabel(m.sourceStt || sttFinal?.sourceStt)}
                             </span>
                           </div>
                           <p className="text-red-200 font-mono text-xs md:text-sm leading-relaxed">
@@ -382,21 +463,29 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
             <CheckCircle size={16} />
             <span>통화 후 할 일</span>
           </div>
-          {review?.mistakesSaved === false ? (
-            <p className="text-xs text-amber-300 leading-relaxed">
-              실수를 앱 복습 목록에 저장하지 못했어요. 아래 "Keep에 붙여넣기용 복사"로 따로 남겨 두세요.
+          {emptyReview ? (
+            <p className="text-xs text-slate-200 leading-relaxed">
+              같은 과로 다시 걸어 주세요
             </p>
           ) : (
-            <p className="text-xs text-slate-200 leading-relaxed">
-              {visibleMistakes.length > 0
-                ? `오늘 실수 ${visibleMistakes.length}개는 앱 복습 목록에 자동으로 저장됐어요. 따로 옮겨 적지 않아도 돼요.`
-                : "오늘은 저장할 실수가 없어요."}
-            </p>
+            <>
+              {review?.mistakesSaved === false ? (
+                <p className="text-xs text-amber-300 leading-relaxed">
+                  실수를 앱 복습 목록에 저장하지 못했어요. 아래 "Keep에 붙여넣기용 복사"로 따로 남겨 두세요.
+                </p>
+              ) : (
+                <p className="text-xs text-slate-200 leading-relaxed">
+                  {visibleMistakes.length > 0
+                    ? `오늘 실수 ${visibleMistakes.length}개는 앱 복습 목록에 자동으로 저장됐어요. 따로 옮겨 적지 않아도 돼요.`
+                    : "오늘은 저장할 실수가 없어요."}
+                </p>
+              )}
+              <ul className="text-xs text-slate-300 leading-relaxed list-disc pl-4 space-y-0.5">
+                <li>내일 아침 강의에서 오늘 실수를 다시 들어요.</li>
+                <li>내일 홈의 "퀴즈 풀기"로 맞게 말할 수 있는지 확인해요. 맞히면 그 실수는 졸업이에요.</li>
+              </ul>
+            </>
           )}
-          <ul className="text-xs text-slate-300 leading-relaxed list-disc pl-4 space-y-0.5">
-            <li>내일 아침 강의에서 오늘 실수를 다시 들어요.</li>
-            <li>내일 홈의 "퀴즈 풀기"로 맞게 말할 수 있는지 확인해요. 맞히면 그 실수는 졸업이에요.</li>
-          </ul>
         </div>
 
         {/* Google Keep backup copy (B-4 requirement 4, optional) */}
@@ -432,7 +521,7 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
               <div className="flex items-center gap-2">
                 <FileText className="w-4 h-4 text-emerald-400" />
                 <span>
-                  기록용 전사(sttFinal) 전문 확인 ({sttFinal.sourceStt === "sttFinal" ? "VERBATIM 전사본" : "sttPartial 합본"})
+                  녹음 받아쓰기 전문 보기 (출처: {formatSourceLabel(sttFinal.sourceStt)})
                 </span>
               </div>
               {showFullTranscript ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
