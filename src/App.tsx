@@ -109,6 +109,7 @@ export const App: React.FC = () => {
   // Active Call State (B-2 requirement)
   const [activeCallGoal, setActiveCallGoal] = useState<GoalData | null>(null);
   const [activeCallLesson, setActiveCallLesson] = useState<number>(1);
+  const [activeCallTextOnly, setActiveCallTextOnly] = useState<boolean>(false);
   // Pre-call prep screen (lesson, expressions, mic check) shown before connecting
   const [prepCall, setPrepCall] = useState<{ goal: GoalData; lessonIndex: number } | null>(null);
 
@@ -346,10 +347,11 @@ export const App: React.FC = () => {
     setPrepCall({ goal, lessonIndex });
   };
 
-  const handlePrepConfirmed = () => {
+  const handlePrepConfirmed = (opts: { micSkipped: boolean }) => {
     if (!prepCall) return;
     setActiveCallGoal(prepCall.goal);
     setActiveCallLesson(prepCall.lessonIndex);
+    setActiveCallTextOnly(Boolean(opts?.micSkipped));
     setPrepCall(null);
   };
 
@@ -363,6 +365,7 @@ export const App: React.FC = () => {
     const endedLesson = activeCallLesson;
     const finalSessionId = sessionId || `call-${Date.now()}`;
     setActiveCallGoal(null);
+    setActiveCallTextOnly(false);
 
     if (!user || !endedGoal) return;
 
@@ -524,8 +527,12 @@ export const App: React.FC = () => {
         lessonIndex={activeCallLesson}
         placeholders={placeholders}
         enablePartialTranscribe={isPartialTranscribeEnabled()}
+        textOnly={activeCallTextOnly}
         onEndCall={handleEndCall}
-        onExit={() => setActiveCallGoal(null)}
+        onExit={() => {
+          setActiveCallGoal(null);
+          setActiveCallTextOnly(false);
+        }}
       />
     );
   }
