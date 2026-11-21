@@ -7,6 +7,8 @@
 
 export const LIVE_MODEL = "gemini-3.8-live" as const;
 export const TEXT_MODEL = "gemini-3.8-flash" as const;
+export const EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-4B" as const;
+export const SIE_EMBEDDING_URL = "https://api.superlinked.com/v1/embeddings" as const;
 
 export type SttEngineType = "gemini" | "assemblyai";
 export const DEFAULT_STT_ENGINE: SttEngineType = "gemini";
@@ -32,6 +34,7 @@ export const PRICING_RATES = {
   textPer1kOutputTokens: 0.0006,
   ttsPer1kCharsGemini: 0.0004, // gemini-3.8-flash-tts
   ttsPer1kCharsElevenLabs: 0.015,
+  sieEmbedPer1MTokens: 0.06,    // Qwen/Qwen3-Embedding-4B on Superlinked Serverless
 } as const;
 
 export interface ModelConfig {

@@ -5,9 +5,11 @@ export const RATE_LIMITS = {
   PER_MINUTE: 60, // Gemini-cost /api requests per user per rolling minute
   DAILY_GEMINI_CALLS: 1500, // Gemini-cost /api requests per user per day (KST)
   DAILY_LIVE_SESSIONS: 60, // Live WebSocket session starts per user per day (KST)
+  CLUSTER_PER_MINUTE: 10, // Mistake clustering requests per user per rolling minute (separate bucket)
 } as const;
 
 const minuteHits = new Map<string, number[]>();
+const clusterMinuteHits = new Map<string, number[]>();
 const daily = new Map<string, { day: string; calls: number; live: number }>();
 
 function kstDay(now = Date.now()): string {
@@ -58,6 +60,37 @@ export function geminiLimit(req: Request, res: Response, next: NextFunction): vo
     return;
   }
   const r = checkGeminiCall(uid);
+  if (!r.ok) {
+    res.setHeader('Retry-After', String(r.retryAfterSec));
+    res.status(429).json({ ok: false, error: r.error, code: 'rate_limited' });
+    return;
+  }
+  next();
+}
+
+export function checkClusterCall(uid: string, now = Date.now()): LimitResult {
+  const hits = (clusterMinuteHits.get(uid) || []).filter((t) => now - t < 60_000);
+  if (hits.length >= RATE_LIMITS.CLUSTER_PER_MINUTE) {
+    clusterMinuteHits.set(uid, hits);
+    return {
+      ok: false,
+      error: '요청이 너무 많아요. 1분 뒤에 다시 시도해 주세요.',
+      retryAfterSec: Math.ceil((60_000 - (now - hits[0])) / 1000),
+    };
+  }
+  hits.push(now);
+  clusterMinuteHits.set(uid, hits);
+  return { ok: true };
+}
+
+/** Dedicated limiter for mistake clustering; does not consume Gemini daily/minute quota. */
+export function clusterLimit(req: Request, res: Response, next: NextFunction): void {
+  const uid = res.locals.user?.uid;
+  if (!uid) {
+    res.status(401).json({ ok: false, error: '로그인이 필요합니다.' });
+    return;
+  }
+  const r = checkClusterCall(uid);
   if (!r.ok) {
     res.setHeader('Retry-After', String(r.retryAfterSec));
     res.status(429).json({ ok: false, error: r.error, code: 'rate_limited' });

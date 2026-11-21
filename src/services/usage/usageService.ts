@@ -18,6 +18,7 @@ export interface UsageDelta {
   textTokens?: number;
   ttsChars?: number;
   ttsEngine?: "gemini" | "elevenlabs";
+  sieEmbeddingTokens?: number;
   calls?: number;
 }
 
@@ -26,6 +27,7 @@ export interface UsageDay {
   sttMinutes?: number;
   textTokens?: number;
   ttsChars?: number;
+  sieEmbeddingTokens?: number;
   estCostUsd?: number;
   calls?: number;
 }
@@ -35,6 +37,7 @@ export interface UsageMonth {
   sttMinutes: number;
   textTokens: number;
   ttsChars: number;
+  sieEmbeddingTokens?: number;
   estCostUsd: number;
   calls?: number;
   days?: Record<string, UsageDay>;
@@ -50,7 +53,8 @@ export function estimateCostUsd(d: UsageDelta): number {
     ((d.textInputTokens || 0) / 1000) * r.textPer1kInputTokens +
     ((d.textOutputTokens || 0) / 1000) * r.textPer1kOutputTokens +
     ((d.textTokens || 0) / 1000) * r.textPer1kInputTokens +
-    ((d.ttsChars || 0) / 1000) * tts
+    ((d.ttsChars || 0) / 1000) * tts +
+    ((d.sieEmbeddingTokens || 0) / 1_000_000) * r.sieEmbedPer1MTokens
   );
 }
 
@@ -59,6 +63,7 @@ export interface UsageFields<T> {
   sttMinutes: T;
   textTokens: T;
   ttsChars: T;
+  sieEmbeddingTokens: T;
   estCostUsd: T;
   calls: T;
 }
@@ -81,6 +86,7 @@ export function buildUsageFields<T>(
     sttMinutes: inc(d.sttMinutes || 0),
     textTokens: inc(tokens),
     ttsChars: inc(d.ttsChars || 0),
+    sieEmbeddingTokens: inc(d.sieEmbeddingTokens || 0),
     estCostUsd: inc(cost),
     calls: inc(d.calls || 0),
   };

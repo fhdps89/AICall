@@ -4,7 +4,8 @@ import fs from 'fs';
 import path from 'path';
 import { DATA_DIR, readLectureState, toSpeechParts } from '../server/lecture.ts';
 import { isValidFeedSecret } from '../server/feed.ts';
-import { checkGeminiCall, RATE_LIMITS } from '../server/rateLimit.ts';
+import { checkGeminiCall, checkClusterCall, RATE_LIMITS } from '../server/rateLimit.ts';
+import { validateClusterRequestBody } from '../server/mistakeClusters.ts';
 import { userRecordingPath } from '../server/recordingPath.ts';
 import { verifyFirebaseIdToken } from '../server/auth.ts';
 
@@ -69,4 +70,61 @@ test('API error replies carry a fixed sentence and code, never the raw error', a
   const src = fs.readFileSync(path.resolve(DATA_DIR, '..', 'server.ts'), 'utf-8');
   const leaks = src.split('\n').filter((l) => /(json|send)\(.*(err|error|parseErr|connectError)\??\.message/.test(l));
   assert.deepEqual(leaks, []);
+});
+
+test('validateClusterRequestBody rejects invalid payloads and normalizes valid ones', () => {
+  assert.equal(validateClusterRequestBody(null).ok, false);
+  assert.equal(validateClusterRequestBody({ items: 'not-array' }).ok, false);
+  assert.equal(
+    validateClusterRequestBody({
+      items: Array.from({ length: 121 }, (_, i) => ({
+        id: `id_${i}`,
+        myPhrase: 'a',
+        naturalPhrase: 'b',
+      })),
+    }).ok,
+    false
+  );
+  assert.equal(
+    validateClusterRequestBody({
+      items: [{ id: 123, myPhrase: 'a', naturalPhrase: 'b' }],
+    }).ok,
+    false
+  );
+  assert.equal(
+    validateClusterRequestBody({
+      items: [{ id: '  ', myPhrase: 'a', naturalPhrase: 'b' }],
+    }).ok,
+    false
+  );
+
+  const valid = validateClusterRequestBody({
+    items: [
+      {
+        id: 'm1',
+        myPhrase: 'a'.repeat(250),
+        naturalPhrase: 'b'.repeat(250),
+        reason: 'c'.repeat(350),
+      },
+    ],
+  });
+  assert.equal(valid.ok, true);
+  if (valid.ok) {
+    assert.equal(valid.items.length, 1);
+    assert.equal(valid.items[0].myPhrase.length, 200);
+    assert.equal(valid.items[0].naturalPhrase.length, 200);
+    assert.equal(valid.items[0].reason.length, 300);
+  }
+});
+
+test('cluster limiter enforces separate per-minute bucket without spending Gemini quota', () => {
+  const uid = `cluster_limit_${Date.now()}`;
+  const t = Date.now();
+  for (let i = 0; i < RATE_LIMITS.CLUSTER_PER_MINUTE; i++) {
+    assert.ok(checkClusterCall(uid, t).ok);
+  }
+  assert.equal(checkClusterCall(uid, t).ok, false);
+  // Gemini quota for the same uid must still be untouched
+  assert.ok(checkGeminiCall(uid, t).ok);
+  assert.ok(checkClusterCall(uid, t + 61_000).ok);
 });

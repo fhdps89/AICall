@@ -49,6 +49,7 @@
 - **통화 복기 & 퀴즈 채점·코치 (Text)**: `TEXT_MODEL = "gemini-3.8-flash"`
 - **기록용 받아쓰기 & 퀴즈 음성 전사 (STT)**: `STT_ENGINE = "gemini"` (`gemini-3.5-transcribe`, 모드 `VERBATIM`) / 비실시간 대안 `universal-3-5-pro` (AssemblyAI)
 - **오디오 합성 (TTS)**: `TTS_ENGINE = "gemini"` — 아침 강의 `GEMINI_TTS_MODEL = "gemini-3.8-flash-tts"`, 복기 화면 발음 듣기 `GEMINI_TTS_LITE_MODEL = "gemini-3.8-flash-lite-tts"` / 2인 대화 대안 ElevenLabs(미연결)
+- **실수 임베딩 (선택)**: `EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-4B"` (`SIE_EMBEDDING_URL = "https://api.superlinked.com/v1/embeddings"`, `PRICING_RATES.sieEmbedPer1MTokens = 0.06`). 서버 전용 선택 env `SIE_API_KEY`가 없으면 기능이 자동으로 꺼짐(`enabled: false`).
 - **공급자 추상화 레이어 (`src/services/providers/`)**: `LiveProvider`, `SttProvider`, `LlmProvider`, `TtsProvider` 인터페이스 분리(`types.ts`). 브라우저에 구현된 것은 Live(`GeminiLiveProvider`)뿐이고, **통화마다 새 인스턴스**를 만듦(`createLiveProvider()`, v2.8.0). 같은 통화 안의 "다시 시도"는 같은 인스턴스를 써서 대화 기록·세션 재개 핸들을 이어 감. 받아쓰기·텍스트·음성 합성은 서버(`server.ts`, `server/lecture.ts`, `server/sttBench.ts`)에서 처리하며, 브라우저용 빈 뼈대 구현은 v2.8.0에서 삭제.
 
 ---
@@ -122,6 +123,11 @@
    - 오늘 수업 카드와 4대 트랙 카드의 인라인 진도 `<select>`를 「진도 바꾸기」 버튼 + 확인 시트(`LessonChangeSheet.tsx`, 「확인」 누르기 전 미저장·동일 과 선택 시 비활성)로 교체. (`README.md` 1단계 홈 항목에도 반영)
 
 ---
+   - **홈 화면 실수 노트 묶기 (`server/clusterMath.ts`, `server/sieEmbeddings.ts`, `server/mistakeClusters.ts`, `src/services/mistakes/`, `src/ui/home/MistakeClustersCard.tsx`)**:
+     - 홈이 이미 불러온 `allMistakes`를 마운트 후 백그라운드(`POST /api/mistakes/clusters`, 30초 abort, 세션 내 메모이즈)로 전송해 크기 2 이상인 묶음 상위 3개를 「반복되는 실수」 카드로 표시함.
+     - 사용자 실수 텍스트(`myPhrase`, `naturalPhrase`, `reason`)는 외부 임베딩 서비스(Superlinked Serverless, `Qwen/Qwen3-Embedding-4B`)로 전송되며, 벡터와 이름 캐시는 `${DATA_DIR}/mistake-clusters/<sha256(uid)>.json`에 원자적(`tmp`+`rename`)으로 저장하고 요청 기준 없는 ID·key를 정리함(브라우저로 벡터 미전송).
+     - `CLUSTER_SIM_THRESHOLD = 0.80`은 잠정값이며, 단일 연결 union-find로 묶은 뒤 캐시 미스 묶음만 `TEXT_MODEL`로 한국어 이름을 붙임(실패 시 `"반복 실수 N"` 폴백). 전용 분당 한도(`checkClusterCall`, 분당 10회)를 써서 `geminiLimit`을 소모하지 않고, `sieEmbeddingTokens` 비용(`$0.06/1M`)을 `textTokens`와 분리 집계함. `SIE_API_KEY` 미설정·장애·지연 시 HTTP 200 `enabled: false`로 카드를 숨기며 통화·복기·퀴즈에 영향 없음.
+     - 퀴즈·강의 우선순위 재정렬(`prioritizeByClusters`)은 이번 범위에서 제외한 후속 과제.
 10. **B-7 아침 강의 · B-8 그록봇 피드 (`server/lecture.ts`, `server/feed.ts`, `src/ui/lecture/`)**:
    - 새 실수 최대 6개 + 복습 실수 최대 3개로 `gemini-3.8-flash` 대본 → `gemini-3.8-flash-tts` 2인 음성, 답 전 3초 무음, WAV 1개. 앱에서 재생·오프라인 보관.
    - 그록봇은 `/feed/{비밀키}/today(.json)`만 열면 됨. 앱이 홈 화면을 열 때마다 비밀키·후보 실수를 서버에 다시 보냄(`syncFeed`). 강의가 없으면 피드 요청 때 생성 시작, 실패한 강의는 30분에 한 번만 다시 시도.
@@ -159,6 +165,10 @@
 ---
 
 ## 5. 버전 히스토리
+- **v2.10.0 이후 수정(미배포) — 실수 노트 반복 패턴 묶기(SIE 임베딩) 추가 (2026-11-21 KST, 브랜치 `englead/mistake-clusters`)**:
+  - **배경**: 홈 화면에서 반복적으로 발생하는 유사한 영어 실수를 패턴별로 묶어 한눈에 확인하고, 향후 퀴즈·강의 우선순위 연계 기반을 마련하기 위함.
+  - **수정**: `server/clusterMath.ts`(코사인 유사도, 단일 연결 union-find, 잠정 임계값 `0.80`, `Instruct/Query` 형식, Float32↔base64), `server/sieEmbeddings.ts`(Superlinked `Qwen/Qwen3-Embedding-4B` 배치 32·12초/20초 타임아웃·`Retry-After <= 2s` 1회 재시도·키 비노출 로그), `server/mistakeClusters.ts`(`DATA_DIR/mistake-clusters/<sha256(uid)>.json` 원자적 캐시, `TEXT_MODEL` 이름 붙이기·폴백 `"반복 실수 N"`), `server/rateLimit.ts`(`checkClusterCall` 분당 10회 분리)·`server.ts`(`POST /api/mistakes/clusters`), `src/config/models.ts`(`EMBEDDING_MODEL`, `SIE_EMBEDDING_URL`, `sieEmbedPer1MTokens: 0.06`), `src/services/usage/usageService.ts`(`sieEmbeddingTokens` 별도 집계·단가), `src/services/mistakes/clusterRequest.ts`·`clusterService.ts`, `src/ui/home/MistakeClustersCard.tsx`·`HomeScreen.tsx`(기존 `allMistakes` 비동기 전달, 크기 ≥ 2 상위 3개 노출, `SIE_API_KEY` 미설정·장애 시 숨김) 추가. 퀴즈·강의 우선순위 재정렬은 후속 과제.
+  - **검증**: `tests/mistakeClusters.test.ts` 신설 및 `tests/server.test.ts`·`tests/clientUtils.test.ts` 확장. `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build` 통과.
 - **v2.10.0 이후 수정(미배포) — QA 재확인 21행: 무마이크 복구 통화 사용량 집계 누락·과소 집계 수정 (2026-11-21 KST, 브랜치 `fix/qa4-r21`)**:
   - **배경**: 무마이크로 진행하다 새로고침 등으로 끊긴 통화를 복구 복기할 때 복기 비용만 오르고 학습 기록(통화 횟수·분)이 누락되거나 0.0x분으로 과소 집계되는 문제가 보고됨.
   - **원인 및 수정**: 무마이크 통화는 녹음기가 돌지 않아 `lastChunkAt`이 `createCallSession`의 시작 시각(`startedAt`)에 그대로 남고, `liveTranscript[].timestamp`도 항목 최초 생성 시각(턴 시작)만 기록해 마지막 발화가 끝난 시각이 남지 않았음. `src/services/firebase/db.ts`의 `SessionData`에 `lastTranscriptAt?: string`을 추가하고 `updateSessionLiveTranscript`가 `liveTranscript`·`updatedAt`과 함께 `lastTranscriptAt: now`를 기록하도록 수정(`createCallSession`에는 넣지 않음). `src/services/session/recoveredUsage.ts`에 `parseTranscriptTimestamp`를 신설·export하고 `RecoveredUsageSession`/`recoveredCallUsage`가 `lastChunkAt`·`lastTranscriptAt`·정규화된 `liveTranscript[].timestamp`(유한 숫자, 숫자/ISO 문자열 파싱, `startMs < t <= startMs + MAX_RECOVERED_CALL_SEC*1000`) 중 최댓값을 끝 시각으로 쓰도록 변경(`lastChunkAt == startedAt`은 자연히 제외, `updatedAt`·`endedAt`·`usageRecordedAt`은 끝 시각으로 미사용, 3시간 상한 및 10초 미만 `calls: 0` 유지).
