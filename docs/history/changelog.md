@@ -27,6 +27,48 @@
   - 복구 사용량은 `createRecoveredUsageRecorder`의 세션 ID별 `Set` 동시 실행 차단과 `markSessionUsageRecorded` 선행 기록으로 중복 집계를 방지함.
   - `tests/storageRelay.test.ts`, `tests/chunkSource.test.ts`, `tests/recoveredUsage.test.ts`, `tests/unfinishedSessionSummary.test.ts`, `tests/a11yCloseButtons.test.ts`로 검증.
 - **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build` 모두 통과 확인.
+### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA 재확인 19행: 개발 용어 사용자 말로 교체·금지어 스캐너 확장 (브랜치 `fix/qa2-c`)
+- **배경**:
+  - QA 재확인 19행에서 통화 연결 상태, 설정, 아침 강의 알림, 사용량, 복기, 서버 키 미설정 안내 화면에 일반 사용자에게 낯선 개발 용어(`Gemini`, `Live`, `서버 중계`, `직접 연결`, `프롬프트`, `그록봇`, `토큰`, `TTS`, `Survey topics`, `My role in`, `전사`, `개발자 메뉴`, `JSON`)가 여전히 노출되는 문제가 보고됨.
+  - 또한 `server/errors.ts`의 `NO_KEY_MESSAGE`에 화살표(`→`)가 포함되어 `friendlyError.ts`의 `looksInternal`에 걸리면서 일반 오류 문구로 덮어씌워지는 버그가 확인됨.
+- **원인**:
+  - 기존 `tests/userFacingText.test.ts` 스캐너가 `src/ui/**/*.tsx`만 검사하고 금지어 목록이 7개뿐이어서, `geminiLiveProvider.ts`·`server.ts`·`server/*.ts`·`src/ui/**/*.ts` 경로와 `devOnly: true` 탭 구조를 검사하지 못했음.
+  - `SettingsModal.tsx`의 `geminiKey` 탭에 `devOnly` 가드가 없고 `models` 탭 본문(440행) 분기에도 긍정 `devMode` 조건이 없었으며, `FeedSettingsPanel.tsx`와 `UsagePanel.tsx` 일부 항목·`HomeScreen.tsx` 일부 모달 렌더에 `devMode` 가드가 빠져 있었음.
+- **수정**:
+  - **통화 상태 문구 (`src/services/providers/liveStatusText.ts` 신규, `src/services/providers/geminiLiveProvider.ts`, `src/ui/call/NewCallScreen.tsx`)**: 순수 상수 모듈 `LIVE_STATUS_TEXT`(`preparing: "튜터 연결 준비 중..."`, `connecting: "튜터에게 연결하는 중..."`, `connected: "튜터와 연결됐어요"`)를 신설해 `geminiLiveProvider.ts`의 `connecting`/`connected` 6곳(상태 문구 인자만 교체, 다른 줄 무변경)과 `NewCallScreen.tsx` 초기 상태값에 적용해 연결 경로(직접/서버 중계)와 모델명 비노출.
+  - **설정·진입점·개발자 가드 (`src/ui/settings/settingsText.ts` 신규, `src/ui/settings/SettingsModal.tsx`, `src/ui/settings/FeedSettingsPanel.tsx`, `src/ui/settings/UsagePanel.tsx`, `src/ui/home/HomeScreen.tsx`)**: `ADVANCED_TOGGLE_TEXT`(`고급 설정 보기`/`고급 설정 숨기기`)와 `KEY_TAB_LABEL`(`연결 키`)을 분리. `SettingsModal.tsx` 탭 라벨을 `내 정보 입력`·`아침 강의 알림`·`{ id: "geminiKey", label: KEY_TAB_LABEL, devOnly: true }`로 변경하고, 헤더·안내 상자(개발자 참고 문구는 `devMode` 분리)·직무/주제/역할 라벨을 사용자 말로 교체하며, `geminiKey`·`models`(440행) 본문에 `devMode` 가드 추가 및 하단 토글 해제 시 모든 `devOnly` 탭에서 `prompts`로 복귀하도록 수정(`GeminiKeyPanel.tsx` 본문은 `devOnly` 탭 전용으로 유지). `FeedSettingsPanel.tsx`에 `useDevMode()`를 추가해 알림 봇(AI 비서 앱) 안내 문구로 용어를 통일하고 `알림 주소`/`알림 봇`으로 교체하며 `JSON` 항목을 `devMode`로 감쌈. `UsagePanel.tsx`의 `텍스트 토큰`·`TTS 글자 수` 행을 `devMode`로 감싸고, `HomeScreen.tsx` 설정 툴팁을 `설정`으로 변경하며 `showPromptModal`·`showSttBench`에 `devMode &&` 가드를 추가.
+  - **복기·서버 키 안내 (`src/ui/review/ReviewModal.tsx`, `src/ui/review/reviewErrorText.ts` 신규, `src/ui/review/ReviewFlowScreen.tsx`, `server/errors.ts`, `server.ts`)**: `ReviewModal.tsx` 라벨을 `내가 한 말`로 통일. `friendlyReviewError`를 순수 모듈 `reviewErrorText.ts`로 분리하고 정규식·안내 문구를 `연결 키`/`고급 설정 보기` 기준으로 변경. `server/errors.ts` `NO_KEY_MESSAGE`와 `server.ts:1325` `userMessage`를 `NO_KEY_MESSAGE`(「고급 설정 보기」→「연결 키」 안내, `→` 제거)로 통일해 `friendlyError` 통과 및 개발 용어 제거를 동시에 해결.
+- **방어 조치 (Safeguards)**:
+  - `tests/userFacingText.test.ts` 확장: 금지어 13종 추가(`Gemini`, `Live`, `서버 중계`, `직접 연결`, `프롬프트`, `그록봇|Grok`, `토큰`, `TTS`, `Survey topics`, `My role in`, `전사`, `개발자`, `JSON`), `src/ui/**/*.{ts,tsx}` 및 `liveStatusText.ts` 스캔, `devOnly: true`·`console.*` 예외 처리, `DEV_ONLY_FILES`(`GeminiKeyPanel.tsx` `devOnly`·`activeTab === "geminiKey"` `devMode ?` 분기 사유 명시 및 기존 3건 `ALLOWLIST` 제거), `scanSinks`(`onStatusChange`, `onMicWarning`, `fail`, `apiError`, `userMessage` — 최소 탐색 건수 단언 포함), `LIVE_STATUS_TEXT`·`NO_KEY_MESSAGE`·`friendlyError` 회귀·`geminiKey` `devOnly`·`devMode ?` 렌더 가드 검증 신규 5개·기존 2개 확장(총 7개)으로 고정.
+  - `package.json` 버전 무변경, `geminiLiveProvider.ts`는 import 1줄과 상태 문구 인자 6곳 외 무변경.
+- **검증**: `npm test` 114/114 통과, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build` 모두 오류 없이 통과.
+### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA 재확인 3행: 직접 연결 송신 형식 구조적 차단·재연결 뒤 인사 재전송 (브랜치 `fix/qa2-a`)
+- **배경**:
+  - 실기기 QA 재확인(3행)에서 통화 시작 직후 첫 인사가 나오지 않고 26~60초간 튜터가 침묵하거나, `Direct WebSocket closed before setupComplete (1007)` 과 `Unknown name "type"`·`Unknown name "audio"` 사유로 재연결 및 배너 깜빡임이 반복되는 증상이 보고됨.
+- **원인**:
+  - **송신 형식 URL 분기 및 H1 가설**: `geminiLiveProvider.ts` 가 `sendAudioChunk`·`sendTextPrompt` 에서 `this.ws.url.includes("generativelanguage.googleapis.com")` 로 직접/프록시 형식을 선택하고 있었음. 배포 런타임(AI Studio Publish)이 `WebSocket` 을 감싸 `ws.url` 이 바뀌면 검사가 `false` 가 되어 직접 소켓에 프록시 형식(`type: "realtime_audio"` / `"text_prompt"`)이 전송되고 1007 오류로 끊길 수 있음(배포 환경 래핑 여부는 `[추정]`, 저장소 코드 단독으로는 `[미확인]`).
+  - **준비 전(`setupComplete` 전) 소켓 노출**: 직접 연결 `onopen` 에서 `setupComplete` 수신 전에 `this.ws = socket` 을 설정하고 마이크 게이트가 `isConnected || isReconnecting` 을 통과시켜, 재연결 중 `setupComplete` 전에 오디오 프레임이 나갈 수 있었음.
+  - **재연결 뒤 인사 누락**: `CALL_KICKOFF_PROMPT` 가 `connect()` 에서 `!options.resumeToken` 일 때만 1회 전송되고 `triggerReconnection()` 에는 없어, 첫 소켓이 kickoff 직후 끊기면 재연결·프록시 폴백 뒤에도 튜터가 사용자 발화 전까지 침묵함.
+  - **닫힘 진단 부재 및 배너 깜빡임**: `onerror` 가 즉시 `triggerReconnection()` → `detachAndCloseSocket()` 으로 `onclose` 를 제거해 close code/reason 이 유실됐으며, `NewCallScreen.tsx` 가 `status === "reconnecting"` 즉시 배너와 상단 상태 표시를 띄워 짧은 재연결에서도 화면이 깜빡였음.
+- **수정**:
+  - `src/services/providers/liveWire.ts`(신규, 순수 모듈): 소켓에 귀속된 `LiveWireKind("direct" | "proxy")` 기준 빌더(`buildDirectSetup`, `buildProxyInit`, `buildAudioInput`, `buildTextInput`), 송신 직전 규격 검증(`validateClientMessage`), 키 이름만 남기는 로그 요약(`describeClientMessage`), query 토큰을 제거하는 `redactSocketUrl` 추가.
+  - `src/services/providers/liveKickoff.ts`(신규, 순수 모듈): `MAX_KICKOFF_ATTEMPTS = 2`, `shouldSendKickoff`(새 통화·튜터 미발화·현재 소켓 미전송·`attempts < MAX_KICKOFF_ATTEMPTS` 시에만 true) 및 `isTutorOutput`(직접/프록시별 모델 오디오·전사·텍스트 출력 판정) 추가.
+  - `src/ui/call/reconnectNotice.ts`(신규, 순수 모듈): `RECONNECT_NOTICE_DELAY_MS = 1500`, `shouldShowReconnectNotice`, `reconnectNoticeRemainingMs`, `resolveReconnectUiState`(타이머 불리언 상태 기반 표시 판정) 추가.
+  - `src/services/providers/geminiLiveProvider.ts`: `this.ws` 를 `LiveConn`(`ready: false` 로 시작해 `setupComplete`/`ready` 이후에만 `this.conn` 등록)으로 교체하고 URL 문자열 분기를 제거해 `sendOn(c, msg)` 단일 송신 경로로 통일. 마이크 게이트를 `!this.conn?.ready` 로 제한. `connect()` 에서 `tutorSpoke`·`kickoffAttempts` 초기화 조건을 `!this.resumeHandle` 에서 `!options.resumeToken` 으로 변경해 `disconnect()` 뒤 `resumeHandle` 이 남아 있는 같은 인스턴스로 `resumeToken` 없이 다시 `connect()`(다시 시도)할 때 이전 통화 값이 남아 인사가 빠지지 않도록 보장(`triggerReconnection()` 은 `connect()` 를 거치지 않아 영향 없음). `handleIncomingMessage` 에서 `tutorSpoke` 와 `[Live] stage=first_tutor_output` 을 기록하고 통화 단위 `kickoffAttempts`(상한 `MAX_KICKOFF_ATTEMPTS = 2`, 초과 시 `[Live] kickoff_skipped reason=max_attempts`)와 `maybeSendKickoff("connect" | "reconnect")` 로 튜터 무발화 상태 재연결 시 인사를 최대 2회까지만 재전송(동작 변경: 기존 GoAway 재연결 무전송에서 무발화 시 재전송·발화 후 미전송으로 변경, 무한 반복 방지). `ws_open`(토큰 제거)·`ws_close`(code/reason/clean/lastSent/sent)·`ws_error`(1500ms no-close 안전장치) 로그 추가 및 미사용 `onDirectSetupComplete` 정리. 모든 `onStatusChange(...)` 줄과 타임아웃(직접 5s·프록시 20s)·폴백 순서는 유지.
+  - `src/ui/call/NewCallScreen.tsx`: `reconnecting` 진입 후 1.5초 타이머 콜백에서 불리언 상태 `noticeVisible` 을 직접 켜고 `resolveReconnectUiState` 로 배너(`showReconnectNotice`)와 상단 상태 표시·오브 캡션(`displayStatus`)을 재연결 상태로 전환(기존 `Date.now()` 재판정의 시계 경계 문제 제거, 기존 문구와 버튼·입력·새로고침 경고의 실제 `status` 판정은 유지).
+- **방어 조치 (Safeguards)**:
+  - `tests/liveWire.test.ts`(신규): `@google/genai` `Session.sendRealtimeInput` 및 `live.connect` setup JSON 바이트 동일성 비교(`webSocketFactory` 내부 속성 의존 주석 명시), 프록시 계약, `validateClientMessage` 직접/프록시 교차 거부·비정상 형식 차단, `describeClientMessage` 본문 비노출, `redactSocketUrl` 토큰 제거 검증.
+  - `tests/liveKickoff.test.ts`(신규)·`tests/reconnectNotice.test.ts`(신규): 진리표(`MAX_KICKOFF_ATTEMPTS` 상한 포함)·수신 타입별 출력 판정·1500ms 지연 경계 및 `resolveReconnectUiState` 검증.
+  - `tests/liveMessage.test.ts`: URL 분기 및 raw `JSON.parse(event.data)` 부재 소스 검사, `FakeWebSocket.urlRewrite` 기반 H1 회귀 검증, `setupComplete` 전 오디오·텍스트 차단, 가짜 `AudioContext` 기반 `onaudioprocess` ready 전 차단·ready 후 송신 검증, QA 1007→직접 pre-setup 1007→프록시 폴백 kickoff 1회 시나리오, `setupComplete→kickoff→close(1007)` 3회 반복 시 최대 2건 상한 및 `kickoff_skipped reason=max_attempts` 로그 검증, `ws_close` 페이로드 비노출 로그, `onerror→onclose` 단일 재연결·로그 검증, GoAway 테스트를 발화 후(0건)/무발화(1건)로 분리, 같은 인스턴스로 `sessionResumptionUpdate`·튜터 발화·`disconnect()` 뒤 `resumeToken` 없이 두 번째 `connect()` 시 kickoff 상태 초기화 검증 추가.
+- **검증**:
+  - `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build` 모두 통과 (`package.json` 버전 `2.10.0` 유지).
+- **남은 리스크**:
+  - 재연결 처음 1.5초 동안 상태 표시가 연결됨으로 보이고 마이크 프레임은 버려진다.
+  - H1(배포 런타임 WebSocket 래핑)은 `[추정]` 이며 실기기 로그(`ws_open url=`, `ws_close ... lastSent=`)로 확정 필요.
+  - 튜터 오디오가 서버에서 생성됐으나 클라이언트 수신 전에 소켓이 끊기면 재연결 뒤 인사가 한 번 더 나갈 수 있음.
+  - 재연결 중 `ready` 전 1~3초간 마이크 프레임은 Live 로 보내지 않고 버림(녹음 조각 `recordDest` 는 유지).
+  - `onerror` 뒤 `onclose` 가 오지 않는 브라우저에서는 1500ms 안전장치에 의존함(`[미확인]`).
+  - `liveWire.test.ts` 의 setup 비교는 `@google/genai` 내부 속성 `webSocketFactory` 에 의존하므로 SDK 메이저 업그레이드 시 점검 필요.
 
 ### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — 내 학습 기록: 날짜별 통화 횟수·분·연속 학습일 저장과 표시 (브랜치 `feat/self-usage-log`)
 - **배경**:

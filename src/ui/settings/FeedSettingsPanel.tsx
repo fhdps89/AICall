@@ -2,9 +2,11 @@ import React, { useEffect, useState } from "react";
 import { friendlyError } from "../common/friendlyError";
 import { Copy, RefreshCw, Rss, Loader2 } from "lucide-react";
 import { syncFeed, rotateFeedSecret, feedUrls, grokBotInstruction } from "../../services/feed/feedService";
+import { useDevMode } from "../../data/devMode";
 
 /** B-8 settings: feed URL, Grok Bot instruction, rotate secret */
 export const FeedSettingsPanel: React.FC<{ userId?: string }> = ({ userId }) => {
+  const devMode = useDevMode();
   const [secret, setSecret] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -13,7 +15,7 @@ export const FeedSettingsPanel: React.FC<{ userId?: string }> = ({ userId }) => 
     if (!userId) return;
     syncFeed(userId)
       .then(setSecret)
-      .catch((e) => setMsg(`피드 동기화 실패: ${friendlyError(e)}`));
+      .catch((e) => setMsg(`알림 주소 준비 실패: ${friendlyError(e)}`));
   }, [userId]);
 
   const copy = async (text: string) => {
@@ -26,7 +28,7 @@ export const FeedSettingsPanel: React.FC<{ userId?: string }> = ({ userId }) => 
   };
 
   const rotate = async () => {
-    if (!userId || !confirm("비밀키를 새로 바꾸면 기존 피드 주소는 바로 막혀요. 그록봇에 새 주소를 다시 알려 줘야 해요. 계속할까요?")) return;
+    if (!userId || !confirm("비밀키를 새로 바꾸면 기존 알림 주소는 바로 막혀요. 알림 봇에 새 주소를 다시 알려 줘야 해요. 계속할까요?")) return;
     setBusy(true);
     try {
       setSecret(await rotateFeedSecret(userId));
@@ -39,17 +41,20 @@ export const FeedSettingsPanel: React.FC<{ userId?: string }> = ({ userId }) => 
   };
 
   if (!userId) return <div className="text-xs text-slate-400">로그인 후 사용할 수 있어요.</div>;
-  if (!secret) return <div className="text-xs text-slate-400 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" />피드 준비 중… {msg}</div>;
+  if (!secret) return <div className="text-xs text-slate-400 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" />알림 주소 준비 중… {msg}</div>;
   const urls = feedUrls(secret);
   const instruction = grokBotInstruction(urls.page);
   const box = "w-full bg-[#121824] border border-slate-700 rounded-lg px-3 py-2 text-[11px] text-slate-200 font-mono break-all";
   return (
     <div className="space-y-4">
       <div className="p-3 rounded-lg bg-sky-500/5 border border-sky-500/20 text-xs text-sky-300 flex gap-2">
-        <Rss className="w-4 h-4 shrink-0" />
-        이 주소는 로그인 없이 열려요. 비밀키가 곧 열쇠이니 그록봇 외에는 공유하지 마세요. 주소가 열렸을 때 오늘 강의가 없고 새 실수·복습 대상이 있으면 그 자리에서 강의 생성을 시작해요.
+        <Rss className="w-4 h-4 shrink-0 mt-0.5" />
+        <div className="space-y-1">
+          <p>알림 봇(AI 비서 앱)에 아래 주소와 말을 알려 주면, 매일 아침 강의가 준비됐는지 대신 확인해서 알려 줘요.</p>
+          <p>이 주소는 로그인 없이 열려요. 비밀키가 곧 열쇠이니 알림 봇 외에는 공유하지 마세요. 주소가 열렸을 때 오늘 강의가 없고 새 실수·복습 대상이 있으면 그 자리에서 강의 생성을 시작해요.</p>
+        </div>
       </div>
-      {[["사람이 읽는 페이지", urls.page], ["JSON", urls.json], ["그록봇에 줄 말", instruction]].map(([label, val]) => (
+      {[["강의 확인 페이지", urls.page], ...(devMode ? [["JSON", urls.json]] : []), ["알림 봇에 줄 말", instruction]].map(([label, val]) => (
         <div key={label}>
           <div className="flex items-center justify-between mb-1">
             <span className="text-xs font-semibold text-slate-300">{label}</span>

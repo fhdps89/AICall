@@ -65,8 +65,12 @@ export const UsagePanel: React.FC<{ userId?: string }> = ({ userId }) => {
   const rows: [string, string, string][] = [
     ["통화", `${(usage?.liveMinutes || 0).toFixed(1)}분`, `${(d?.liveMinutes || 0).toFixed(1)}분`],
     ["받아쓰기", `${(usage?.sttMinutes || 0).toFixed(1)}분`, `${(d?.sttMinutes || 0).toFixed(1)}분`],
-    ["텍스트 토큰", `${Math.round(usage?.textTokens || 0).toLocaleString()}`, `${Math.round(d?.textTokens || 0).toLocaleString()}`],
-    ["TTS 글자 수", `${Math.round(usage?.ttsChars || 0).toLocaleString()}`, `${Math.round(d?.ttsChars || 0).toLocaleString()}`],
+    ...(devMode
+      ? ([
+          ["텍스트 토큰", `${Math.round(usage?.textTokens || 0).toLocaleString()}`, `${Math.round(d?.textTokens || 0).toLocaleString()}`],
+          ["TTS 글자 수", `${Math.round(usage?.ttsChars || 0).toLocaleString()}`, `${Math.round(d?.ttsChars || 0).toLocaleString()}`],
+        ] as [string, string, string][])
+      : []),
     ["예상 비용", usd(usage?.estCostUsd), usd(d?.estCostUsd)],
   ];
   return (
