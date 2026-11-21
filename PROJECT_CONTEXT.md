@@ -159,6 +159,19 @@
 ---
 
 ## 5. 버전 히스토리
+- **v2.10.0 이후 수정(미배포) — QA-4~6 뒤로가기 처리·설정 탭 한 줄 스크롤·통화 중 새로고침 경고와 끝나지 않은 통화 안내 정정 (2026-11-21 KST)**:
+  - **배경**: 실기기 QA에서 ① 통화 준비 화면에서 브라우저 뒤로가기를 누르면 홈이 아니라 `about:blank`로 앱을 이탈하고, ② 393px 모바일 폭에서 설정 모달 탭 7개가 줄바꿈 없이 접혀(`녹/음/보/관/함`) 깨지며, ③ 통화 중 F5/닫기 시 떠날지 묻는 경고가 없고 새로고침 직후 「끝나지 않은 통화」 창이 2분 임계값 때문에 방금 끊긴 통화 대신 이전 통화만 보여 주며 녹음 조각이 0개여도「녹음은 안전하게 저장돼 있어요.」·`0분`으로 표시되는 문제가 확인됨.
+  - **원인**: ① 앱에 `history.pushState`/`popstate` 동기화가 전혀 없고 `App.tsx` 상태로만 화면을 전환했고, ② `SettingsModal` 탭 줄에 `flex-nowrap`·`overflow-x-auto`와 버튼 `whitespace-nowrap shrink-0`이 없었으며, ③ `NewCallScreen`에 `beforeunload` 리스너가 없고 `App.tsx` 로그인 직후 `checkAndMarkInterruptedSessions`가 2분 경과 후에만 `pending_review`로 바꿨으며 `UnfinishedSessionModal`이 목록 첫 항목만 고정 표시하고 조각 수/업로드 상태를 구분하지 않았음.
+  - **수정**:
+    - **4행 뒤로가기**: 순수 모듈 `src/services/navigation/historySync.ts`(`HistoryDepthSync`)와 `src/services/navigation/backTarget.ts`(`pickBackTarget`, `getNavigationDepth`)를 추가하고 `App.tsx`에서 `depth`(0=홈, 1=통화 준비·통화·모달)를 동기화. 마운트 시 `replaceState({ onecallDepth: 0 })` 정규화, 0→1 `pushState`, 앱이 먼저 닫을 때 `go(-1)`(프로그래밍적 `popstate` 무시), 통화 중·복기 로딩/실패 카드·초기 진도 모달은 닫지 않고 `pushState`로 복구, `prepCall`·복기 모달·끝나지 않은 통화 모달·설정 모달 순으로 1개씩 닫아 홈으로 복귀.
+    - **5행 설정 탭**: `SettingsModal.tsx` 탭 줄에 `flex-nowrap overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden`과 탭 버튼 `whitespace-nowrap shrink-0`을 적용하고 `SETTINGS_TABS` 배열 `map`으로 정리(기존 `devMode` 조건·라벨 유지), 활성 탭 변경 시 `scrollIntoView({ inline: "nearest", block: "nearest" })` 호출.
+    - **6행 통화 중 새로고침·복구 안내**: `NewCallScreen.tsx`에서 `connecting`/`connected`/`reconnecting` 동안 `window` `beforeunload` 경고를 등록하고 종료 처리(`hangingUp`) 시작 시 즉시 해제. 순수 판정 모듈 `src/services/session/interruptedSession.ts`(`DEFAULT_STALE_SESSION_MS`, `isInterruptedSession`)를 services 계층으로 분리(`services`→`ui` import 제거)해 `db.ts` `checkAndMarkInterruptedSessions(userId, options?: { staleAfterMs?: number })`가 사용하도록 하고, 기본 2분은 유지하되 `App.tsx` 로그인 직후 호출만 `staleAfterMs: 0`을 전달해 방금 끊긴 `in-progress` 통화도 즉시 `pending_review`로 전환. `src/ui/call/unfinishedSessionSummary.ts`(`describeRecordingState`, `formatRecordingChunksSummary` 반올림 초 기준 60초 미만/이상 분기, `formatSessionChipLabel`)를 추가하고 `UnfinishedSessionModal.tsx`에 2개 이상일 때 선택 칩, 초/분 표기, 4가지 상태별 안내 문구 반영.
+  - **방어 조치**: `tests/historySync.test.ts`(7케이스), `tests/backTarget.test.ts`(`pickBackTarget` 우선순위), `tests/mobileShell.test.ts` `{/* Tab Navigation */}`~`{/* Body */}` 구간 설정 탭 소스 검사, `tests/unfinishedSessionSummary.test.ts`(문구 4종·59.4초/59.5초 시간 경계·`isInterruptedSession` 임계값) 추가.
+  - **남은 리스크**:
+    - 실기기(Android Chrome·iOS Safari)에서 Chrome 의 history 개입 때문에 사용자 조작 없는 `pushState` 항목을 뒤로가기가 건너뛸 수 있음 [미확인]
+    - 새로고침 직후 뒤로가기가 한 번 반응 없을 수 있음(깊이 정규화)
+    - `staleAfterMs` 0 은 다른 탭·기기에서 진행 중인 통화도 끝난 통화로 표시함
+  - **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build` 모두 통과.
 - **v2.10.0 이후 수정(미배포) (2026-11-21 KST) — 마이크 점검 무한 로딩 해소: 제한 시간·실패 이유·다시 점검·건너뛰기, 통화 중 글로 답하기**:
   - **배경·원인**: `PreCallScreen.tsx`의 `checkMic`이 `getUserMedia`를 시간 제한 없이 `await`해 마이크 부재/권한 창 무응답 환경에서 `"checking"` 상태에 영구 고정되고 「전화 걸기」가 활성화되지 않았으며, 통화 화면(`NewCallScreen.tsx`)에도 마이크 없이 글로 답할 수단이 없었음.
   - **수정**: 순수 모듈 `src/ui/call/micCheck.ts`에 `checkMicrophone(..., timeoutMs = 8000)`, 오류 `name`별 `MicFailReason` 매핑·지연 도착 스트림 트랙 정리, 글 답변 정규화 `formatWrittenAnswer(text)` 추가. `PreCallScreen.tsx`에 점검 중 「취소」, 실패 사유별 안내, 「다시 점검」, 최초·취소 후 `idle` 및 실패 상태에서 「마이크 없이 진행 (글로 답하기)」(`onStart({ micSkipped })`) 추가. `App.tsx`가 `textOnly` 상태를 `NewCallScreen.tsx`로 전달. `LiveProvider.sendTextPrompt`가 전송 성공 여부(`boolean`)를 반환하도록 변경. `NewCallScreen.tsx`는 `textOnly` 시 `skipMic`으로 마이크 초기화·경고를 생략해 튜터 음성만 수신하고, 하단 고정 바에 `formatWrittenAnswer` 기반 500자 제한·IME 조합 중 Enter 무시 「글로 답하기」 입력창을 상시 제공(`sendTextPrompt` 성공 시에만 `appendUserText` 기록, 소켓 끊김으로 실패 시 입력 유지 + 「연결이 끊겨 보내지 못했어요」 표시).

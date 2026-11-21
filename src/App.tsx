@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { User } from "firebase/auth";
 import {
   subscribeToAuth,
@@ -42,6 +42,12 @@ import { ReviewModal } from "./ui/review/ReviewModal";
 import { ReviewFlowScreen } from "./ui/review/ReviewFlowScreen";
 import { LiveTranscriptItem } from "./services/providers/types";
 import { syncFeed } from "./services/feed/feedService";
+import { HistoryDepthSync } from "./services/navigation/historySync";
+import {
+  BackTargetState,
+  getNavigationDepth,
+  pickBackTarget,
+} from "./services/navigation/backTarget";
 import { friendlyError } from "./ui/common/friendlyError";
 import { Loader2 } from "lucide-react";
 
@@ -185,9 +191,9 @@ export const App: React.FC = () => {
           console.warn("[App] Auto retry failed chunks error:", retryErr);
         });
 
-        // B-4 Requirement 0: Firestore-based watchdog (in-progress && lastChunkAt > 2m => pending_review)
+        // 페이지가 새로 열린 시점에는 진행 중이던 통화를 이어 갈 수 없으므로 즉시 pending_review 로 전환한다.
         try {
-          const interrupted = await checkAndMarkInterruptedSessions(user.uid);
+          const interrupted = await checkAndMarkInterruptedSessions(user.uid, { staleAfterMs: 0 });
           if (interrupted.length > 0) {
             setUnfinishedSessions(interrupted);
             setShowUnfinishedModal(true);
@@ -239,6 +245,74 @@ export const App: React.FC = () => {
     if (!user) return;
     setUnfinishedSessions(await getUnfinishedSessions(user.uid));
   };
+
+  // 브라우저 뒤로가기 동기화 (0=홈, 1=통화 준비·통화·모달)
+  const backState: BackTargetState = {
+    activeCall: Boolean(activeCallGoal),
+    generatingReview: isGeneratingReview,
+    reviewFailure: Boolean(reviewFailure),
+    initialProgressModal: showInitialProgressModal,
+    prepCall: Boolean(prepCall),
+    activeReview: Boolean(activeReviewData),
+    unfinishedModal: Boolean(showUnfinishedModal && unfinishedSessions.length > 0),
+    settingsModal: showSettingsModal,
+  };
+  const depth = getNavigationDepth(backState);
+
+  const historySyncRef = useRef<HistoryDepthSync | null>(null);
+  const backStateRef = useRef({
+    state: backState,
+    refreshUnfinished,
+  });
+  backStateRef.current = {
+    state: backState,
+    refreshUnfinished,
+  };
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sync = new HistoryDepthSync({
+      history: window.history,
+      subscribePopstate: (listener) => {
+        window.addEventListener("popstate", listener);
+        return () => window.removeEventListener("popstate", listener);
+      },
+      onUserBack: () => {
+        const s = backStateRef.current;
+        const target = pickBackTarget(s.state);
+        if (!target) return;
+
+        const nextState: BackTargetState = { ...s.state };
+        if (target === "prepCall") {
+          setPrepCall(null);
+          nextState.prepCall = false;
+        } else if (target === "review") {
+          setActiveReviewData(null);
+          setHomeRefreshKey((prev) => prev + 1);
+          s.refreshUnfinished().catch(() => {});
+          nextState.activeReview = false;
+        } else if (target === "unfinished") {
+          setShowUnfinishedModal(false);
+          nextState.unfinishedModal = false;
+        } else if (target === "settings") {
+          setShowSettingsModal(false);
+          nextState.settingsModal = false;
+        }
+        if (getNavigationDepth(nextState) === 0) {
+          sync.setDepth(0);
+        }
+      },
+    });
+    historySyncRef.current = sync;
+    return () => {
+      sync.dispose();
+      historySyncRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    historySyncRef.current?.setDepth(depth);
+  }, [depth]);
 
   // Handle Goal Lesson Change
   const handleUpdateGoalProgress = async (goalId: string, nextLessonIndex: number) => {

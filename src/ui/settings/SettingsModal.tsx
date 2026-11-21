@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useDevMode, setDevMode } from "../../data/devMode";
 import {
   X,
@@ -34,6 +34,18 @@ interface SettingsModalProps {
   onResetProgressRequest: () => void;
 }
 
+type SettingsTabId = "prompts" | "models" | "recordings" | "feed" | "usage" | "coach" | "geminiKey";
+
+const SETTINGS_TABS: ReadonlyArray<{ id: SettingsTabId; label: string; devOnly?: boolean }> = [
+  { id: "prompts", label: "프롬프트 변수 입력 (빈칸 채우기)" },
+  { id: "models", label: "개발자: 모델·보안", devOnly: true },
+  { id: "recordings", label: "녹음 보관함" },
+  { id: "feed", label: "그록봇 피드" },
+  { id: "usage", label: "사용량·예상 비용" },
+  { id: "coach", label: "코치 알림 (넛지)" },
+  { id: "geminiKey", label: "Gemini 키" },
+];
+
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   userId,
   isOpen,
@@ -45,7 +57,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [formData, setFormData] = useState<PromptPlaceholders>(placeholders);
   const [saving, setSaving] = useState(false);
   const devMode = useDevMode();
-  const [activeTab, setActiveTab] = useState<"prompts" | "models" | "recordings" | "feed" | "usage" | "coach" | "geminiKey">("prompts");
+  const [activeTab, setActiveTab] = useState<SettingsTabId>("prompts");
+  const tabRefs = useRef<Partial<Record<SettingsTabId, HTMLButtonElement | null>>>({});
   const [coachNudges, setCoachNudges] = useState<string[]>(["weekly", "absence2d"]);
   const [enablePartialStt, setEnablePartialStt] = useState<boolean>(() => {
     return localStorage.getItem("onecall_enable_partial_transcribe") !== "false";
@@ -110,6 +123,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   }, [activeTab, userId]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    tabRefs.current[activeTab]?.scrollIntoView?.({ inline: "nearest", block: "nearest" });
+  }, [activeTab, isOpen]);
+
   // Must stay below every hook: returning before a hook changes the hook count when the
   // modal opens, and React then throws instead of showing the settings screen.
   if (!isOpen) return null;
@@ -148,86 +166,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
 
         {/* Tab Navigation */}
-        <div className="flex border-b border-slate-800 px-5 bg-slate-900/40">
-          <button
-            type="button"
-            onClick={() => setActiveTab("prompts")}
-            className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
-              activeTab === "prompts"
-                ? "border-amber-400 text-amber-300"
-                : "border-transparent text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            프롬프트 변수 입력 (빈칸 채우기)
-          </button>
-          {devMode && (
-          <button
-            type="button"
-            onClick={() => setActiveTab("models")}
-            className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
-              activeTab === "models"
-                ? "border-amber-400 text-amber-300"
-                : "border-transparent text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            개발자: 모델·보안
-          </button>
-          )}
-          <button
-            type="button"
-            onClick={() => setActiveTab("recordings")}
-            className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
-              activeTab === "recordings"
-                ? "border-amber-400 text-amber-300"
-                : "border-transparent text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            녹음 보관함
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("feed")}
-            className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
-              activeTab === "feed"
-                ? "border-amber-400 text-amber-300"
-                : "border-transparent text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            그록봇 피드
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("usage")}
-            className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
-              activeTab === "usage"
-                ? "border-amber-400 text-amber-300"
-                : "border-transparent text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            사용량·예상 비용
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("coach")}
-            className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
-              activeTab === "coach"
-                ? "border-amber-400 text-amber-300"
-                : "border-transparent text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            코치 알림 (넛지)
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("geminiKey")}
-            className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
-              activeTab === "geminiKey"
-                ? "border-amber-400 text-amber-300"
-                : "border-transparent text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            Gemini 키
-          </button>
+        <div className="flex flex-nowrap shrink-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden border-b border-slate-800 px-5 bg-slate-900/40">
+          {SETTINGS_TABS.filter((tab) => !tab.devOnly || devMode).map((tab) => (
+            <button
+              key={tab.id}
+              ref={(el) => {
+                tabRefs.current[tab.id] = el;
+              }}
+              type="button"
+              onClick={() => setActiveTab(tab.id)}
+              className={`py-3 px-3 text-xs font-semibold border-b-2 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                activeTab === tab.id
+                  ? "border-amber-400 text-amber-300"
+                  : "border-transparent text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
 
         {/* Body */}
