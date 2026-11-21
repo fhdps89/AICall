@@ -1,0 +1,232 @@
+import type { UsageMonth } from "./usageService";
+
+export interface DailyLearningLog {
+  date: string;
+  calls: number;
+  minutes: number;
+}
+
+export interface LearningLogSummary {
+  today: {
+    calls: number;
+    minutes: number;
+  };
+  thisMonth: {
+    calls: number;
+    minutes: number;
+    activeDays: number;
+  };
+  streakDays: number;
+  bestStreakDays: number;
+  recentDays: DailyLearningLog[];
+}
+
+function isLeapYear(year: number): boolean {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
+function daysInMonth(year: number, month: number): number {
+  const table = [31, isLeapYear(year) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return table[month - 1] ?? 0;
+}
+
+function parseDateStr(dateStr: string): { year: number; month: number; day: number } | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (month < 1 || month > 12) return null;
+  const dim = daysInMonth(year, month);
+  if (day < 1 || day > dim) return null;
+  return { year, month, day };
+}
+
+function formatDateStr(year: number, month: number, day: number): string {
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+/**
+ * YYYY-MM-DD 문자열 기준 순수 날짜 가감 (타임존/Date 객체 비의존).
+ */
+export function addDaysToDateStr(dateStr: string, deltaDays: number): string {
+  const parsed = parseDateStr(dateStr);
+  if (!parsed) throw new Error(`Invalid YYYY-MM-DD date: ${dateStr}`);
+  let { year, month, day } = parsed;
+  let rem = deltaDays;
+
+  while (rem > 0) {
+    const dim = daysInMonth(year, month);
+    if (day + rem <= dim) {
+      day += rem;
+      rem = 0;
+    } else {
+      rem -= dim - day + 1;
+      day = 1;
+      month += 1;
+      if (month > 12) {
+        month = 1;
+        year += 1;
+      }
+    }
+  }
+
+  while (rem < 0) {
+    if (day + rem >= 1) {
+      day += rem;
+      rem = 0;
+    } else {
+      rem += day;
+      month -= 1;
+      if (month < 1) {
+        month = 12;
+        year -= 1;
+      }
+      day = daysInMonth(year, month);
+    }
+  }
+
+  return formatDateStr(year, month, day);
+}
+
+/**
+ * 기준일(today: YYYY-MM-DD) 포함 최근 N개월의 YYYY-MM 키 목록을 최신순으로 반환.
+ */
+export function getRecentMonthKeys(today: string, count = 3): string[] {
+  const parsed = parseDateStr(today);
+  if (!parsed || count <= 0) return [];
+  let { year, month } = parsed;
+  const keys: string[] = [];
+  for (let i = 0; i < count; i++) {
+    keys.push(`${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}`);
+    month -= 1;
+    if (month < 1) {
+      month = 12;
+      year -= 1;
+    }
+  }
+  return keys;
+}
+
+/**
+ * 통화 시간(초) 기준으로 완료 통화 횟수를 계산한다 (10초 이상이면 1, 미만이면 0).
+ */
+export function callsForDuration(sec: number): number {
+  return Number.isFinite(sec) && sec >= 10 ? 1 : 0;
+}
+
+/**
+ * 학습한 날 판정: 통화 횟수가 1회 이상이거나(옛 데이터 호환) 통화 시간이 0.5분 이상.
+ */
+export function isActiveLearningDay(calls: number, minutes: number): boolean {
+  return calls > 0 || minutes >= 0.5;
+}
+
+/**
+ * 최근 몇 개월의 usage 문서를 바탕으로 오늘/이번 달/연속 학습일/최근 14일 요약을 계산한다.
+ */
+export function summarizeLearningLog(
+  months: Record<string, UsageMonth | null>,
+  today: string
+): LearningLogSummary {
+  if (!parseDateStr(today)) {
+    throw new Error(`Invalid today date: ${today}`);
+  }
+
+  const dayMap = new Map<string, { calls: number; minutes: number }>();
+  const activeDates = new Set<string>();
+
+  for (const [monthKey, monthDoc] of Object.entries(months)) {
+    if (!monthDoc?.days || !/^\d{4}-\d{2}$/.test(monthKey)) continue;
+    for (const [rawDay, dayStats] of Object.entries(monthDoc.days)) {
+      if (!/^\d{1,2}$/.test(rawDay)) continue;
+      const dd = rawDay.padStart(2, "0");
+      const fullDate = `${monthKey}-${dd}`;
+      if (!parseDateStr(fullDate)) continue;
+
+      const calls = dayStats?.calls ?? 0;
+      const minutes = dayStats?.liveMinutes ?? 0;
+      const prev = dayMap.get(fullDate);
+      const mergedCalls = (prev?.calls ?? 0) + calls;
+      const mergedMinutes = (prev?.minutes ?? 0) + minutes;
+      dayMap.set(fullDate, { calls: mergedCalls, minutes: mergedMinutes });
+
+      if (isActiveLearningDay(mergedCalls, mergedMinutes)) {
+        activeDates.add(fullDate);
+      }
+    }
+  }
+
+  const todayEntry = dayMap.get(today) ?? { calls: 0, minutes: 0 };
+
+  const thisMonthKey = today.slice(0, 7);
+  let monthDaysCalls = 0;
+  let monthDaysMinutes = 0;
+  let monthActiveDays = 0;
+
+  for (const [date, stats] of dayMap.entries()) {
+    if (date.startsWith(`${thisMonthKey}-`)) {
+      monthDaysCalls += stats.calls;
+      monthDaysMinutes += stats.minutes;
+      if (activeDates.has(date)) {
+        monthActiveDays += 1;
+      }
+    }
+  }
+
+  // 오늘 카드·막대 그래프와 어긋나지 않도록 이번 달 합계도 days 합 하나로 통일한다.
+  const thisMonthCalls = monthDaysCalls;
+  const thisMonthMinutes = monthDaysMinutes;
+
+  // streak: 오늘 학습했으면 오늘부터, 아직 안 했으면 어제부터 거꾸로 연속일 계산 (어제도 없으면 0)
+  let streakDays = 0;
+  let cursor = activeDates.has(today) ? today : addDaysToDateStr(today, -1);
+  while (activeDates.has(cursor)) {
+    streakDays += 1;
+    cursor = addDaysToDateStr(cursor, -1);
+  }
+
+  // bestStreak: 가져온 달들 안에서의 최장 연속 학습일
+  const sortedActive = Array.from(activeDates).sort();
+  let bestStreakDays = 0;
+  let currentRun = 0;
+  let prevActive: string | null = null;
+  for (const date of sortedActive) {
+    if (prevActive && addDaysToDateStr(prevActive, 1) === date) {
+      currentRun += 1;
+    } else {
+      currentRun = 1;
+    }
+    if (currentRun > bestStreakDays) {
+      bestStreakDays = currentRun;
+    }
+    prevActive = date;
+  }
+
+  // recentDays: 최근 14일 (오래된 날짜 → 오늘)
+  const recentDays: DailyLearningLog[] = [];
+  for (let offset = -13; offset <= 0; offset += 1) {
+    const date = addDaysToDateStr(today, offset);
+    const stats = dayMap.get(date);
+    recentDays.push({
+      date,
+      calls: stats?.calls ?? 0,
+      minutes: stats?.minutes ?? 0,
+    });
+  }
+
+  return {
+    today: {
+      calls: todayEntry.calls,
+      minutes: todayEntry.minutes,
+    },
+    thisMonth: {
+      calls: thisMonthCalls,
+      minutes: thisMonthMinutes,
+      activeDays: monthActiveDays,
+    },
+    streakDays,
+    bestStreakDays,
+    recentDays,
+  };
+}
