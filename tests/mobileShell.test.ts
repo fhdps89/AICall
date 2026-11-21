@@ -5,11 +5,32 @@ import path from 'node:path';
 
 const rootDir = path.resolve(import.meta.dirname, '..');
 
-test('index.html viewport includes viewport-fit=cover', () => {
+test('index.html viewport includes viewport-fit=cover and allows pinch zoom', () => {
   const html = fs.readFileSync(path.join(rootDir, 'index.html'), 'utf-8');
   const match = html.match(/<meta\s+name=["']viewport["']\s+content=["']([^"']+)["']/i);
   assert.ok(match, 'viewport meta tag should exist');
   assert.match(match[1], /\bviewport-fit=cover\b/);
+  assert.equal(/\buser-scalable=no\b/i.test(match[1]), false, 'viewport must not disable user scaling');
+  assert.equal(/\bmaximum-scale=1(?:\.0+)?\b/i.test(match[1]), false, 'viewport must not lock maximum-scale to 1');
+});
+
+test('index.html theme-color matches manifest.json theme_color and background_color', () => {
+  const html = fs.readFileSync(path.join(rootDir, 'index.html'), 'utf-8');
+  const themeMatch = html.match(/<meta\s+name=["']theme-color["']\s+content=["']([^"']+)["']/i);
+  assert.ok(themeMatch, 'theme-color meta tag should exist');
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(rootDir, 'public/manifest.json'), 'utf-8'),
+  ) as { theme_color?: string; background_color?: string };
+  assert.equal(manifest.theme_color, themeMatch[1]);
+  assert.equal(manifest.background_color, themeMatch[1]);
+});
+
+test('index.html body allows text selection (no select-none)', () => {
+  const html = fs.readFileSync(path.join(rootDir, 'index.html'), 'utf-8');
+  const bodyMatch = html.match(/<body\b[^>]*\bclass=["']([^"']+)["'][^>]*>/i);
+  assert.ok(bodyMatch, 'body tag with class attribute should exist');
+  const classes = bodyMatch[1].trim().split(/\s+/);
+  assert.equal(classes.includes('select-none'), false, 'body class must not include select-none');
 });
 
 test('NewCallScreen uses "답변 끝" instead of "끝내기" and keeps fixed viewport layout', () => {
@@ -28,4 +49,5 @@ test('NewCallScreen uses "답변 끝" instead of "끝내기" and keeps fixed vie
   const rootTokens = rootMatch[1].split(/\s+/);
   assert.equal(rootTokens.includes('h-dvh'), false, 'bare h-dvh would be overridden by h-screen');
   assert.equal(rootTokens.includes('h-screen'), true, 'h-screen is the fallback for browsers without dvh');
+  assert.equal(rootTokens.includes('select-none'), true, 'call screen keeps select-none');
 });

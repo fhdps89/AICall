@@ -341,7 +341,7 @@ export const CoachModal: React.FC<CoachModalProps> = ({
   const pendingCount = planChanges.filter((c) => c.status === "proposed").length;
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-3 sm:p-5 select-none">
+    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-3 sm:p-5">
       <div className="w-full max-w-2xl bg-[#161D2A] border border-slate-800 rounded-3xl shadow-2xl flex flex-col h-[92vh] max-h-[820px] overflow-hidden">
         {/* Header */}
         <header className="p-4 sm:p-5 border-b border-slate-800 bg-[#1A2232] flex items-center justify-between">

@@ -4,6 +4,30 @@
 
 ---
 
+### [2026-11-21 KST] v2.10.0 — P0-6 줌·텍스트 선택·배경색 통일 및 P0 묶음 릴리즈 (브랜치 `fix/p0-6-zoom-select-color`, 설계 Claude CLI Opus 5.5 high, 구현 agy Gemini 4 Hydrogen high)
+- **배경**:
+  - `index.html` 뷰포트의 `maximum-scale=1.0, user-scalable=no`가 모바일 핀치 줌을 차단하고 있었으며, `index.html` `<body>`와 `CoachModal.tsx`의 `select-none`이 복기·강의·코치 텍스트 선택/복사를 막고 있었음.
+  - 또한 `index.html` `<body>`, `src/index.css`(`--her-*`), `public/manifest.json`에 구 테마 색상(`#1A1210`)이 남아 PWA 스플래시와 오버스크롤 영역이 실제 앱 배경(`#0F141C`)과 어긋났으며, 미사용 orb 애니메이션 CSS가 남아 있었음.
+  - 승인된 P0 묶음(P0-1~P0-6)의 유일한 버전 갱신 PR로 패키지 버전을 `2.9.0` → `2.10.0`으로 올림.
+- **원인과 수정**:
+  - **P0-6 변경 내역**:
+    - 핀치 줌 허용: `index.html` viewport 메타에서 `maximum-scale=1.0`, `user-scalable=no` 제거(`width=device-width, initial-scale=1.0, viewport-fit=cover` 유지).
+    - 텍스트 선택/복사 허용: `index.html` `<body>`와 `src/ui/coach/CoachModal.tsx` 외곽 컨테이너에서 `select-none` 제거. 통화 중 오작동 방지를 위해 `src/ui/call/NewCallScreen.tsx` 루트의 `select-none`은 유지.
+    - 색상 통일 및 미사용 CSS 정리: `index.html` `<body>` 클래스를 `bg-[#0F141C] text-slate-100 font-sans antialiased overflow-x-hidden`으로 변경(`theme-color` `#0F141C` 유지). `public/manifest.json`의 `background_color`와 `theme_color`를 `#0F141C`로 변경. `src/index.css`에서 미사용 `--her-*` 변수와 `@keyframes orb-pulse-*`/`.animate-orb-*` 클래스를 제거하고 `body` 배경/글자색을 `#0F141C`/`#f1f5f9`로 설정(`.pt-safe`, `.pb-safe`, `.bottom-safe`, `touch-action: manipulation`, `-webkit-tap-highlight-color: transparent` 유지).
+    - 버전 및 문서 갱신: `package.json` `"version"`과 `package-lock.json` 루트/`packages[""]` 버전을 `2.10.0`으로 갱신(의존성 변경 없음). `README.md` 헤더·v2.10.0 요약, `PROJECT_CONTEXT.md` 헤더·§2 색상 설명·§5 히스토리, `docs/history/changelog.md` 갱신.
+  - **P0 묶음 요약 (`v2.10.0`)**:
+    - P0-1: 복기 단계별 소요 시간 계측.
+    - P0-2: 복기 화면 「이번 통화 성과」 표시와 빈 통화 문구 정리.
+    - P0-3: 홈 「오늘 할 것」 루프 재배치와 진도 확인 시트.
+    - P0-4: 복기에서 오늘 강의로 연결(준비된 강의만 자동으로 염).
+    - P0-5: 통화 화면 고정 레이아웃(`h-screen` + `supports-[height:100dvh]:h-dvh`, `viewport-fit=cover`, safe-area) 및 「끝내기」→「답변 끝」.
+    - P0-6: 핀치 줌·텍스트 선택 허용, `#0F141C` 색상 통일, `v2.10.0` 버전 범프.
+- **방어 조치 (Safeguards)**:
+  - `tests/mobileShell.test.ts`: `index.html` viewport의 `user-scalable=no`·`maximum-scale=1` 비포함, `index.html` `theme-color`와 `public/manifest.json` `theme_color`/`background_color` 일치, `index.html` `<body>` 클래스의 `select-none` 비포함 검증 추가(기존 `viewport-fit=cover` 및 `답변 끝`/레이아웃 테스트 유지).
+- **검증**: `npm test` 29/29 통과, `npm run lint`·`npx tsc --noEmit`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 오류 없음.
+
+---
+
 ### [2026-11-21 KST] P0-5 통화 화면 모바일 레이아웃 (v2.10.0 묶음) (브랜치 `fix/p0-5-call-mobile-layout`, 설계 Claude CLI Opus 5.5 high, 구현 agy Gemini 4 Hydrogen high)
 - **배경**: 모바일 환경(동적 주소창·하단 시스템 바와 안전 영역)에서 통화 대화창(`transcripts`)이 길어지면 하단 제어 버튼과 「통화 종료」 버튼이 화면 아래로 밀려 사라질 수 있었음. 또한 `Done` 제어 버튼 라벨(「끝내기」)이 「통화 종료」와 혼동될 소지가 있었음.
 - **원인과 수정**:

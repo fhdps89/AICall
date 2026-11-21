@@ -1,7 +1,7 @@
 # 📖 프로젝트 컨텍스트 및 히스토리 (Project Context)
 
 > **프로젝트**: One Call English (옛 이름: 「오늘도 한 통」) — AI 1:1 전화영어  
-> **현재 버전**: `v2.9.0` (공식 빌드 표기: `getBuildVersion()`이 `server.ts` 수정 시각으로 계산하는 `20261110-multilingual-HHmm`) | **최종 갱신**: 2026-11-10 (KST)  
+> **현재 버전**: `v2.10.0` (공식 빌드 표기: `getBuildVersion()`이 `server.ts` 수정 시각으로 계산하는 `20261110-multilingual-HHmm`) | **최종 갱신**: 2026-11-21 (KST)  
 > **기준 기획**: [`docs/plan/implementation_plan_v4.md`](./docs/plan/implementation_plan_v4.md) Part B · 진행 가이드 [`docs/plan/ai-studio-build-guide.md`](./docs/plan/ai-studio-build-guide.md) · 현재 앱과의 차이 [`docs/plan/gap-v2.1.0-vs-plan-v4.md`](./docs/plan/gap-v2.1.0-vs-plan-v4.md)  
 > **관리 규칙**: `README.md` 변경 시 본 문서의 아키텍처 및 히스토리를 함께 최신화하며, 모든 일시는 한국 표준시(KST)를 기준으로 합니다.
 
@@ -40,7 +40,7 @@
 
 ## 2. 프로젝트 비전 및 디자인
 - **정체성**: 4개 특화 트랙(OPIc AL, 한화 필리 조선소 비즈니스, 미국·호주 여행, Bluey 호주 리스닝)의 일자별 커리큘럼에 맞춰 AI와 실시간 음성 통화를 나누고, 통화 종료 후 즉시 정밀 복기 리포트와 실수 노트를 자동 추출하며, 아침 출근길용 1:1 맞춤형 복습 오디오 강의까지 제공하는 완성형 AI 전화영어 애플리케이션.
-- **디자인 무드**: 심야 서재의 차분한 다크 슬레이트 캔버스(`bg-[#0F141C]`), 정갈한 카드 서피스(`bg-[#161D2A]`), 웜 골드/앰버 액센트(`text-amber-400`), 모바일 반응형 터치 인터페이스.
+- **디자인 무드**: 심야 서재의 차분한 다크 슬레이트 캔버스(`bg-[#0F141C]`, `index.html`·`src/index.css`·`public/manifest.json` 스플래시 및 오버스크롤 배경색까지 `#0F141C`로 통일), 정갈한 카드 서피스(`bg-[#161D2A]`), 웜 골드/앰버 액센트(`text-amber-400`), 모바일 반응형 터치 인터페이스(핀치 줌 및 복기·강의·코치 텍스트 선택/복사 허용, 통화 화면 `NewCallScreen.tsx`만 `select-none` 유지).
 
 ---
 
@@ -159,6 +159,13 @@
 ---
 
 ## 5. 버전 히스토리
+- **v2.10.0 (P0-1~P0-6 묶음, 2026-11-21 KST)**: 승인된 P0 실기기 QC 후속 개선 묶음 (`README.md` 헤더·v2.10.0 요약 및 `package.json`/`package-lock.json` `2.10.0` 반영).
+  - **P0-1**: 복기 단계별 소요 시간 계측.
+  - **P0-2**: 복기 화면 「이번 통화 성과」 표시와 빈 통화 문구 정리.
+  - **P0-3**: 홈 「오늘 할 것」 루프 재배치와 진도 확인 시트.
+  - **P0-4**: 복기에서 오늘 강의로 연결(준비된 강의만 자동으로 염).
+  - **P0-5**: 통화 화면 모바일 레이아웃 고정(`NewCallScreen.tsx` `supports-[height:100dvh]:h-dvh`·내부 스크롤·`block: "end"`, `index.html` `viewport-fit=cover`, `src/index.css` `.pt-safe`/`.pb-safe`/`.bottom-safe`, `App.tsx` 미완료 통화 버튼 safe-area 적용) 및 제어 버튼 라벨 「끝내기」→「답변 끝」 통일(「통화 종료」와 혼동 방지).
+  - **P0-6**: 핀치 줌 허용(`index.html` `maximum-scale=1.0`·`user-scalable=no` 제거), 복기·강의·코치 텍스트 선택/복사 허용(`index.html` `body` 및 `CoachModal.tsx` `select-none` 제거, `NewCallScreen.tsx`만 `select-none` 유지), PWA 스플래시·오버스크롤 색상 `#0F141C` 통일(`index.html`, `src/index.css`, `public/manifest.json` 및 미사용 `--her-*`/orb CSS 정리), `tests/mobileShell.test.ts` 검증 보강.
 - **P0-5 (v2.10.0 묶음, 2026-11-21 KST)**: 통화 화면 모바일 레이아웃 고정(`NewCallScreen.tsx` `supports-[height:100dvh]:h-dvh`·내부 스크롤·`block: "end"`, `index.html` `viewport-fit=cover`, `src/index.css` `.pt-safe`/`.pb-safe`/`.bottom-safe`, `App.tsx` 미완료 통화 버튼 safe-area 적용) 및 제어 버튼 라벨 「끝내기」→「답변 끝」 통일(「통화 종료」와 혼동 방지).
 - **P0-4 (v2.10.0 묶음, 2026-11-21 KST)**: 복기 모달에서 오늘 강의로 연결(`ReviewModal.tsx`, `App.tsx`, `HomeScreen.tsx`, `MorningLectureCard.tsx`). 하단 「오늘 강의 보기」 버튼으로 복기를 닫고 홈 강의 카드로 스크롤하며, 첫 `refresh()` 결과가 이미 `ready`(오디오 포함)일 때만 `LectureModal`을 자동 열기(미준비 시 생성 시작 안 함, `pendingHomeFocus` 1회 처리 후 초기화). `tests/reviewLectureLink.test.ts` 추가.
 - **P0-3 (v2.10.0 묶음, 2026-11-21 KST)**: 홈 「오늘 할 것」 루프 재배치(`HomeScreen.tsx`, `LessonChangeSheet.tsx`). 아침 강의 카드를 「더 보기」 밖 메인 흐름(오늘 수업 카드 뒤·복습 퀴즈 카드 앞)으로 꺼내고, 일요일 주간 복기 카드에 「오늘 퀴즈」·「오늘 강의」·「트랙 골라 통화」 액션 3종 추가, 오늘 수업/트랙 카드의 인라인 진도 `<select>`를 확인 시트(`LessonChangeSheet`)로 교체해 오작동 방지, 헤더 이메일은 개발자 모드에만 노출. `README.md` 1단계 홈 설명 함께 갱신.

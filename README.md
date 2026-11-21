@@ -1,6 +1,6 @@
 # One Call English — AI 1:1 전화영어 (옛 이름: 오늘도 한 통)
 
-> **버전**: `v2.9.0` (빌드 표기 `20261110-multilingual-HHmm`, `server.ts` 수정 시각에서 자동 계산) | **최종 갱신**: 2026-11-10 (KST)
+> **버전**: `v2.10.0` (빌드 표기 `20261110-multilingual-HHmm`, `server.ts` 수정 시각에서 자동 계산) | **최종 갱신**: 2026-11-21 (KST)
 > **기준 기획**: [`docs/plan/implementation_plan_v4.md`](./docs/plan/implementation_plan_v4.md) Part B · 진행 가이드 [`docs/plan/ai-studio-build-guide.md`](./docs/plan/ai-studio-build-guide.md)
 > 아키텍처와 버전 기록: [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) · 상세 변경 기록: [`docs/history/changelog.md`](./docs/history/changelog.md) · 최근 전체 코드 리뷰: [`docs/reviews/2026-11-full-code-review.md`](./docs/reviews/2026-11-full-code-review.md) · 안드로이드 실기기 QC 체크리스트: [`docs/qc/2026-11-android-qc-checklist.html`](./docs/qc/2026-11-android-qc-checklist.html)
 
@@ -32,6 +32,11 @@ AI 튜터와 영어로 통화하고, 통화에서 **틀린 말을 틀린 그대�
 | 기록용 받아쓰기 | `gemini-3.5-transcribe` (VERBATIM) |
 | 아침 강의 음성 | `gemini-3.8-flash-tts` |
 | 복기 화면 "발음 듣기" | `gemini-3.8-flash-lite-tts` |
+
+## v2.10.0에서 바뀐 것 (2026-11-21 KST, P0 실기기 QC 후속 묶음)
+- 모바일 핀치 줌을 허용하고, 복기·강의·코치 화면의 텍스트 선택·복사를 허용했습니다(통화 화면의 오터치 방지용 `select-none`은 유지).
+- 앱 기본 배경, 오버스크롤, PWA 스플래시(`manifest.json`) 색상을 `#0F141C`로 통일했습니다.
+- 통화 화면을 고정 뷰포트(`h-screen`, dvh 지원 시 `h-dvh`) 내부 스크롤·safe-area 여백으로 고정하고 제어 버튼 라벨을 「답변 끝」으로 통일했습니다(P0-1~P0-6 묶음 반영).
 
 ## v2.9.0에서 바뀐 것 (2026-11-10 KST, 전체 코드 리뷰 2차)
 - 통화를 끊으면 그 통화는 "복기 대기"로 남고, 복기가 저장돼야 "완료"가 됩니다. 복기 중에 앱을 닫아도 홈 아래 **「끝나지 않은 통화 N개 · 복기하기」** 버튼에서 다시 만들 수 있습니다.
