@@ -4,6 +4,20 @@
 
 ---
 
+### [2026-11-21 KST] P0-4 복기에서 오늘 강의로 연결 (v2.10.0 묶음)
+- **브랜치**: `fix/p0-4-review-to-lecture` · **모델**: 계획 Claude CLI Opus 5.5 high · 구현 agy Gemini 4 Hydrogen high
+- **배경**: `ReviewModal`에 선택 콜백 `onOpenPodcast`와 하단 버튼(`🎧 아침 복습 오디오 듣기`)이 있었으나 `App.tsx`에서 콜백을 연결하지 않아 버튼이 보이지 않았음. 통화 복기를 마친 뒤 홈의 오늘 강의 카드로 바로 이어지고, 강의가 이미 준비된 경우에만 강의 창을 열며 준비 전에는 생성 요청을 자동으로 시작하지 않아야 했음.
+- **원인과 수정**:
+  - `src/App.tsx`: `HomeFocus = "lecture" | null`과 `pendingHomeFocus` 상태를 추가해 `ReviewModal`에 `onOpenPodcast={() => setPendingHomeFocus("lecture")}`를 전달하고(기존 `onClose`의 `homeRefreshKey` 증가·미완료 목록 갱신 유지), `HomeScreen`에 `focus={pendingHomeFocus}`와 `onFocusHandled={() => setPendingHomeFocus(null)}` 전달.
+  - `src/ui/home/HomeScreen.tsx`: `focus`·`onFocusHandled` prop을 받아 `focus === "lecture"`일 때 `MorningLectureCard`에 `autoOpen`과 `onAutoOpenHandled` 전달. 첫 `refresh()` 완료 후 `onAutoOpenHandled`가 불릴 때 `lectureCardRef`로 스크롤하고 `onFocusHandled`로 초점 신호를 초기화.
+  - `src/ui/lecture/MorningLectureCard.tsx`: `autoOpen`·`onAutoOpenHandled` prop 추가. 첫 `refresh()` 결과에서 `status === "ready"`이고 `audioUrl`이 있을 때만 `setOpen(true)`로 `LectureModal`을 열고, 준비되지 않았으면 열지 않음. `onAutoOpenHandled`는 ref 가드로 마운트당 1회만 호출하며 `startLecture`/`create()`는 호출하지 않음.
+  - `src/ui/review/ReviewModal.tsx`: 하단 왼쪽 버튼 라벨을 `오늘 강의 보기`로 변경하고 기존 `onClose()` → `onOpenPodcast()` 순서 유지.
+  - `tests/reviewLectureLink.test.ts`(신규) 및 `PROJECT_CONTEXT.md`(§4-3, §4-10, §5) 갱신.
+- **방어 조치**: `ReviewModal`과 `App.tsx`에서 `startLecture`를 호출하지 않음을 `tests/reviewLectureLink.test.ts`로 검사하고, `autoOpenHandledRef`·`firstRefreshDoneRef` 및 `onFocusHandled` 초기화로 StrictMode 이중 마운트, 퀴즈 모달 열기/닫기, 이후 홈 재마운트에서 스크롤·자동 열기가 재실행되지 않도록 차단. 미준비 시에는 기존 「오늘 강의 만들기」 수동 버튼만 유지.
+- **검증**: `npm test` 26/26 통과, `npm run lint`·`npx tsc --noEmit`·`npx tsc -p tsconfig.server.json --noEmit`·`npm run build` 오류 없음.
+
+---
+
 ### [2026-11-21 KST] P0-3 홈 「오늘 할 것」 루프 재배치 (v2.10.0 묶음)
 - **브랜치**: `fix/p0-3-home-loop` · **모델**: 계획 Claude CLI Opus 5.5 high · 구현 agy Gemini 4 Hydrogen high
 - **배경**: 홈 화면의 아침 강의 카드가 「더 보기」 접힘 영역 안에 숨어 있어 하루 학습 루프(수업 → 강의 → 복습 퀴즈)가 한눈에 이어지지 않았고, 일요일 주간 복기 카드에 바로 실행할 행동 버튼이 없었음. 또한 오늘 수업 카드와 4대 트랙 카드의 인라인 `<select>`가 선택 즉시 Firestore 진도를 저장해 모바일 스크롤·터치 중 실수로 진도가 바뀔 위험이 있었고, 일반 사용자 헤더에도 계정 이메일이 노출되고 있었음.

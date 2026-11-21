@@ -53,6 +53,8 @@ function isPartialTranscribeEnabled(): boolean {
   }
 }
 
+type HomeFocus = "lecture" | null;
+
 interface ActiveReviewState {
   review: SessionReviewData;
   sttFinal?: SttFinalData;
@@ -91,6 +93,7 @@ export const App: React.FC = () => {
     retry: () => void;
   } | null>(null);
   const [homeRefreshKey, setHomeRefreshKey] = useState<number>(0);
+  const [pendingHomeFocus, setPendingHomeFocus] = useState<HomeFocus>(null);
 
   // Placeholders for prompts
   const [placeholders, setPlaceholders] = useState<PromptPlaceholders>(DEFAULT_PROMPT_PLACEHOLDERS);
@@ -469,6 +472,8 @@ export const App: React.FC = () => {
         user={user}
         goals={goals}
         placeholders={placeholders}
+        focus={pendingHomeFocus}
+        onFocusHandled={() => setPendingHomeFocus(null)}
         onUpdateGoalProgress={handleUpdateGoalProgress}
         onGoalsChanged={refreshGoals}
         onStartCall={handleStartCall}
@@ -511,6 +516,7 @@ export const App: React.FC = () => {
           lessonTitle={activeReviewData.lessonTitle}
           review={activeReviewData.review}
           sttFinal={activeReviewData.sttFinal}
+          onOpenPodcast={() => setPendingHomeFocus("lecture")}
           onClose={() => {
             setActiveReviewData(null);
             setHomeRefreshKey((prev) => prev + 1);

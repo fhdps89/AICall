@@ -434,7 +434,7 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
               }}
               className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-sm font-semibold text-amber-300 flex items-center gap-1.5 transition cursor-pointer"
             >
-              <span>🎧 아침 복습 오디오 듣기</span>
+              <span>오늘 강의 보기</span>
             </button>
           ) : (
             <div />

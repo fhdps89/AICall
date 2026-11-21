@@ -57,6 +57,8 @@ interface HomeScreenProps {
   user: User;
   goals: GoalData[];
   placeholders: PromptPlaceholders;
+  focus?: "lecture" | null;
+  onFocusHandled?: () => void;
   onUpdateGoalProgress: (goalId: string, nextLessonIndex: number) => Promise<void>;
   /** Re-read goals from Firestore (after the coach changed a deadline / lesson / status). */
   onGoalsChanged?: () => Promise<void>;
@@ -69,6 +71,8 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   user,
   goals,
   placeholders,
+  focus = null,
+  onFocusHandled,
   onUpdateGoalProgress,
   onGoalsChanged,
   onStartCall,
@@ -188,6 +192,14 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
 
   const handleLessonChange = async (goalId: string, newLessonIndex: number) => {
     await onUpdateGoalProgress(goalId, newLessonIndex);
+  };
+
+  const handleLectureAutoOpenHandled = () => {
+    if (focus !== "lecture") return;
+    requestAnimationFrame(() => {
+      lectureCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    onFocusHandled?.();
   };
 
 // B-9 Requirement 2: OPIc 시험 날짜(deadline) 1~2주 전 모의고사 배치 자동 제안 (승인 전엔 plan/goals 미반영)
@@ -468,6 +480,8 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
         <div ref={lectureCardRef}>
           <MorningLectureCard
             user={user}
+            autoOpen={focus === "lecture"}
+            onAutoOpenHandled={focus === "lecture" ? handleLectureAutoOpenHandled : undefined}
             onOpenQuiz={async () => {
               await loadMistakes();
               setShowQuizModal(true);
