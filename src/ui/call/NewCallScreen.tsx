@@ -16,6 +16,7 @@ import { createLiveProvider } from "../../services/providers";
 import { LiveCommand, LiveProvider, LiveTranscriptItem } from "../../services/providers/types";
 import { getChunkRecorder } from "../../services/recording/chunkRecorder";
 import { formatWrittenAnswer, WRITTEN_ANSWER_MAX_LENGTH } from "./micCheck";
+import { RECONNECT_NOTICE_DELAY_MS, resolveReconnectUiState } from "./reconnectNotice";
 import {
   PhoneOff,
   Mic,
@@ -85,6 +86,20 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
   const [micWarning, setMicWarning] = useState<string | null>(null);
   const [writtenText, setWrittenText] = useState<string>("");
   const [writtenSendError, setWrittenSendError] = useState<string | null>(null);
+  const [noticeVisible, setNoticeVisible] = useState(false);
+  useEffect(() => {
+    if (status !== "reconnecting") {
+      setNoticeVisible(false);
+      return;
+    }
+    setNoticeVisible(false);
+    const t = setTimeout(() => setNoticeVisible(true), RECONNECT_NOTICE_DELAY_MS);
+    return () => clearTimeout(t);
+  }, [status]);
+  const { showReconnectNotice, displayStatus } = resolveReconnectUiState({
+    status,
+    noticeVisible,
+  }); // displayStatus는 표시 전용
   const sessionCreatedRef = useRef<boolean>(false);
   const sessionCreatePromiseRef = useRef<Promise<void> | null>(null);
   const hasMicRecordingRef = useRef<boolean>(false);
@@ -434,21 +449,21 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
 
         {/* Status Pill */}
         <div className="flex items-center gap-2">
-          {status === "reconnecting" ? (
+          {displayStatus === "reconnecting" ? (
             <div className="px-3 py-1.5 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-bold animate-pulse flex items-center gap-1.5 shadow-lg shadow-amber-500/10">
               <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
               <span>연결 유지 중</span>
             </div>
-          ) : status === "connected" ? (
+          ) : displayStatus === "connected" ? (
             <div className="px-3 py-1.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-xs font-bold flex items-center gap-1.5">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
               <span>{formatTime(callDuration)}</span>
             </div>
-          ) : status === "error" ? (
+          ) : displayStatus === "error" ? (
             <div className="px-3 py-1.5 rounded-full bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs font-bold">
               연결 오류
             </div>
-          ) : status === "closed" ? (
+          ) : displayStatus === "closed" ? (
             <div className="px-3 py-1.5 rounded-full bg-slate-800 text-slate-400 text-xs font-medium">
               통화 종료
             </div>
@@ -483,7 +498,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
         )}
 
         {/* Reconnect notice banner */}
-        {status === "reconnecting" && (
+        {showReconnectNotice && (
           <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs text-center font-medium animate-pulse">
             연결이 잠깐 끊겨 다시 잇는 중이에요. 대화는 그대로 이어져요.
           </div>
@@ -518,7 +533,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
           <p className="text-xs text-slate-400 mt-3 font-medium text-center">
             {isSpeakingModel
               ? "튜터가 답변하는 중..."
-              : status === "connected"
+              : displayStatus === "connected"
               ? textOnly
                 ? "마이크 없이 연결됨 · 아래 입력창에 영어로 답해 보세요"
                 : "자유롭게 영어로 말해 보세요 (다 말했으면 '답변 끝')"
