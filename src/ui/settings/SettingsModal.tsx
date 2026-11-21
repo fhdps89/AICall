@@ -30,6 +30,7 @@ import { friendlyError } from "../common/friendlyError";
 import { FeedSettingsPanel } from "./FeedSettingsPanel";
 import { UsagePanel } from "./UsagePanel";
 import { GeminiKeyPanel } from "./GeminiKeyPanel";
+import { ADVANCED_TOGGLE_TEXT, KEY_TAB_LABEL } from "./settingsText";
 import { Sparkles, Bell } from "lucide-react";
 
 interface SettingsModalProps {
@@ -44,13 +45,13 @@ interface SettingsModalProps {
 type SettingsTabId = "prompts" | "models" | "recordings" | "feed" | "usage" | "coach" | "geminiKey";
 
 const SETTINGS_TABS: ReadonlyArray<{ id: SettingsTabId; label: string; devOnly?: boolean }> = [
-  { id: "prompts", label: "프롬프트 변수 입력 (빈칸 채우기)" },
+  { id: "prompts", label: "내 정보 입력" },
   { id: "models", label: "개발자: 모델·보안", devOnly: true },
   { id: "recordings", label: "녹음 보관함" },
-  { id: "feed", label: "그록봇 피드" },
+  { id: "feed", label: "아침 강의 알림" },
   { id: "usage", label: "사용량·예상 비용" },
   { id: "coach", label: "코치 알림 (넛지)" },
-  { id: "geminiKey", label: "Gemini 키" },
+  { id: "geminiKey", label: KEY_TAB_LABEL, devOnly: true },
 ];
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -226,11 +227,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <Sliders className="w-4 h-4" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-white">환경 설정 & 프롬프트 변수</h2>
-              <p className="text-xs text-slate-400">튜터 프롬프트 슬롯 채우기 및 학습 설정</p>
+              <h2 className="text-base font-bold text-white">설정</h2>
+              <p className="text-xs text-slate-400">내 정보와 학습 설정을 바꿀 수 있어요</p>
             </div>
           </div>
           <button
+            type="button"
+            aria-label="닫기"
             onClick={onClose}
             className="w-8 h-8 rounded-lg bg-slate-800/80 text-slate-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
           >
@@ -328,7 +331,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
             </div>
           ) : activeTab === "geminiKey" ? (
-            <GeminiKeyPanel userId={userId} />
+            devMode ? <GeminiKeyPanel userId={userId} /> : null
           ) : activeTab === "models" && !devMode ? null : activeTab === "usage" ? (
             <UsagePanel userId={userId} />
           ) : activeTab === "feed" ? (
@@ -336,12 +339,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           ) : activeTab === "prompts" ? (
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="p-3 rounded-lg bg-amber-500/5 border border-amber-500/20 text-xs text-amber-300">
-                원문 튜터 프롬프트는 그대로 보존되며, 아래 입력한 내용이 통화 시 프롬프트 내 대괄호 <code>[직무]</code>, <code>[Survey topics]</code> 등에 자동으로 주입됩니다.
+                여기 적은 내용은 통화할 때 튜터에게 전달돼요. 내 직무·관심 주제·약점에 맞춰 질문과 교정을 받을 수 있어요.
+                {devMode && (
+                  <span className="block mt-1 font-mono text-amber-300/70">
+                    개발자 참고: 원문 튜터 프롬프트는 그대로 두고 통화 시 대괄호 [직무], [Survey topics] 등에 자동으로 넣어요.
+                  </span>
+                )}
               </div>
 
               <div>
                 <label className="text-xs font-semibold text-slate-300 block mb-1">
-                  1. 나의 직무 (공통 [직무])
+                  1. 나의 직무
                 </label>
                 <input
                   type="text"
@@ -354,7 +362,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
               <div>
                 <label className="text-xs font-semibold text-slate-300 block mb-1">
-                  2. OPIc 서베이 선택 주제 ([Survey topics I chose])
+                  2. OPIc 서베이에서 고른 주제
                 </label>
                 <input
                   type="text"
@@ -367,7 +375,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
               <div>
                 <label className="text-xs font-semibold text-slate-300 block mb-1">
-                  3. 필리 조선소 실무 역할 ([My role in Philly])
+                  3. 필리 조선소에서 맡을 역할
                 </label>
                 <input
                   type="text"
@@ -437,7 +445,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </button>
               </div>
             </form>
-          ) : activeTab === "models" ? (
+          ) : activeTab === "models" && devMode ? (
             <div className="space-y-4">
               <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 space-y-3">
                 <div className="flex items-center gap-2 text-slate-200 text-xs font-bold">
@@ -643,18 +651,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           )}
         </div>
 
-        {/* 개발자 메뉴 (기본 꺼짐) */}
+        {/* 고급 설정 보기 토글 (기본 꺼짐) */}
         <div className="px-5 py-2.5 border-t border-slate-800 flex items-center justify-end">
           <button
             type="button"
             onClick={() => {
               const next = !devMode;
               setDevMode(next);
-              if (!next && activeTab === "models") setActiveTab("prompts");
+              if (!next && SETTINGS_TABS.some((t) => t.id === activeTab && t.devOnly)) {
+                setActiveTab("prompts");
+              }
             }}
             className="text-[11px] text-slate-500 hover:text-slate-300 cursor-pointer"
           >
-            {devMode ? "개발자 메뉴 끄기" : "개발자 메뉴"}
+            {devMode ? ADVANCED_TOGGLE_TEXT.hide : ADVANCED_TOGGLE_TEXT.show}
           </button>
         </div>
       </div>

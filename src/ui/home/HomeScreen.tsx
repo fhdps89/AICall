@@ -345,7 +345,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
             <button
               onClick={onOpenSettings}
               className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700/80 text-slate-300 hover:text-white transition-colors cursor-pointer flex items-center gap-1.5 text-xs"
-              title="설정 및 프롬프트 변수"
+              title="설정"
             >
               <Settings className="w-4 h-4 text-amber-400" />
               <span className="hidden sm:inline">설정</span>
@@ -900,7 +900,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
       </main>
 
       {/* Tutor Prompt Viewer Modal */}
-      {showPromptModal && selectedPromptGoal && (
+      {devMode && showPromptModal && selectedPromptGoal && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="w-full max-w-3xl bg-[#161D2A] border border-slate-800 rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
             <div className="p-5 border-b border-slate-800 flex items-center justify-between">
@@ -953,7 +953,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
       )}
 
       {/* 1-F STT quality benchmark */}
-      {showSttBench && <SttBenchmarkModal user={user} onClose={() => setShowSttBench(false)} />}
+      {devMode && showSttBench && <SttBenchmarkModal user={user} onClose={() => setShowSttBench(false)} />}
 
       {/* B-10 Keep import */}
       {showKeepImport && (

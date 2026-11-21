@@ -1,6 +1,8 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { SessionData, finalizeCallSession } from "../../services/firebase/db";
+import { getAllPendingChunks } from "../../services/recording/chunkIndexedDb";
 import {
+  countSessionChunks,
   describeRecordingState,
   formatRecordingChunksSummary,
   formatSessionChipLabel,
@@ -36,14 +38,37 @@ export const UnfinishedSessionModal: React.FC<UnfinishedSessionModalProps> = ({
     unfinishedSessions[0]?.id ?? null
   );
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [localIndicesBySession, setLocalIndicesBySession] = useState<Record<string, number[]>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    getAllPendingChunks()
+      .then((chunks) => {
+        if (cancelled) return;
+        const grouped: Record<string, number[]> = {};
+        for (const chunk of chunks) {
+          if (!grouped[chunk.sessionId]) grouped[chunk.sessionId] = [];
+          grouped[chunk.sessionId].push(chunk.index);
+        }
+        setLocalIndicesBySession(grouped);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const selectedSession =
     unfinishedSessions.find((s) => s.id === selectedId) || unfinishedSessions[0] || null;
 
   if (!selectedSession) return null;
 
-  const chunksSummary = formatRecordingChunksSummary(selectedSession.recordingChunks);
-  const recordingState = describeRecordingState(selectedSession);
+  const counts = countSessionChunks(
+    selectedSession.recordingChunks,
+    localIndicesBySession[selectedSession.id] ?? []
+  );
+  const chunksSummary = formatRecordingChunksSummary(counts.total);
+  const recordingState = describeRecordingState(selectedSession, counts);
   const transcriptCount = selectedSession.liveTranscript?.length || 0;
   const partialSttCount = selectedSession.sttPartial?.length || 0;
 
@@ -97,6 +122,8 @@ export const UnfinishedSessionModal: React.FC<UnfinishedSessionModalProps> = ({
     <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
       <div className="bg-[#161D2A] border border-amber-500/40 rounded-2xl max-w-lg w-full p-5 sm:p-6 shadow-2xl relative text-slate-200 animate-in fade-in zoom-in-95 duration-200">
         <button
+          type="button"
+          aria-label="닫기"
           onClick={onClose}
           className="absolute top-4 right-4 text-slate-400 hover:text-slate-200 p-1 cursor-pointer transition-colors"
         >
@@ -104,7 +131,7 @@ export const UnfinishedSessionModal: React.FC<UnfinishedSessionModalProps> = ({
         </button>
 
         {/* Header Banner */}
-        <div className="flex items-center gap-3 mb-4">
+        <div className="flex items-center gap-3 mb-4 pr-8">
           <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 shrink-0">
             <AlertCircle className="w-6 h-6" />
           </div>

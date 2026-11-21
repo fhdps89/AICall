@@ -15,15 +15,20 @@ import {
   batchInitGoals,
   updateGoalProgress,
   getUnfinishedSessions,
+  getSessionById,
   markSessionPendingReview,
+  markSessionUsageRecorded,
   checkAndMarkInterruptedSessions,
+  getKSTToday,
   GoalData,
   UserProfileData,
   SessionData,
   SessionReviewData,
   SttFinalData,
 } from "./services/firebase/db";
-import { retryPendingUploads } from "./services/recording/chunkIndexedDb";
+import { getAllPendingChunks, retryPendingUploads } from "./services/recording/chunkIndexedDb";
+import { createRecoveredUsageRecorder } from "./services/session/recoveredUsage";
+import { recordUsage } from "./services/usage/usageService";
 import { runPostCallReview } from "./services/review/reviewPipeline";
 import type { ReviewTiming } from "./services/review/reviewTiming";
 import { DEFAULT_GOALS } from "./data/defaultGoals";
@@ -72,6 +77,16 @@ interface ActiveReviewState {
   lessonTitle: string;
   sessionId: string;
 }
+
+// 새로고침으로 끊긴 통화는 통화 종료(handleHangUp)를 거치지 않아 통화 횟수·분이 빠진다.
+// 모듈 수준 실행기로 같은 sessionId의 동시 중복 호출을 막고 한 번만 기록한다.
+const recordRecoveredUsageOnce = createRecoveredUsageRecorder({
+  getSession: getSessionById,
+  markRecorded: markSessionUsageRecorded,
+  recordUsage,
+  todayKst: getKSTToday,
+  onError: (err) => console.warn("[App] recovered call usage not recorded:", err),
+});
 
 export const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(null);
@@ -463,17 +478,23 @@ export const App: React.FC = () => {
 
     // Otherwise generate post-call review for the unfinished session
     const sessionUser = user;
+    void recordRecoveredUsageOnce(sessionUser.uid, session.id);
+
     const run = async () => {
       setReviewFailure(null);
       setIsGeneratingReview(true);
       setReviewProgressStep("1/3 저장된 녹음을 정리하고 받아쓰는 중...");
       try {
+        const localChunks = (await getAllPendingChunks())
+          .filter((c) => c.sessionId === session.id)
+          .map((c) => ({ index: c.index, blob: c.blob }));
         const result = await runPostCallReview({
           userId: sessionUser.uid,
           sessionId: session.id,
           goal: matchedGoal,
           lessonIndex: session.lessonIndex,
           placeholders,
+          localChunks,
           liveTranscript: session.liveTranscript,
           onProgress: (step) => setReviewProgressStep(step),
         });

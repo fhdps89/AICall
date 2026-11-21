@@ -357,7 +357,7 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
                         <div>
                           <div className="flex items-center justify-between mb-1.5">
                             <span className="text-xs font-semibold text-red-400">
-                              내가 한 말 (녹음 전사 원본)
+                              내가 한 말
                             </span>
                             <span className="text-[10px] font-mono text-slate-500">
                               {formatSourceLabel(m.sourceStt || sttFinal?.sourceStt)}

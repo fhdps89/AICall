@@ -28,14 +28,48 @@ export interface RecordingStateDescription {
   text: string;
 }
 
+export interface SessionChunkCounts {
+  total: number;
+  uploaded: number;
+  localPending: number;
+}
+
+/**
+ * 원격 메타데이터와 로컬 대기 조각 인덱스를 합쳐 전체 조각 수·업로드 완료 수·로컬 대기 수를 계산한다.
+ */
+export function countSessionChunks(
+  remote: readonly Pick<RecordingChunkMeta, "index" | "uploaded">[] | undefined,
+  localIndices: readonly number[]
+): SessionChunkCounts {
+  const localSet = new Set(localIndices);
+  const remoteUploadedByIndex = new Map<number, boolean>();
+  for (const chunk of remote ?? []) {
+    const prev = remoteUploadedByIndex.get(chunk.index);
+    remoteUploadedByIndex.set(chunk.index, prev === true || chunk.uploaded !== false);
+  }
+  const allIndices = new Set<number>([...remoteUploadedByIndex.keys(), ...localSet]);
+  let uploaded = 0;
+  for (const [idx, isUploaded] of remoteUploadedByIndex.entries()) {
+    if (isUploaded && !localSet.has(idx)) {
+      uploaded += 1;
+    }
+  }
+  return {
+    total: allIndices.size,
+    uploaded,
+    localPending: localSet.size,
+  };
+}
+
 /**
  * 끝나지 않은 통화의 녹음·대화 로그 저장 상태를 사용자 안내 문구로 정리한다.
  */
 export function describeRecordingState(
-  session: Pick<SessionData, "recordingChunks" | "liveTranscript">
+  session: Pick<SessionData, "recordingChunks" | "liveTranscript">,
+  counts?: SessionChunkCounts
 ): RecordingStateDescription {
   const chunks = session.recordingChunks ?? [];
-  const chunkCount = chunks.length;
+  const chunkCount = counts ? counts.total : chunks.length;
   const transcriptCount = session.liveTranscript?.length ?? 0;
 
   if (chunkCount === 0) {
@@ -51,7 +85,9 @@ export function describeRecordingState(
     };
   }
 
-  const pendingCount = chunks.filter((chunk) => chunk.uploaded === false).length;
+  const pendingCount = counts
+    ? Math.max(0, counts.total - counts.uploaded)
+    : chunks.filter((chunk) => chunk.uploaded === false).length;
   if (pendingCount > 0) {
     return {
       tone: "uploading",

@@ -317,6 +317,7 @@ export interface SessionData {
   lessonIndex: number;
   startedAt: string;
   endedAt?: string;
+  usageRecordedAt?: string;
   lastChunkAt?: string;
   status: "in-progress" | "pending_review" | "done";
   liveTranscript: Array<{ role: "user" | "model"; text: string; timestamp?: number }>;
@@ -524,6 +525,22 @@ export async function markSessionPendingReview(userId: string, sessionId: string
     await updateDoc(sessionRef, {
       status: "pending_review",
       updatedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `users/${userId}/sessions/${sessionId}`);
+  }
+}
+
+/**
+ * Mark a recovered session as having had its call usage recorded so it is counted at most once
+ */
+export async function markSessionUsageRecorded(userId: string, sessionId: string): Promise<void> {
+  const sessionRef = doc(db, "users", userId, "sessions", sessionId);
+  const now = new Date().toISOString();
+  try {
+    await updateDoc(sessionRef, {
+      usageRecordedAt: now,
+      updatedAt: now,
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `users/${userId}/sessions/${sessionId}`);
