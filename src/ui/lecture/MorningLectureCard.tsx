@@ -8,18 +8,32 @@ import { LectureModal } from "./LectureModal";
 
 interface MorningLectureCardProps {
   user: User;
+  autoOpen?: boolean;          // if first refresh is ready, open LectureModal
+  onAutoOpenHandled?: () => void;
   onOpenQuiz: () => void;
   onLectureCompleted?: () => void;
 }
 
 /** B-7 Home card 「오늘 아침 강의」 */
-export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({ user, onOpenQuiz, onLectureCompleted }) => {
+export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
+  user,
+  autoOpen = false,
+  onAutoOpenHandled,
+  onOpenQuiz,
+  onLectureCompleted,
+}) => {
   const [lecture, setLecture] = useState<LectureDoc | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const pollRef = useRef<number | null>(null);
+  const autoOpenHandledRef = useRef(false);
+  const autoOpenRef = useRef(Boolean(autoOpen));
+  autoOpenRef.current = Boolean(autoOpen);
+  const onAutoOpenHandledRef = useRef(onAutoOpenHandled);
+  onAutoOpenHandledRef.current = onAutoOpenHandled;
+  const firstRefreshDoneRef = useRef(false);
   const today = getKSTToday();
 
   const refresh = async () => {
@@ -37,11 +51,37 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({ user, on
   };
 
   useEffect(() => {
-    refresh();
+    let cancelled = false;
+    const finalizeAutoOpen = (l: LectureDoc | null) => {
+      if (cancelled) return;
+      firstRefreshDoneRef.current = true;
+      if (autoOpenRef.current && !autoOpenHandledRef.current) {
+        autoOpenHandledRef.current = true;
+        if (l?.status === "ready" && l.audioUrl) {
+          setOpen(true);
+        }
+        onAutoOpenHandledRef.current?.();
+      }
+    };
+
+    refresh()
+      .then((l) => finalizeAutoOpen(l))
+      .catch(() => finalizeAutoOpen(null));
+
     return () => {
+      cancelled = true;
       if (pollRef.current) window.clearInterval(pollRef.current);
     };
   }, [user.uid]);
+
+  useEffect(() => {
+    if (!autoOpen || !firstRefreshDoneRef.current || autoOpenHandledRef.current) return;
+    autoOpenHandledRef.current = true;
+    if (lecture?.status === "ready" && lecture.audioUrl) {
+      setOpen(true);
+    }
+    onAutoOpenHandledRef.current?.();
+  }, [autoOpen, lecture]);
 
   useEffect(() => {
     if (lecture?.status === "generating" && !pollRef.current) {

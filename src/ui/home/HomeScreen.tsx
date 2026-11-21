@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { friendlyError } from "../common/friendlyError";
 import { useDevMode } from "../../data/devMode";
 import { User } from "firebase/auth";
@@ -51,11 +51,14 @@ import { syncFeed } from "../../services/feed/feedService";
 import { KeepImportModal } from "../keep/KeepImportModal";
 import { SttBenchmarkModal } from "../sttBench/SttBenchmarkModal";
 import { CoachModal } from "../coach/CoachModal";
+import { LessonChangeSheet } from "./LessonChangeSheet";
 
 interface HomeScreenProps {
   user: User;
   goals: GoalData[];
   placeholders: PromptPlaceholders;
+  focus?: "lecture" | null;
+  onFocusHandled?: () => void;
   onUpdateGoalProgress: (goalId: string, nextLessonIndex: number) => Promise<void>;
   /** Re-read goals from Firestore (after the coach changed a deadline / lesson / status). */
   onGoalsChanged?: () => Promise<void>;
@@ -68,6 +71,8 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   user,
   goals,
   placeholders,
+  focus = null,
+  onFocusHandled,
   onUpdateGoalProgress,
   onGoalsChanged,
   onStartCall,
@@ -169,6 +174,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
 
   const [showMore, setShowMore] = useState<boolean>(false);
   const [overrideGoalId, setOverrideGoalId] = useState<string | null>(null);
+  const [lessonChangeGoal, setLessonChangeGoal] = useState<GoalData | null>(null);
+  const lectureCardRef = useRef<HTMLDivElement>(null);
+  const goalsSectionRef = useRef<HTMLDivElement>(null);
 
   // Compute goal for today based on plan.weeklyPattern
   const currentPattern = userPlan?.weeklyPattern || DEFAULT_WEEKLY_PATTERN;
@@ -184,6 +192,14 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
 
   const handleLessonChange = async (goalId: string, newLessonIndex: number) => {
     await onUpdateGoalProgress(goalId, newLessonIndex);
+  };
+
+  const handleLectureAutoOpenHandled = () => {
+    if (focus !== "lecture") return;
+    requestAnimationFrame(() => {
+      lectureCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    onFocusHandled?.();
   };
 
 // B-9 Requirement 2: OPIc 시험 날짜(deadline) 1~2주 전 모의고사 배치 자동 제안 (승인 전엔 plan/goals 미반영)
@@ -255,9 +271,11 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
                   </span>
                 )}
               </div>
-              <p className="text-[11px] text-slate-400 font-mono truncate max-w-[200px] sm:max-w-none">
-                {user.email}
-              </p>
+              {devMode && (
+                <p className="text-[11px] text-slate-400 font-mono truncate max-w-[200px] sm:max-w-none">
+                  {user.email}
+                </p>
+              )}
             </div>
           </div>
 
@@ -315,7 +333,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
             )}
           </div>
         )}
-        {/* 오늘 할 것: ① 오늘 수업 통화 → ② 복습 퀴즈 */}
+        {/* 오늘 할 것: ① 오늘 수업 통화 → ② 오늘 아침 강의 → ③ 복습 퀴즈 */}
         <h2 className="text-sm font-bold text-white">오늘 할 것</h2>
         {/* Today's Class Card (오늘 수업 카드) */}
         <section className="bg-gradient-to-br from-[#161D2A] via-[#151C28] to-[#121824] border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-xl relative overflow-hidden">
@@ -340,6 +358,37 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
               <p className="text-xs text-slate-400 max-w-md mx-auto">
                 새로운 진도 대신 이번 주에 기록된 실수와 주요 핵심 표현들을 복습하고 다음 주 학습을 준비합니다.
               </p>
+              <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowQuizModal(true)}
+                  disabled={dueMistakes.length === 0}
+                  className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 text-xs font-black transition-colors cursor-pointer"
+                >
+                  오늘 퀴즈
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    lectureCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
+                  }
+                  className="px-4 py-2 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30 text-xs font-bold transition-colors cursor-pointer"
+                >
+                  오늘 강의
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowMore(true);
+                    setTimeout(() => {
+                      goalsSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+                    }, 0);
+                  }}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white border border-slate-700 text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  트랙 골라 통화
+                </button>
+              </div>
             </div>
           ) : todayGoal && currentLesson ? (
             <div className="relative z-10 space-y-5">
@@ -368,19 +417,20 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
 
               {/* Lesson picker & prompt preview */}
               <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="space-y-1">
-                  <span className="text-[11px] text-slate-400 font-medium block">진도 변경:</span>
-                  <select
-                    value={currentLesson.index}
-                    onChange={(e) => handleLessonChange(todayGoal.id, Number(e.target.value))}
-                    className="bg-[#121824] border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-400"
+                <div className="flex items-center justify-between sm:justify-start gap-3">
+                  <div>
+                    <span className="text-[11px] text-slate-400 font-medium block">현재 진도</span>
+                    <span className="text-xs font-semibold text-slate-200">
+                      {currentLesson.index}과. {currentLesson.title}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setLessonChangeGoal(todayGoal)}
+                    className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-xs font-semibold transition-colors cursor-pointer border border-slate-700/60 shrink-0"
                   >
-                    {todayGoal.lessons.map((l) => (
-                      <option key={l.index} value={l.index}>
-                        {l.index}과: {l.title}
-                      </option>
-                    ))}
-                  </select>
+                    진도 바꾸기
+                  </button>
                 </div>
 
                 {devMode && (
@@ -425,6 +475,20 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
             </div>
           )}
         </section>
+
+        {/* B-7 Morning Lecture Card (오늘 아침 강의) */}
+        <div ref={lectureCardRef}>
+          <MorningLectureCard
+            user={user}
+            autoOpen={focus === "lecture"}
+            onAutoOpenHandled={focus === "lecture" ? handleLectureAutoOpenHandled : undefined}
+            onOpenQuiz={async () => {
+              await loadMistakes();
+              setShowQuizModal(true);
+            }}
+            onLectureCompleted={() => loadMistakes()}
+          />
+        </div>
 
         {/* B-5 Spaced Repetition & Due Mistakes Card (간격 반복 & 오늘 복습) */}
         <section className="bg-[#161D2A] border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-lg space-y-3">
@@ -610,21 +674,10 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
             onClick={() => setShowMore((v) => !v)}
             className="w-full px-4 py-3 flex items-center justify-between text-xs font-semibold text-slate-300 hover:text-white cursor-pointer"
           >
-            <span>더 보기 · 아침 강의 · 주간 루틴 · 트랙 바꾸기</span>
+            <span>더 보기 · 주간 루틴 · 트랙 바꾸기 · 코치 소개</span>
             <ChevronRight className={`w-4 h-4 transition-transform ${showMore ? "rotate-90" : ""}`} />
           </button>
-          {/* Kept mounted (only hidden) so the lecture card keeps syncing as before */}
           <div className={showMore ? "p-4 pt-0 space-y-6" : "hidden"}>
-        {/* B-7 Morning Lecture Card (오늘 아침 강의) */}
-        <MorningLectureCard
-          user={user}
-          onOpenQuiz={async () => {
-            await loadMistakes();
-            setShowQuizModal(true);
-          }}
-          onLectureCompleted={() => loadMistakes()}
-        />
-
         {/* B-9 AI Coach Card */}
         <section className="bg-gradient-to-r from-amber-500/10 via-[#161D2A] to-[#161D2A] border border-amber-500/30 rounded-2xl p-4 sm:p-5 shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-center gap-3.5">
@@ -698,6 +751,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
         </section>
 
         {/* 4 Goals Overview (전체 4대 목표 현황) */}
+        <div ref={goalsSectionRef}>
         <section className="space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-bold text-white flex items-center gap-2">
@@ -737,18 +791,14 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
                   </div>
 
                   <div className="space-y-2 pt-2 border-t border-slate-800/60">
-                    <div className="flex items-center justify-between text-xs">
-                      <select
-                        value={nextIdx}
-                        onChange={(e) => handleLessonChange(goal.id, Number(e.target.value))}
-                        className="bg-[#121824] border border-slate-700 rounded-lg px-2.5 py-1 text-[11px] text-slate-300 focus:outline-none focus:border-amber-400"
+                    <div className="flex items-center justify-between text-xs gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setLessonChangeGoal(goal)}
+                        className="px-3 py-1.5 rounded-lg bg-[#121824] hover:bg-slate-800 border border-slate-700 text-xs text-slate-200 hover:text-white font-semibold transition-colors cursor-pointer"
                       >
-                        {goal.lessons.map((l) => (
-                          <option key={l.index} value={l.index}>
-                            {l.index}과: {l.title.slice(0, 24)}...
-                          </option>
-                        ))}
-                      </select>
+                        진도 바꾸기
+                      </button>
 
                       {devMode && (
                       <button
@@ -783,6 +833,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
             })}
           </div>
         </section>
+        </div>
           </div>
         </section>
       </main>
@@ -862,6 +913,16 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
           onFinished={() => {
             loadMistakes();
           }}
+        />
+      )}
+
+      {/* Lesson Change Confirmation Sheet */}
+      {lessonChangeGoal && (
+        <LessonChangeSheet
+          goal={lessonChangeGoal}
+          currentIndex={lessonChangeGoal.nextLessonIndex || 1}
+          onConfirm={(newLessonIndex) => handleLessonChange(lessonChangeGoal.id, newLessonIndex)}
+          onClose={() => setLessonChangeGoal(null)}
         />
       )}
 
