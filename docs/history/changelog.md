@@ -4,6 +4,15 @@
 
 ---
 
+### [2026-11-22 KST] 핫픽스 — 배포 서버 기동 실패(ERR_MODULE_NOT_FOUND lecturePick) 수정 (브랜치 `englead/hotfix-server-imports-20261122`)
+- **배경**: PR #39(main `970605d`) 머지 후 AI Studio 재게시가 「Failed to publish app」으로 실패했다. 라이브는 이전 번들(`index-Lqzg9F7x.js`) 그대로.
+- **원인**: #39에서 `server.ts`가 `src/services/lecture/lectureSource.ts`를 새로 불러오는데, 이 파일은 `./lecturePick`, `../review/speechCheck`를 확장자 없이 import한다. 배포 서버는 `node server.ts`(tsx 없음)라 확장자 없는 경로를 찾지 못해 컨테이너가 exit(1). 테스트·dev는 tsx라 통과했다.
+- **수정**: `lectureSource.ts`의 두 import에 `.ts` 확장자를 붙이고 `tsconfig.json`의 `allowImportingTsExtensions`를 `true`로 바꿈(`noEmit: true`라 안전, 서버 쪽 파일은 이미 `.ts` 확장자 사용).
+- **방어 조치 (Safeguards)**: `tests/serverNodeImports.test.ts` 추가 — `server.ts`·`server/*.ts`가 불러오는 `src/` 모듈을 순수 node로 import해 실패하면 테스트가 깨짐(수정 전 코드에서 같은 오류로 실패 확인).
+- **검증**: `npm test`(364 통과), `npm run lint`, `npx tsc --noEmit`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build`, 로컬 `node server.ts` 기동 확인. 작성: Engineering Lead(직접 수정, 4줄).
+
+---
+
 ### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 2단계: 통화 후 보완 전사 분석 패스로 놓친 실수 보강 (브랜치 `englead/lecture-source-20261122`)
 - **배경**: 1단계에서 세션 복기(`review.mistakes`)를 재사용·백필하도록 고쳤으나, 1차 복기가 통화 중 놓친 나머지 비자연스러운/틀린 사용자 발화를 추가로 잡아내야 한다(기본 켜짐).
 - **원인**: 1차 `/api/review` 한 번의 응답에 요약·핵심표현·복습판정·실수가 함께 담기면서 긴 통화 전사의 나머지 오류들이 빠질 수 있었다.

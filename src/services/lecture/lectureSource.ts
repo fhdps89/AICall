@@ -3,9 +3,9 @@
  * validate phrases against the session's user transcript, and plan backfills.
  * Kept free of firebase so node tests can load it.
  */
-import { sessionCallSeconds, SHORT_SESSION_SEC, isQaMistake } from "./lecturePick";
-import type { SessionTiming } from "./lecturePick";
-import { FILLER_WORDS } from "../review/speechCheck";
+import { sessionCallSeconds, SHORT_SESSION_SEC, isQaMistake } from "./lecturePick.ts";
+import type { SessionTiming } from "./lecturePick.ts";
+import { FILLER_WORDS } from "../review/speechCheck.ts";
 
 export const MAX_NEW_FROM_SESSIONS = 20;
 export const SUPPLEMENT_MAX_ITEMS = 8;
