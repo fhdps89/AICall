@@ -43,6 +43,24 @@ export type GoalProgressPatch = {
 
 export type GoalIdx = Record<string, GoalProgressPatch>;
 
+export interface PostponeInfoItem {
+  goalId: string;
+  name: string;
+  lessonIndex: number;
+  nextDate: string | null;
+}
+
+export interface PostponeInfo {
+  reviewDay: boolean;
+  items: PostponeInfoItem[];
+}
+
+export interface CoachInfoCard {
+  kind: "postpone";
+  title: string;
+  lines: string[];
+}
+
 export type ProgressResult =
   | {
       type: "proposal";
@@ -50,6 +68,11 @@ export type ProgressResult =
       reply: string;
       before: { goals: GoalIdx };
       after: { goals: GoalIdx };
+    }
+  | {
+      type: "info";
+      reply: string;
+      info: PostponeInfo;
     }
   | {
       type: "noop" | "clarify" | "invalid" | "undo_request";
@@ -93,6 +116,8 @@ const WEEKDAY_KO: Record<DayKey, string> = {
 };
 
 const CALENDAR_INVARIANT = "구글 캘린더 「영어 코치」 일정은 바뀌지 않습니다";
+export const APPROVE_HINT = "카드에서 [승인]하거나 '응'이라고 답해 주세요.";
+export const QA_PREVIEW_HINT = "QA 미리보기라 실제 진도에는 반영하지 않아요.";
 
 const BACK_RE = /미뤄|미루|늦춰|연기/;
 const RESET_RE = /원래\s*(속도|페이스)|(하루|1과|한\s*과)씩으로/;
@@ -444,18 +469,27 @@ function buildPostponeResult(args: ProgressArgs, ctx: ProgressContext): Progress
   if ("clarify" in resolved) {
     const activeGoals = ctx.goals.filter((g) => (g.status ?? "active") === "active");
     const upcoming: string[] = [];
+    const infoItems: PostponeInfoItem[] = [];
     for (const goal of activeGoals) {
+      const name = goalShortName(goal.id, ctx.goals);
       const nextDate = nextLessonDate(ctx.weeklyPattern, goal.id, ctx.todayKst, true);
+      infoItems.push({
+        goalId: goal.id,
+        name,
+        lessonIndex: goal.nextLessonIndex,
+        nextDate,
+      });
       if (nextDate) {
         upcoming.push(
-          `${formatKstDay(nextDate)} 23:00 ${goalShortName(goal.id, ctx.goals)} ${goal.nextLessonIndex}과`
+          `${formatKstDay(nextDate)} 23:00 ${name} ${goal.nextLessonIndex}과`
         );
       }
     }
     const schedulePart = upcoming.length > 0 ? ` 다음 수업: ${upcoming.join(", ")}.` : "";
     return {
-      type: "noop",
+      type: "info",
       reply: `오늘(${formatKstDay(ctx.todayKst)})은 주간 복기 날이라 정해진 진도 수업이 없어요. 진도는 통화를 마칠 때만 올라가니 그대로 둘게요.${schedulePart} ${CALENDAR_INVARIANT}.`,
+      info: { reviewDay: true, items: infoItems },
     };
   }
 
@@ -466,13 +500,25 @@ function buildPostponeResult(args: ProgressArgs, ctx: ProgressContext): Progress
       const nextDate = nextLessonDate(ctx.weeklyPattern, goal.id, ctx.todayKst, false);
       const nextStr = nextDate ? `${formatKstDay(nextDate)} 23:00` : "다음 배정 요일";
       return {
-        type: "noop",
+        type: "info",
         reply: `오늘 고르신 ${name} ${goal.nextLessonIndex}과 그대로 둘게요. 다음 ${name} 수업: ${nextStr}. 진도는 통화를 마칠 때만 올라가니 오늘 못 하셔도 다음 수업에서 그대로 이어집니다. ${CALENDAR_INVARIANT}.`,
+        info: {
+          reviewDay: false,
+          items: [
+            {
+              goalId: goal.id,
+              name,
+              lessonIndex: goal.nextLessonIndex,
+              nextDate,
+            },
+          ],
+        },
       };
     }
   }
 
   const items: string[] = [];
+  const infoItems: PostponeInfoItem[] = [];
   for (const id of resolved.ids) {
     const goal = ctx.goals.find((g) => g.id === id);
     if (!goal) continue;
@@ -480,11 +526,18 @@ function buildPostponeResult(args: ProgressArgs, ctx: ProgressContext): Progress
     const nextDate = nextLessonDate(ctx.weeklyPattern, id, ctx.todayKst, false);
     const nextStr = nextDate ? `${formatKstDay(nextDate)} 23:00` : "다음 배정 요일";
     items.push(`${name} ${goal.nextLessonIndex}과 그대로(다음 수업: ${nextStr})`);
+    infoItems.push({
+      goalId: id,
+      name,
+      lessonIndex: goal.nextLessonIndex,
+      nextDate,
+    });
   }
 
   return {
-    type: "noop",
+    type: "info",
     reply: `${items.join(", ")}으로 유지할게요. 진도는 통화를 마칠 때만 올라가니 오늘 못 하셔도 다음 수업에서 그대로 이어집니다. ${CALENDAR_INVARIANT}.`,
+    info: { reviewDay: false, items: infoItems },
   };
 }
 
@@ -588,7 +641,7 @@ function buildPullForwardResult(args: ProgressArgs, ctx: ProgressContext): Progr
     const reply =
       `${name}을 ${from}과에서 ${to}과로 한 번에 앞당기는 안을 준비했어요. ` +
       `${skipped}는 건너뛰고 ${nextStr} 수업부터 ${to}과를 해요. ` +
-      `${paceNote}.${clampNote} ${CALENDAR_INVARIANT}. 카드에서 [승인]하거나 '응'이라고 답해 주세요.`;
+      `${paceNote}.${clampNote} ${CALENDAR_INVARIANT}. ${APPROVE_HINT}`;
 
     return {
       type: "proposal",
@@ -605,7 +658,7 @@ function buildPullForwardResult(args: ProgressArgs, ctx: ProgressContext): Progr
   const summary = `${parts.join(", ")} (${paceNote})`;
   const reply =
     `진행 중인 목표를 한 번에 앞당기는 안을 준비했어요(${parts.join(", ")}). ` +
-    `${paceNote}.${clampNote} ${CALENDAR_INVARIANT}. 카드에서 [승인]하거나 '응'이라고 답해 주세요.`;
+    `${paceNote}.${clampNote} ${CALENDAR_INVARIANT}. ${APPROVE_HINT}`;
 
   return {
     type: "proposal",
@@ -695,7 +748,7 @@ function buildSetPaceResult(
       last: lastLessonIndex(goal.lessons),
     });
     const summary = `${name} 매 통화 ${oldPace}과씩 → ${newPace}과씩`;
-    const reply = `${sentences.join(". ")}.${clampNote} ${CALENDAR_INVARIANT}. 카드에서 [승인]하거나 '응'이라고 답해 주세요.`;
+    const reply = `${sentences.join(". ")}.${clampNote} ${CALENDAR_INVARIANT}. ${APPROVE_HINT}`;
     return {
       type: "proposal",
       summary,
@@ -712,7 +765,7 @@ function buildSetPaceResult(
   const protectNote = newPace > 1 ? " 각 트랙의 마지막 과는 건너뛰지 않습니다." : "";
   const reply =
     `진행 중인 목표를 매 통화 ${newPace}과씩 올리도록 바꾸는 안을 준비했어요(${parts.join(", ")}).` +
-    `${protectNote}${clampNote} ${CALENDAR_INVARIANT}. 카드에서 [승인]하거나 '응'이라고 답해 주세요.`;
+    `${protectNote}${clampNote} ${CALENDAR_INVARIANT}. ${APPROVE_HINT}`;
 
   return {
     type: "proposal",
@@ -800,7 +853,7 @@ function buildSetLessonResult(args: ProgressArgs, ctx: ProgressContext): Progres
       reply:
         `${name}을 ${from}과에서 ${to}과로 바꾸는 안을 준비했어요. ${direction} ` +
         `다음 ${name} 수업은 ${nextStr}부터 ${to}과예요. ${CALENDAR_INVARIANT}. ` +
-        `카드에서 [승인]하거나 '응'이라고 답해 주세요.`,
+        `${APPROVE_HINT}`,
       before: { goals: beforeGoals },
       after: { goals: afterGoals },
     };
@@ -812,7 +865,7 @@ function buildSetLessonResult(args: ProgressArgs, ctx: ProgressContext): Progres
   return {
     type: "proposal",
     summary: parts.join(", "),
-    reply: `진도 변경 안을 준비했어요(${parts.join(", ")}). ${CALENDAR_INVARIANT}. 카드에서 [승인]하거나 '응'이라고 답해 주세요.`,
+    reply: `진도 변경 안을 준비했어요(${parts.join(", ")}). ${CALENDAR_INVARIANT}. ${APPROVE_HINT}`,
     before: { goals: beforeGoals },
     after: { goals: afterGoals },
   };
@@ -1172,12 +1225,51 @@ export function classifyQuickReply(
   return null;
 }
 
+export function buildPostponeInfoCard(info: PostponeInfo): CoachInfoCard {
+  const title = info.reviewDay ? "오늘은 주간 복기" : "오늘 건너뜀";
+  const lines = info.items.map((item) =>
+    item.nextDate
+      ? `다음 ${item.name} ${item.lessonIndex}과 · ${formatKstDay(item.nextDate)} 23:00`
+      : `다음 ${item.name} ${item.lessonIndex}과 · 다음 배정 요일`
+  );
+  lines.push("구글 캘린더는 바뀌지 않습니다");
+  return { kind: "postpone", title, lines };
+}
+
+export function sanitizeCoachInfoCard(raw: unknown): CoachInfoCard | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  if (obj.kind !== "postpone") return null;
+  if (typeof obj.title !== "string") return null;
+  const title = obj.title.trim();
+  if (title.length < 1 || title.length > 30) return null;
+  if (!Array.isArray(obj.lines)) return null;
+  const lines = obj.lines
+    .filter((l): l is string => typeof l === "string")
+    .slice(0, 6)
+    .map((l) => l.slice(0, 80));
+  return { kind: "postpone", title, lines };
+}
+
+export function progressReplyForDisplay(reply: string, opts: { qaPreview: boolean }): string {
+  if (!opts.qaPreview) return reply;
+  let out = reply.replaceAll(APPROVE_HINT, QA_PREVIEW_HINT);
+  const kept = out
+    .split(/(?<=[.!?])\s+/)
+    .filter((sentence) => sentence && !/\[승인\]|'응'/.test(sentence));
+  out = kept.join(" ").trim();
+  if (!out.includes(QA_PREVIEW_HINT)) {
+    out = out ? `${out} ${QA_PREVIEW_HINT}` : QA_PREVIEW_HINT;
+  }
+  return out;
+}
+
 export function qaBlocksPlanChange(after: unknown, qa: boolean): boolean {
   return Boolean(qa) && isProgressChange(after);
 }
 
-export function shouldPersistProposedChange(after: unknown, qa: boolean): boolean {
-  return !qaBlocksPlanChange(after, qa);
+export function proposalQaPreview(after: unknown, qa: boolean): boolean {
+  return qaBlocksPlanChange(after, qa);
 }
 
 export type CoachProgressChatOut = {
@@ -1189,7 +1281,7 @@ export type CoachProgressChatOut = {
     memoryPatch?: unknown;
     status: "proposed";
   } | null;
-  progress?: { type: "undo_request" };
+  progress?: { type: "undo_request" } | { type: "info"; card: CoachInfoCard };
 };
 
 /** Builds the /api/coach/chat progress fields after the pure proposal + sanitize step. */
@@ -1236,6 +1328,11 @@ export function finalizeCoachProgressResponse(opts: {
   };
   if (opts.progressResult.type === "undo_request") {
     out.progress = { type: "undo_request" };
+  } else if (opts.progressResult.type === "info") {
+    out.progress = {
+      type: "info",
+      card: buildPostponeInfoCard(opts.progressResult.info),
+    };
   }
   return out;
 }

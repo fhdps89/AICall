@@ -42,9 +42,14 @@ import {
 import { authFetch } from "../../services/api/authFetch";
 import { sanitizePlanChangeAfter, isEmptyPlanChange, normalizeLessonsPerCall } from "../../data/planValidation";
 import { isQaMode } from "../../data/qaMode";
-import { canApplyPendingProposal, selectQuickReplyTarget } from "../../data/coachProposalGate";
+import {
+  canApplyPendingProposal,
+  resolveQaProgressQuickReply,
+  selectQuickReplyTarget,
+} from "../../data/coachProposalGate";
 import { loadDailyOverride } from "../home/dailyTrackOverride";
 import {
+  QA_PREVIEW_HINT,
   buildProgressCardView,
   classifyQuickReply,
   describeUndoOffer,
@@ -53,8 +58,11 @@ import {
   isStaleProgressChange,
   kstTodayStr,
   pickUndoTarget,
+  progressReplyForDisplay,
+  proposalQaPreview,
   qaBlocksPlanChange,
-  shouldPersistProposedChange,
+  sanitizeCoachInfoCard,
+  type CoachInfoCard,
   type UndoRestoreEntry,
 } from "../../data/progressAdjust";
 
@@ -154,7 +162,7 @@ export const CoachModal: React.FC<CoachModalProps> = ({
 
   const appendAndSaveCoachMessage = async (
     text: string,
-    opts?: { planChangeId?: string; planChange?: PlanChangeData; persistChangeId?: boolean }
+    opts?: { planChangeId?: string; planChange?: PlanChangeData; infoCard?: CoachInfoCard }
   ) => {
     const coachMsg: CoachMessageData = {
       id: `coach-${Date.now()}`,
@@ -163,12 +171,14 @@ export const CoachModal: React.FC<CoachModalProps> = ({
       at: new Date().toISOString(),
       planChangeId: opts?.planChangeId,
       planChange: opts?.planChange,
+      infoCard: opts?.infoCard,
     };
     await saveCoachMessage(userId, {
       role: "coach",
       text: coachMsg.text,
       at: coachMsg.at,
-      ...(opts?.persistChangeId !== false && opts?.planChangeId ? { planChangeId: opts.planChangeId } : {}),
+      ...(opts?.planChangeId ? { planChangeId: opts.planChangeId } : {}),
+      ...(opts?.infoCard ? { infoCard: opts.infoCard } : {}),
     }).catch(() => {});
     setMessages((prev) => [...prev, coachMsg]);
   };
@@ -219,6 +229,22 @@ export const CoachModal: React.FC<CoachModalProps> = ({
       }).catch(() => {});
 
       // 1-a. Quick reply check before calling LLM
+      const qaQuick = resolveQaProgressQuickReply(
+        classifyQuickReply(textToSend, { hasPending: true }),
+        planChanges,
+        {
+          nowMs: Date.now(),
+          sessionChangeIds: sessionChangeIdsRef.current,
+        }
+      );
+      if (qaQuick.kind === "reply") {
+        for (const id of qaQuick.closeChangeIds) {
+          await handleRejectChange(id);
+        }
+        await appendAndSaveCoachMessage(qaQuick.text);
+        return;
+      }
+
       const quickTarget = selectQuickReplyTarget(planChanges, {
         nowMs: Date.now(),
         sessionChangeIds: sessionChangeIdsRef.current,
@@ -303,40 +329,32 @@ export const CoachModal: React.FC<CoachModalProps> = ({
 
       let planChangeId: string | undefined = undefined;
       let createdChange: PlanChangeData | undefined = undefined;
-      let persistChangeId = true;
+      let qaPreview = false;
 
       // 4. If coach proposed a plan change, validate it before saving/showing
       const safeAfter = data.proposal ? sanitizePlanChangeAfter(data.proposal.after, goals) : null;
       if (data.proposal && safeAfter && !isEmptyPlanChange(safeAfter)) {
-        const changePayload = {
+        qaPreview = proposalQaPreview(safeAfter, isQaMode());
+        const changePayload: Omit<PlanChangeData, "id"> = {
           requestedText: textToSend,
           summary: data.proposal.summary || "학습 일정 변경 제안",
           before: data.proposal.before || {},
           after: safeAfter as PlanChangeData["after"],
           status: "proposed" as const,
           at: new Date().toISOString(),
+          ...(qaPreview ? { qaPreview: true } : {}),
         };
 
-        if (!shouldPersistProposedChange(safeAfter, isQaMode())) {
-          planChangeId = `qa-preview-${Date.now()}`;
-          sessionChangeIdsRef.current.add(planChangeId);
-          createdChange = {
-            ...changePayload,
-            id: planChangeId,
-          };
-          persistChangeId = false;
-        } else {
-          planChangeId = await createPlanChange(userId, changePayload);
-          sessionChangeIdsRef.current.add(planChangeId);
-          createdChange = {
-            ...changePayload,
-            id: planChangeId,
-          };
+        planChangeId = await createPlanChange(userId, changePayload);
+        sessionChangeIdsRef.current.add(planChangeId);
+        createdChange = {
+          ...changePayload,
+          id: planChangeId,
+        };
 
-          // Refresh planChanges list
-          const updatedChanges = await getPlanChanges(userId);
-          setPlanChanges(updatedChanges);
-        }
+        // Refresh planChanges list
+        const updatedChanges = await getPlanChanges(userId);
+        setPlanChanges(updatedChanges);
       }
 
       // If memory patch provided, update coachMemory
@@ -354,16 +372,20 @@ export const CoachModal: React.FC<CoachModalProps> = ({
         setMemory(newMem);
       }
 
-      let replyText = data.reply || "네, 확인했습니다.";
+      let replyText = progressReplyForDisplay(data.reply || "네, 확인했습니다.", { qaPreview });
       if (data.progress?.type === "undo_request") {
         replyText = await runLocalUndoFlow(data.reply);
       }
+      const infoCard =
+        data.progress?.type === "info"
+          ? sanitizeCoachInfoCard(data.progress.card) ?? undefined
+          : undefined;
 
       // 5. Save coach message
       await appendAndSaveCoachMessage(replyText, {
         planChangeId,
         planChange: createdChange,
-        persistChangeId,
+        infoCard,
       });
     } catch (err: any) {
       console.error("[CoachModal] Send error:", err);
@@ -578,7 +600,7 @@ export const CoachModal: React.FC<CoachModalProps> = ({
     }
   };
 
-  const pendingCount = planChanges.filter((c) => c.status === "proposed").length;
+  const pendingCount = planChanges.filter((c) => !c.qaPreview && c.status === "proposed").length;
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-3 sm:p-5">
@@ -694,6 +716,7 @@ export const CoachModal: React.FC<CoachModalProps> = ({
                             todayKst: kstTodayStr(),
                           })
                         : null;
+                      const previewOnly = Boolean(linkedChange.qaPreview);
                       const qaBlocked = qaBlocksPlanChange(linkedChange.after, isQaMode());
                       const gateState =
                         linkedChange.status === "proposed"
@@ -717,21 +740,33 @@ export const CoachModal: React.FC<CoachModalProps> = ({
                           </div>
                           <span
                             className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
-                              linkedChange.status === "approved"
+                              previewOnly
+                                ? linkedChange.status === "proposed"
+                                  ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                                  : "bg-slate-800 text-slate-400 border border-slate-700"
+                                : linkedChange.status === "approved"
                                 ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
                                 : linkedChange.status === "rejected"
                                 ? "bg-slate-800 text-slate-400 border border-slate-700"
                                 : linkedChange.status === "reverted"
                                 ? "bg-purple-500/20 text-purple-300 border border-purple-500/40"
+                                : isExpired
+                                ? "bg-slate-800 text-slate-400 border border-slate-700"
                                 : "bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse"
                             }`}
                           >
-                            {linkedChange.status === "approved"
+                            {previewOnly
+                              ? linkedChange.status === "proposed"
+                                ? "QA 미리보기"
+                                : "미리보기 닫힘"
+                              : linkedChange.status === "approved"
                               ? "✅ 승인됨"
                               : linkedChange.status === "rejected"
                               ? "거절됨"
                               : linkedChange.status === "reverted"
                               ? "되돌려짐"
+                              : isExpired
+                              ? "만료"
                               : "승인 대기"}
                           </span>
                         </div>
@@ -816,50 +851,74 @@ export const CoachModal: React.FC<CoachModalProps> = ({
                         )}
 
                         {/* Action buttons if status === 'proposed' */}
-                        {linkedChange.status === "proposed" && (
-                          qaBlocked ? (
-                            <p className="text-[11px] font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-xl px-3 py-2">
-                              QA 모드에서는 실제 진도를 바꾸지 않습니다
-                            </p>
-                          ) : isExpired ? (
-                            <div className="flex items-center justify-between gap-2 pt-1">
-                              <span className="text-[11px] font-semibold text-slate-400">
-                                만료된 제안이에요 · 다시 요청해 주세요
-                              </span>
-                              <button
-                                onClick={() => handleRejectChange(linkedChange.id)}
-                                disabled={actionLoadingId === linkedChange.id}
-                                className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 font-medium text-xs transition cursor-pointer shrink-0"
-                              >
-                                <span>거절</span>
-                              </button>
-                            </div>
-                          ) : (
-                            <div className="flex gap-2 pt-1">
-                              <button
-                                onClick={() => handleApplyChange(linkedChange.id, { viaQuickReply: false })}
-                                disabled={actionLoadingId === linkedChange.id}
-                                className="flex-1 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer shadow-lg shadow-emerald-600/20 active:scale-95"
-                              >
-                                {actionLoadingId === linkedChange.id ? (
-                                  <Loader2 size={13} className="animate-spin" />
-                                ) : (
-                                  <CheckCircle2 size={14} />
-                                )}
-                                <span>{approveLabel}</span>
-                              </button>
+                        {previewOnly ? (
+                          <p className="text-[11px] font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-xl px-3 py-2">
+                            {QA_PREVIEW_HINT}
+                          </p>
+                        ) : (
+                          linkedChange.status === "proposed" && (
+                            qaBlocked ? (
+                              <p className="text-[11px] font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-xl px-3 py-2">
+                                QA 모드에서는 실제 진도를 바꾸지 않습니다
+                              </p>
+                            ) : isExpired ? (
+                              <div className="flex items-center justify-between gap-2 pt-1">
+                                <span className="text-[11px] font-semibold text-slate-400">
+                                  만료된 제안이에요 · 다시 요청해 주세요
+                                </span>
+                                <button
+                                  onClick={() => handleRejectChange(linkedChange.id)}
+                                  disabled={actionLoadingId === linkedChange.id}
+                                  className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 font-medium text-xs transition cursor-pointer shrink-0"
+                                >
+                                  <span>거절</span>
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="flex gap-2 pt-1">
+                                <button
+                                  onClick={() => handleApplyChange(linkedChange.id, { viaQuickReply: false })}
+                                  disabled={actionLoadingId === linkedChange.id}
+                                  className="flex-1 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer shadow-lg shadow-emerald-600/20 active:scale-95"
+                                >
+                                  {actionLoadingId === linkedChange.id ? (
+                                    <Loader2 size={13} className="animate-spin" />
+                                  ) : (
+                                    <CheckCircle2 size={14} />
+                                  )}
+                                  <span>{approveLabel}</span>
+                                </button>
 
-                              <button
-                                onClick={() => handleRejectChange(linkedChange.id)}
-                                disabled={actionLoadingId === linkedChange.id}
-                                className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 font-medium text-xs transition cursor-pointer"
-                              >
-                                <span>거절</span>
-                              </button>
-                            </div>
+                                <button
+                                  onClick={() => handleRejectChange(linkedChange.id)}
+                                  disabled={actionLoadingId === linkedChange.id}
+                                  className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 font-medium text-xs transition cursor-pointer"
+                                >
+                                  <span>거절</span>
+                                </button>
+                              </div>
+                            )
                           )
                         )}
                       </div>
+                      );
+                    })()}
+
+                    {(() => {
+                      const info = sanitizeCoachInfoCard(m.infoCard);
+                      if (!info) return null;
+                      return (
+                        <div className="w-full max-w-[92%] mt-2.5 p-4 rounded-2xl bg-[#131A26] border border-slate-700 shadow-xl space-y-2.5">
+                          <div className="flex items-center gap-1.5">
+                            <Calendar className="w-4 h-4 text-amber-400" />
+                            <span className="text-xs font-bold text-white">{info.title}</span>
+                          </div>
+                          <ul className="space-y-1 text-[11px] text-slate-300">
+                            {info.lines.map((line, i) => (
+                              <li key={i}>• {line}</li>
+                            ))}
+                          </ul>
+                        </div>
                       );
                     })()}
                   </div>
@@ -930,7 +989,9 @@ export const CoachModal: React.FC<CoachModalProps> = ({
                         <div className="flex items-center gap-2">
                           <span
                             className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
-                              change.status === "approved"
+                              change.qaPreview
+                                ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                                : change.status === "approved"
                                 ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
                                 : change.status === "rejected"
                                 ? "bg-slate-800 text-slate-400 border border-slate-700"
@@ -939,7 +1000,9 @@ export const CoachModal: React.FC<CoachModalProps> = ({
                                 : "bg-amber-500/20 text-amber-300 border border-amber-500/40"
                             }`}
                           >
-                            {change.status === "approved"
+                            {change.qaPreview
+                              ? "QA 미리보기"
+                              : change.status === "approved"
                               ? "승인 완료"
                               : change.status === "rejected"
                               ? "거절됨"
@@ -993,7 +1056,7 @@ export const CoachModal: React.FC<CoachModalProps> = ({
                         </button>
 
                         <div className="flex gap-2">
-                          {change.status === "proposed" && (() => {
+                          {!change.qaPreview && change.status === "proposed" && (() => {
                             const histGate = canApplyPendingProposal(change, {
                               nowMs: Date.now(),
                               sessionChangeIds: sessionChangeIdsRef.current,

@@ -5,6 +5,7 @@ import {
   buildTrackOptions,
   nextPlayableLesson,
   resolveTrackPick,
+  reviewDayRowSubtitle,
   trackPickerSubtitle,
 } from "../src/ui/home/trackOptions.ts";
 
@@ -319,10 +320,25 @@ test("B10: trackPickerSubtitle은 모드별로 다른 부제를 반환하고 swi
   );
   assert.equal(
     trackPickerSubtitle("startCall"),
-    "트랙을 고르면 바로 통화 준비로 넘어가요"
+    "수업 트랙을 고르면 바로 통화 준비로 넘어가요"
   );
   assert.notEqual(
     trackPickerSubtitle("startCall"),
     trackPickerSubtitle("switchTrack")
+  );
+});
+
+test("B11: reviewDayRowSubtitle은 startCall일 때 복기 유지 문구를 반환한다", () => {
+  assert.equal(
+    reviewDayRowSubtitle("startCall"),
+    "선택하면 복기 카드에 머물러요"
+  );
+  assert.equal(
+    reviewDayRowSubtitle("switchTrack"),
+    "실수 복습 · 오늘 강의 · 퀴즈"
+  );
+  assert.notEqual(
+    reviewDayRowSubtitle("startCall"),
+    reviewDayRowSubtitle("switchTrack")
   );
 });

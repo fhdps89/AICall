@@ -10,6 +10,7 @@ export interface ClusterInputMistake {
   naturalPhrase?: string;
   reason?: string;
   status?: string;
+  source?: string;
 }
 
 export interface ClusterRequestItem {
@@ -60,6 +61,7 @@ export function buildClusterRequest(mistakes: ClusterInputMistake[]): {
     const id = m.id.trim();
     if (!id || seenIds.has(id)) continue;
     if (m.status === "graduated") continue;
+    if (m.source === "qa") continue;
 
     const myPhrase = cleanField(m.myPhrase, MY_PHRASE_MAX_LEN);
     const naturalPhrase = cleanField(m.naturalPhrase, NATURAL_PHRASE_MAX_LEN);

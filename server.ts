@@ -23,7 +23,7 @@ import { LIVE_LANGUAGE_CODE, normalizeVoiceName } from './src/config/voices.ts';
 import { buildLiveConfigAttempts } from './server/liveConfig.ts';
 import { userRecordingPath as userRecordingPathIn } from './server/recordingPath.ts';
 import { apiError, noKey, NO_KEY_MESSAGE } from './server/errors.ts';
-import { buildProgressProposal, finalizeCoachProgressResponse, sanitizeTodayGoalId } from './src/data/progressAdjust.ts';
+import { buildProgressProposal, finalizeCoachProgressResponse, sanitizeTodayGoalId, type CoachProgressChatOut } from './src/data/progressAdjust.ts';
 import { sanitizePlanChangeAfter, isEmptyPlanChange, normalizeLessonsPerCall } from './src/data/planValidation.ts';
 import {
   MAX_STORAGE_FILE_BYTES,
@@ -1181,7 +1181,7 @@ app.post('/api/coach/chat', requireAuth, geminiLimit, async (req: Request, res: 
 
     let reply = response.text || '';
     let proposal: any = null;
-    let progressPayload: { type: 'undo_request' } | undefined = undefined;
+    let progressPayload: CoachProgressChatOut['progress'] = undefined;
 
     const functionCalls = response.functionCalls;
     if (Array.isArray(functionCalls) && functionCalls.length > 0) {

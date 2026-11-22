@@ -1,8 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  APPROVE_HINT,
   DEFAULT_WEEKLY_PATTERN,
+  QA_PREVIEW_HINT,
   addDaysKst,
+  buildPostponeInfoCard,
   buildProgressCardView,
   buildProgressProposal,
   clampDays,
@@ -16,10 +19,12 @@ import {
   nextLessonDate,
   parseDayCount,
   pickUndoTarget,
+  progressReplyForDisplay,
+  proposalQaPreview,
   qaBlocksPlanChange,
   reconcileProgressIntent,
+  sanitizeCoachInfoCard,
   sanitizeTodayGoalId,
-  shouldPersistProposedChange,
   finalizeCoachProgressResponse,
   type ProgressContext,
   type ProgressGoal,
@@ -204,9 +209,10 @@ test("9. unknown goalId('toeic') and unknown intent return invalid", () => {
 });
 
 // 10. postpone
-test("10. postpone: Sunday is noop with 4 next lessons; 11/23(Mon) includeToday=false next OPIc is 11/28(토)", () => {
+test("10. postpone: Sunday is info(reviewDay=true) with 4 next lessons; 11/23(Mon) includeToday=false next OPIc is 11/28(토)", () => {
   const rSun = buildProgressProposal({ intent: "postpone" }, makeCtx({ todayKst: "2026-11-22" }));
-  assert.equal(rSun.type, "noop");
+  assert.equal(rSun.type, "info");
+  assert.equal(rSun.info.reviewDay, true);
   assert.match(rSun.reply, /주간 복기/);
   assert.match(rSun.reply, /그대로/);
   assert.match(rSun.reply, /11\/23\(월\)/);
@@ -214,14 +220,23 @@ test("10. postpone: Sunday is noop with 4 next lessons; 11/23(Mon) includeToday=
   assert.match(rSun.reply, /11\/25\(수\)/);
   assert.match(rSun.reply, /11\/27\(금\)/);
   assert.match(rSun.reply, /구글 캘린더/);
+  const sunCard = buildPostponeInfoCard(rSun.info);
+  assert.equal(sunCard.title, "오늘은 주간 복기");
+  assert.ok(sunCard.lines.includes("다음 OPIc 6과 · 11/23(월) 23:00"));
+  assert.equal(sunCard.lines[sunCard.lines.length - 1], "구글 캘린더는 바뀌지 않습니다");
 
   const rMon = buildProgressProposal({ intent: "postpone" }, makeCtx({ todayKst: "2026-11-23" }));
-  assert.equal(rMon.type, "noop");
+  assert.equal(rMon.type, "info");
+  assert.equal(rMon.info.reviewDay, false);
   assert.match(rMon.reply, /OPIc 6과/);
   assert.match(rMon.reply, /11\/28\(토\)/);
   assert.doesNotMatch(rMon.reply, /다음 수업: 11\/23\(월\)/);
   assert.match(rMon.reply, /그대로/);
   assert.match(rMon.reply, /구글 캘린더/);
+  const monCard = buildPostponeInfoCard(rMon.info);
+  assert.equal(monCard.title, "오늘 건너뜀");
+  assert.ok(monCard.lines.includes("다음 OPIc 6과 · 11/28(토) 23:00"));
+  assert.equal(monCard.lines[monCard.lines.length - 1], "구글 캘린더는 바뀌지 않습니다");
 });
 
 // 11. result.after.plan is undefined across all intents
@@ -403,15 +418,15 @@ test("19. isProgressChange: false for deadline-only, true when nextLessonIndex p
 });
 
 
-test("20. shouldPersistProposedChange: QA progress is preview-only; schedule-only and non-QA persist", () => {
+test("20. proposalQaPreview: true for QA progress; false for schedule-only or non-QA", () => {
   const progressAfter = { goals: { opic: { nextLessonIndex: 8 } } };
   const planOnlyAfter = { plan: { weeklyPattern: { mon: ["opic"] } } };
-  assert.equal(shouldPersistProposedChange(progressAfter, true), false);
-  assert.equal(shouldPersistProposedChange(planOnlyAfter, true), true);
-  assert.equal(shouldPersistProposedChange(progressAfter, false), true);
+  assert.equal(proposalQaPreview(progressAfter, true), true);
+  assert.equal(proposalQaPreview(planOnlyAfter, true), false);
+  assert.equal(proposalQaPreview(progressAfter, false), false);
 });
 
-test("21. finalizeCoachProgressResponse: proposal reply overwrites LLM text, empty after, undo_request, memoryPatch kept", () => {
+test("21. finalizeCoachProgressResponse: proposal reply overwrites LLM text, empty after, undo_request, info card, memoryPatch kept", () => {
   const proposal = buildProgressProposal({ intent: "pull_forward", goalId: "opic", days: 2 }, makeCtx());
   assert.equal(proposal.type, "proposal");
   const sanitized = sanitizePlanChangeAfter(proposal.after, makeGoals().map((g) => ({ id: g.id, lessons: g.lessons })));
@@ -447,6 +462,28 @@ test("21. finalizeCoachProgressResponse: proposal reply overwrites LLM text, emp
   assert.equal(undo.progress?.type, "undo_request");
   assert.equal(undo.proposal, null);
   assert.match(undo.reply, /되돌릴/);
+
+  const postponeRes = buildProgressProposal({ intent: "postpone" }, makeCtx({ todayKst: "2026-11-23" }));
+  assert.equal(postponeRes.type, "info");
+  const postponePlain = finalizeCoachProgressResponse({
+    progressResult: postponeRes,
+    sanitizedAfter: {},
+    isEmptyAfter: true,
+  });
+  assert.equal(postponePlain.progress?.type, "info");
+  if (postponePlain.progress?.type === "info") {
+    assert.equal(postponePlain.progress.card.title, "오늘 건너뜀");
+  }
+  assert.equal(postponePlain.proposal, null);
+
+  const postponeMem = finalizeCoachProgressResponse({
+    progressResult: postponeRes,
+    sanitizedAfter: {},
+    isEmptyAfter: true,
+    existingMemoryPatch: { constraints: ["야근"] },
+  });
+  assert.equal(postponeMem.progress?.type, "info");
+  assert.deepEqual(postponeMem.proposal?.memoryPatch, { constraints: ["야근"] });
 });
 
 // 22. set_pace basic
@@ -495,19 +532,19 @@ test("24. '한 번만' and '점프' override LLM set_pace into pull_forward", ()
 });
 
 // 25. postpone protection against '하루씩 미뤄줘'
-test("25. postpone protection: '오늘은 진도를 못 나갈 것 같으니 하루씩 미뤄줘' stays noop without writes", () => {
+test("25. postpone protection: '오늘은 진도를 못 나갈 것 같으니 하루씩 미뤄줘' stays info without writes", () => {
   const rPostpone = buildProgressProposal(
     { intent: "postpone" },
     makeCtx({ userText: "오늘은 진도를 못 나갈 것 같으니 하루씩 미뤄줘" })
   );
-  assert.equal(rPostpone.type, "noop");
+  assert.equal(rPostpone.type, "info");
   assert.equal("after" in rPostpone, false);
 
   const rPull = buildProgressProposal(
     { intent: "pull_forward", days: 1 },
     makeCtx({ userText: "오늘은 진도를 못 나갈 것 같으니 하루씩 미뤄줘" })
   );
-  assert.equal(rPull.type, "noop");
+  assert.equal(rPull.type, "info");
   assert.equal("after" in rPull, false);
 });
 
@@ -657,11 +694,19 @@ test("34. Sunday + todayGoalId='opic' + postpone answers for selected track with
     { intent: "postpone" },
     makeCtx({ todayKst: "2026-11-22", todayGoalId: "opic" })
   );
-  assert.equal(res.type, "noop");
+  assert.equal(res.type, "info");
   assert.match(res.reply, /OPIc 6과 그대로/);
   assert.match(res.reply, /11\/23\(월\)/);
   assert.match(res.reply, /구글 캘린더/);
   assert.doesNotMatch(res.reply, /정해진 진도 수업이 없어요/);
+  assert.deepEqual(buildPostponeInfoCard(res.info), {
+    kind: "postpone",
+    title: "오늘 건너뜀",
+    lines: [
+      "다음 OPIc 6과 · 11/23(월) 23:00",
+      "구글 캘린더는 바뀌지 않습니다",
+    ],
+  });
 });
 
 // 35. todayGoalId resolution priority
@@ -783,4 +828,66 @@ test("39. buildProgressCardView, formatAppliedProgressReply, describeUndoOffer f
 
   const undoMsg = describeUndoOffer({ opic: { paceFrom: 2, paceTo: 1 } }, ctx.goals);
   assert.match(undoMsg, /OPIc 매 통화 2과씩 → 1과씩/);
+});
+
+// 40. APPROVE_HINT and progressReplyForDisplay
+test("40. APPROVE_HINT appears once in all 6 proposal variants and progressReplyForDisplay strips approve/reply hints in qaPreview", () => {
+  const variants = [
+    buildProgressProposal({ intent: "pull_forward", goalId: "opic", days: 2 }, makeCtx()),
+    buildProgressProposal({ intent: "pull_forward", goalId: "all", days: 1 }, makeCtx()),
+    buildProgressProposal({ intent: "set_pace", goalId: "opic", days: 2 }, makeCtx()),
+    buildProgressProposal({ intent: "set_pace", goalId: "all", days: 2 }, makeCtx()),
+    buildProgressProposal({ intent: "set_lesson", goalId: "opic", lessonIndex: 8 }, makeCtx()),
+    buildProgressProposal({ intent: "set_lesson", goalId: "all", lessonIndex: 3 }, makeCtx()),
+  ];
+
+  for (const v of variants) {
+    assert.equal(v.type, "proposal");
+    if (v.type !== "proposal") continue;
+    assert.equal(v.reply.split(APPROVE_HINT).length - 1, 1);
+
+    assert.equal(progressReplyForDisplay(v.reply, { qaPreview: false }), v.reply);
+
+    const qaText = progressReplyForDisplay(v.reply, { qaPreview: true });
+    assert.doesNotMatch(qaText, /\[승인\]|'응'/);
+    assert.equal(qaText.split(QA_PREVIEW_HINT).length - 1, 1);
+  }
+
+  const fallbackInput =
+    "요청하신 내용을 바탕으로 계획 변경 제안 카드를 준비했어요. 아래 카드를 확인하시고 [승인]해 주세요.";
+  const fallbackOut = progressReplyForDisplay(fallbackInput, { qaPreview: true });
+  assert.doesNotMatch(fallbackOut, /\[승인\]|'응'/);
+  assert.equal(fallbackOut.split(QA_PREVIEW_HINT).length - 1, 1);
+  assert.match(fallbackOut, /계획 변경 제안 카드를 준비했어요\./);
+});
+
+// 41. sanitizeCoachInfoCard
+test("41. sanitizeCoachInfoCard validates kind/title and caps lines to 6 x 80 chars", () => {
+  assert.equal(sanitizeCoachInfoCard(null), null);
+  assert.equal(sanitizeCoachInfoCard("bad"), null);
+  assert.equal(sanitizeCoachInfoCard({ kind: "other", title: "제목", lines: [] }), null);
+  assert.equal(sanitizeCoachInfoCard({ kind: "postpone", title: "", lines: [] }), null);
+  assert.equal(sanitizeCoachInfoCard({ kind: "postpone", title: "   ", lines: [] }), null);
+  assert.equal(sanitizeCoachInfoCard({ kind: "postpone", title: "a".repeat(31), lines: [] }), null);
+
+  const sanitized = sanitizeCoachInfoCard({
+    kind: "postpone",
+    title: "오늘 건너뜀",
+    lines: [
+      123,
+      "L".repeat(100),
+      "line2",
+      "line3",
+      "line4",
+      "line5",
+      null,
+      "line6",
+      "line7",
+    ],
+  });
+  assert.deepEqual(sanitized, {
+    kind: "postpone",
+    title: "오늘 건너뜀",
+    lines: ["L".repeat(80), "line2", "line3", "line4", "line5", "line6"],
+  });
 });

@@ -1,6 +1,7 @@
 import React from "react";
 import { X, Check } from "lucide-react";
 import {
+  reviewDayRowSubtitle,
   trackPickerSubtitle,
   type TrackOption,
   type TrackPickerMode,
@@ -73,7 +74,7 @@ export const TrackPickerSheet: React.FC<TrackPickerSheetProps> = ({
               <div className="min-w-0">
                 <div className="text-xs font-bold">주간 복기(오늘 루틴)</div>
                 <div className="text-[11px] text-slate-400 mt-0.5">
-                  실수 복습 · 오늘 강의 · 퀴즈
+                  {reviewDayRowSubtitle(mode)}
                 </div>
               </div>
               {reviewDaySelected && <Check className="w-4 h-4 text-amber-400 shrink-0" />}

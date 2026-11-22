@@ -329,7 +329,9 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
     try {
       const existingChanges = await getPlanChanges(userId);
       const alreadyProposed = existingChanges.some(
-        (c) => c.requestedText.includes("OPIc 시험") || c.summary.includes("모의고사")
+        (c) =>
+          !c.qaPreview &&
+          (c.requestedText.includes("OPIc 시험") || c.summary.includes("모의고사"))
       );
       if (!alreadyProposed) {
         // Propose placing mock exam (14과) into Mon & Sat OPIc slots
@@ -525,6 +527,14 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
                   트랙 골라 통화
                 </button>
               </div>
+              <button
+                type="button"
+                data-testid="today-card-coach-link"
+                onClick={() => setShowCoachModal(true)}
+                className="min-h-[44px] px-1 text-[11px] text-slate-400 underline hover:text-white cursor-pointer"
+              >
+                코치와 대화하기
+              </button>
             </div>
           ) : todayGoal && currentLesson ? (
             <div className="relative z-10 space-y-5">
@@ -599,6 +609,14 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
               >
                 <PhoneCall className="w-5 h-5" />
                 <span>오늘 수업 통화 시작하기 ({currentLesson.index}과: {currentLesson.title})</span>
+              </button>
+              <button
+                type="button"
+                data-testid="today-card-coach-link"
+                onClick={() => setShowCoachModal(true)}
+                className="mx-auto block min-h-[44px] px-1 text-[11px] text-slate-400 underline hover:text-white cursor-pointer"
+              >
+                코치와 대화하기
               </button>
 
               {/* Status info (developer only) */}

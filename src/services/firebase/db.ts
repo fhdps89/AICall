@@ -17,6 +17,8 @@ import {
 import { db, auth } from "./config";
 import { DEFAULT_VOICE, normalizeVoiceName } from "../../config/voices";
 import { sanitizePlanChangeAfter, isEmptyPlanChange, normalizeLessonsPerCall } from "../../data/planValidation";
+import { QA_PREVIEW_APPLY_REPLY } from "../../data/coachProposalGate";
+import type { CoachInfoCard } from "../../data/progressAdjust";
 import { lastLessonIndex, nextIndexAfterCompletedCall } from "../../data/lessonPace";
 import type { ReviewTiming } from "../review/reviewTiming";
 import {
@@ -150,6 +152,7 @@ export interface PlanChangeData {
   status: "proposed" | "approved" | "rejected" | "reverted";
   at: string;
   appliedAt?: string;
+  qaPreview?: boolean;
 }
 
 export interface CoachMemoryData {
@@ -166,6 +169,7 @@ export interface CoachMessageData {
   at: string;
   planChangeId?: string;
   planChange?: PlanChangeData;
+  infoCard?: CoachInfoCard;
 }
 
 export interface UserSettingsData {
@@ -1140,6 +1144,9 @@ export async function applyPlanChange(userId: string, changeId: string): Promise
   const data = snap.data() as PlanChangeData;
   if (data.status !== "proposed") {
     throw new Error(`이미 처리된 요청입니다. (현재 상태: ${data.status})`);
+  }
+  if (data.qaPreview) {
+    throw new Error(QA_PREVIEW_APPLY_REPLY);
   }
 
   // The coach (LLM) wrote this change: keep only values that fit the app's data
