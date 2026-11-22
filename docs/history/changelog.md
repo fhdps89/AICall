@@ -4,6 +4,16 @@
 
 ---
 
+### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 아침 강의 생성이 generating에 멈추지 않게 타임아웃 추가 (브랜치 `englead/feed-gen-timeout`)
+- **배경**: 2026-11-22 라이브 피드 `today.json`이 07:15부터 `status=generating`(제목만 있음)인 채 수 시간 멈춤. 11/21 아침 피드도 ready가 아니었고, 마지막 ready는 11/20. 머지·배포는 하지 않음.
+- **원인**: `GET /feed/{secret}/today.json`이 날짜가 바뀌면 생성을 시작하지만, `runJob`(대본·TTS)과 각 `generateContent`에 타임아웃이 없음. Gemini 호출이 응답 없이 멈추면 메모리의 `running`이 남아 `generating`이 하루 종일 유지됨. `force`와 피드 재시도도 `running`이 있으면 새 작업을 시작하지 않고, `INTERRUPTED`는 서버 프로세스가 죽은 뒤에만 동작함. 피드 점검 루틴은 generating이면 07:30에도 알리지 않음.
+- **수정**:
+  - `server/lecture.ts`: 전체 작업 15분, 대본·TTS 호출 각 90초(`withTimeout`). 초과 시 `failed`/`TIMED_OUT`. 작업 epoch로 타임아웃 후 늦은 완료가 새 상태를 덮어쓰지 않게 함. TTS 조각마다 상태 갱신.
+  - `server/feed.ts`: `TIMED_OUT`은 `INTERRUPTED`와 같이 30분을 기다리지 않고 바로 다시 생성.
+  - `MorningLectureCard.tsx`: 「시간이 초과되어 강의 만들기가 멈췄어요. 다시 만들어 주세요.」
+- **방어 조치 (Safeguards)**: `tests/lectureJobTimeout.test.ts` — `withTimeout` 만료, 멈춘 작업이 `TIMED_OUT`으로 풀림, 타임아웃된 작업의 늦은 write가 새 결과를 덮어쓰지 않음, 아직 살아있는 작업은 `force`로도 재시작하지 않음.
+- **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit` 통과. 라이브 오늘 피드 복구는 이 PR만으로는 불가(현재 프로세스의 멈춘 작업은 재시작 후에야 `INTERRUPTED`로 풀림).
+
 ### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA 5차 30·29·24행: 강의 오디오 404, 실수 묶음 혼입, 복기 알약 겹침 (브랜치 `englead/qa5-r30-29-24`)
 - **배경**:
   - QA봇이 라이브 main `7b1be51`에서 재현한 3건을 Draft PR로 고침. 머지·배포는 하지 않음.

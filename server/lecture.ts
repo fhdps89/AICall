@@ -23,6 +23,29 @@ const SILENCE_SEC = 3;
 const MAX_NEW = 6;
 const MAX_REVIEW = 3;
 
+/** Whole job (script + TTS). A hung Gemini call must not leave status=generating all day. */
+export const LECTURE_JOB_TIMEOUT_MS = 15 * 60 * 1000;
+/** One generateContent call (script or one TTS segment). Lets the 3-try loop actually retry. */
+export const LECTURE_STEP_TIMEOUT_MS = 90 * 1000;
+
+export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 export interface LectureMistakeInput {
   id: string;
   myPhrase: string;
@@ -328,9 +351,48 @@ export function startLectureAudioRebuild(
 }
 
 const running = new Set<string>();
+const jobEpoch = new Map<string, number>();
+
+export interface LectureJobContext {
+  key: string;
+  epoch: number;
+  write: (state: LectureState) => boolean;
+}
+
+function bumpJobEpoch(key: string): number {
+  const n = (jobEpoch.get(key) || 0) + 1;
+  jobEpoch.set(key, n);
+  return n;
+}
+
+function isCurrentJob(key: string, epoch: number): boolean {
+  return jobEpoch.get(key) === epoch;
+}
+
+function writeLectureStateForJob(state: LectureState, key: string, epoch: number): boolean {
+  if (!isCurrentJob(key, epoch)) return false;
+  writeLectureState(state);
+  return true;
+}
+
+
+export interface StartLectureJobOpts {
+  force?: boolean;
+  /** Test hook: shorten the whole-job cap. */
+  jobTimeoutMs?: number;
+  /** Test hook: replace script+TTS so tests do not call Gemini. */
+  runJobFn?: (
+    ai: GoogleGenAI,
+    state: LectureState,
+    newList: LectureMistakeInput[],
+    reviewList: LectureMistakeInput[],
+    ctx: LectureJobContext
+  ) => Promise<void>;
+}
 
 /**
  * Start (or return existing) lecture job. Never regenerates a ready lecture unless force=true.
+ * A job that is still in memory is reused, even with force=true, until it finishes or hits the timeout.
  */
 export function startLectureJob(
   ai: GoogleGenAI,
@@ -338,7 +400,7 @@ export function startLectureJob(
   date: string,
   newMistakes: LectureMistakeInput[],
   reviewMistakes: LectureMistakeInput[],
-  opts: { force?: boolean } = {}
+  opts: StartLectureJobOpts = {}
 ): LectureState {
   safeDate(date);
   const key = `${uid}:${date}`;
@@ -377,17 +439,28 @@ export function startLectureJob(
     writeLectureState(state);
     return state;
   }
-  writeLectureState(state);
+  const epoch = bumpJobEpoch(key);
+  const ctx: LectureJobContext = {
+    key,
+    epoch,
+    write: (st) => writeLectureStateForJob(st, key, epoch),
+  };
+  ctx.write(state);
   running.add(key);
-  runJob(ai, state, newList, reviewList)
+  const work = (opts.runJobFn || runJob)(ai, state, newList, reviewList, ctx);
+  const timeoutMs = opts.jobTimeoutMs ?? LECTURE_JOB_TIMEOUT_MS;
+  withTimeout(work, timeoutMs, 'lecture job')
     .catch((err) => {
+      if (!isCurrentJob(key, epoch)) return;
       console.error('[Lecture] job failed:', err);
       state.status = 'failed';
       // Shown in the app and on the public feed page: a code only, details stay in the log.
-      state.error = 'GENERATION_FAILED';
-      writeLectureState(state);
+      state.error = /timed out/i.test(String(err?.message || err)) ? 'TIMED_OUT' : 'GENERATION_FAILED';
+      ctx.write(state);
     })
-    .finally(() => running.delete(key));
+    .finally(() => {
+      if (isCurrentJob(key, epoch)) running.delete(key);
+    });
   return state;
 }
 
@@ -424,7 +497,7 @@ ${fmt(reviewList, 'review')}
 6. coachNote: 끝에 코치 한마디(한국어 2~3문장).${sunday ? ' 오늘은 일요일이므로 한 주를 총정리하는 주간 리뷰 톤으로 쓰세요. 이번 주 완수한 수업 진도와 누적 복습/졸업 표현 성과를 짚어주고 다음 주 실전 통화를 응원하는 따뜻하고 구체적인 코칭 메시지로 작성하세요.' : ''}
 7. 시험·교재의 상표나 문제를 복제하지 마세요.`;
 
-  const response = await ai.models.generateContent({
+  const response = await withTimeout(ai.models.generateContent({
     model: SCRIPT_MODEL,
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
     config: {
@@ -465,7 +538,7 @@ ${fmt(reviewList, 'review')}
         required: ['title', 'items', 'coachNote'],
       },
     },
-  });
+  }), LECTURE_STEP_TIMEOUT_MS, 'lecture script');
   const parsed = JSON.parse(response.text?.trim() || '{}');
   const inputs = new Map([...newList, ...reviewList].map((m) => [m.id, m]));
   const items: LectureScriptItem[] = (parsed.items || [])
@@ -560,11 +633,11 @@ async function synthesizeGemini(ai: GoogleGenAI, text: string, twoSpeakers: bool
   let lastErr: any;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const response = await ai.models.generateContent({
+      const response = await withTimeout(ai.models.generateContent({
         model: LECTURE_TTS_MODEL,
         contents: [{ role: 'user', parts: toSpeechParts(text, twoSpeakers) }],
         config: { responseModalities: ['AUDIO'], speechConfig },
-      });
+      }), LECTURE_STEP_TIMEOUT_MS, 'lecture TTS');
       const part = response.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData?.data);
       if (!part?.inlineData?.data) throw new Error('TTS 음성 데이터 없음');
       return parseAudio(part.inlineData.data, part.inlineData.mimeType || '');
@@ -622,24 +695,29 @@ async function runJob(
   ai: GoogleGenAI,
   state: LectureState,
   newList: LectureMistakeInput[],
-  reviewList: LectureMistakeInput[]
+  reviewList: LectureMistakeInput[],
+  ctx?: LectureJobContext
 ): Promise<void> {
+  const write = ctx?.write || writeLectureState;
   const script = await generateScript(ai, state.date, newList, reviewList);
+  if (ctx && !isCurrentJob(ctx.key, ctx.epoch)) return;
   state.title = script.title;
   state.coachNote = script.coachNote;
   state.itemCount = script.items.length;
   state.textTokens = script.tokens;
-  writeLectureState(state);
+  write(state);
 
-  await renderAndSaveAudio(ai, state, script);
+  await renderAndSaveAudio(ai, state, script, undefined, ctx);
 }
 
 async function renderAndSaveAudio(
   ai: GoogleGenAI,
   state: LectureState,
   script: { title: string; items: LectureScriptItem[]; coachNote: string },
-  synthesizeFn?: LectureSynthesizeFn
+  synthesizeFn?: LectureSynthesizeFn,
+  ctx?: LectureJobContext
 ): Promise<void> {
+  const write = ctx?.write || writeLectureState;
   const RATE = 24000;
   const pieces: Buffer[] = [];
   let totalBytes = 0;
@@ -650,8 +728,11 @@ async function renderAndSaveAudio(
     totalBytes += b.length;
   };
   const say = async (text: string, two: boolean) => {
+    if (ctx && !isCurrentJob(ctx.key, ctx.epoch)) throw new Error('lecture job superseded');
     chars += text.length;
     push(resample(await synth(ai, state.ttsEngine, text, two), RATE));
+    // Heartbeat so a live job is visible while TTS runs (no mid-job writes existed before).
+    write(state);
   };
   const silence = (sec: number) => push(Buffer.alloc(Math.round(sec * RATE) * 2));
 
@@ -697,5 +778,5 @@ async function renderAndSaveAudio(
   state.status = 'ready';
   state.audioStatus = 'ready';
   delete state.error;
-  writeLectureState(state);
+  write(state);
 }

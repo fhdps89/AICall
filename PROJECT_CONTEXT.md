@@ -133,6 +133,7 @@
    - 그록봇은 `/feed/{비밀키}/today(.json)`만 열면 됨. 앱이 홈 화면을 열 때마다 비밀키·후보 실수를 서버에 다시 보냄(`syncFeed`). 강의가 없으면 피드 요청 때 생성 시작, 실패한 강의는 30분에 한 번만 다시 시도.
    - **한계**: 강의 음성·피드 설정은 서버의 `.data/` 폴더에 저장되어, Cloud Run/AI Studio 서버가 다시 켜지면 지워질 수 있음.
    - **만들던 중 서버가 다시 켜진 강의** (v2.8.0): 서버 기록이 "생성 중"인데 실제 작업이 없으면 `failed`/`INTERRUPTED`로 알려 줌. 서버 기록 자체가 지워졌으면 앱이 Firestore의 "생성 중"을 같은 상태로 바꿈. 홈 카드는 "서버가 다시 시작되어 만들던 강의가 멈췄어요"와 **오늘 강의 만들기** 버튼을 보여 주고, 그록봇 피드는 30분 기다리지 않고 바로 다시 만듦.
+   - **생성 작업 타임아웃** (2026-11-22): 대본+TTS 전체 15분, 각 `generateContent`(대본·TTS 한 조각) 90초. 시간 초과 시 `failed`/`TIMED_OUT`이고, 그록봇 피드는 `INTERRUPTED`와 같이 바로 다시 만듦. 프로세스 안에서 작업이 멈춰도(`running`에 남아 있는 채 응답 없음) 15분이 지나면 풀리며, 늦은 완료는 새 상태를 덮어쓰지 않음(작업 epoch). TTS 조각이 끝날 때마다 상태를 갱신함. `force`여도 아직 살아있는(타임아웃 전) 작업은 다시 시작하지 않음.
    - **ready 강의의 오디오가 사라진 경우** (QA 5차 30행): Firestore에 대본이 남아 있으면 `POST /api/lecture/audio/rebuild`가 TTS만 다시 만들고 `status`는 `ready`로 유지함(`audioStatus: rebuilding`). 모달은 「오디오를 다시 만드는 중…」과 재시도를 보여 주며, 대본이 없으면 홈에서 강의를 다시 만들어야 함. WAV는 임시 파일 후 rename.
    - **복기에서 오늘 강의로 연결** (P0-4): 복기 모달 「오늘 강의 보기」는 복기를 닫고 홈 강의 카드로 이동해 첫 `refresh()` 완료 후 스크롤하며, 이미 `ready`(오디오 포함)인 경우에만 `LectureModal`을 연다. 준비 전이면 `startLecture`를 부르지 않고 카드의 「오늘 강의 만들기」 버튼만 노출된 상태로 둔다.
 11. **B-10 Keep 가져오기 · 사용량 · 1-F 받아쓰기 품질 시험**:
@@ -160,7 +161,7 @@
 - **피드 동기화 시점**: 홈 화면 로드 + 복기 완료 직후(`App.tsx` → `syncFeed`).
 - **녹음기**(`chunkRecorder.ts`): 1분 묶음은 조각이 만들어진 즉시 녹음 순서로 쌓음(이전: 업로드·Firestore 기록 뒤). IndexedDB 저장 → 업로드 → 세션 문서 기록 순서는 그대로.
 - **Live 공급자**(`geminiLiveProvider.ts`): `disconnect()`가 진행 중이면 다음 `connect()`가 끝날 때까지 기다림. 서버 중계는 소켓당 `init` 1회.
-- **오류 응답 규칙**(`server/errors.ts`): 모든 실패 응답은 `apiError(res, status, code, 한국어 문구)`. 코드: `NO_SERVER_KEY`·`BAD_REQUEST`·`TTS_FAILED`·`TRANSCRIBE_FAILED`·`REVIEW_FAILED`·`QUIZ_FAILED`·`COACH_FAILED`·`LECTURE_FAILED`·`KEEP_PARSE_FAILED`·`STT_BENCH_FAILED`·`UPLOAD_FAILED`·`TOKEN_FAILED`·`NOT_FOUND`·`STORAGE_FORBIDDEN`·`STORAGE_FAILED`(Storage 중계), 로그인은 `AUTH_FAILED`, 한도는 `rate_limited`. 강의 실패 사유는 `NOTHING_TO_TEACH`·`INTERRUPTED`·`GENERATION_FAILED`. 화면은 `src/ui/common/friendlyError.ts`를 거쳐 표시. (프로젝트 지침의 `/api/analyze` 6종 코드는 이 저장소에 해당 경로가 없어 적용 대상 없음.)
+- **오류 응답 규칙**(`server/errors.ts`): 모든 실패 응답은 `apiError(res, status, code, 한국어 문구)`. 코드: `NO_SERVER_KEY`·`BAD_REQUEST`·`TTS_FAILED`·`TRANSCRIBE_FAILED`·`REVIEW_FAILED`·`QUIZ_FAILED`·`COACH_FAILED`·`LECTURE_FAILED`·`KEEP_PARSE_FAILED`·`STT_BENCH_FAILED`·`UPLOAD_FAILED`·`TOKEN_FAILED`·`NOT_FOUND`·`STORAGE_FORBIDDEN`·`STORAGE_FAILED`(Storage 중계), 로그인은 `AUTH_FAILED`, 한도는 `rate_limited`. 강의 실패 사유는 `NOTHING_TO_TEACH`·`INTERRUPTED`·`TIMED_OUT`·`GENERATION_FAILED`. 화면은 `src/ui/common/friendlyError.ts`를 거쳐 표시. (프로젝트 지침의 `/api/analyze` 6종 코드는 이 저장소에 해당 경로가 없어 적용 대상 없음.)
 - **유지한 것**: 일일 한도(`server/rateLimit.ts`), 로그인 확인, 녹음 경로 검사, Storage 중계는 호스트 고정·사용자 폴더 고정(`server/storageRelay.ts`), 업로드 20MB·JSON 10MB 크기 제한, 같은 출처 전용(CORS 허용 헤더 없음). 추가: `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`.
 
 ---
