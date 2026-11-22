@@ -4,6 +4,19 @@
 
 ---
 
+### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — QA 통화(?qa=1)가 진도·복습 목록·졸업/재오픈·학습일을 바꾸지 않도록 격리 (브랜치 `englead/qa-mode-no-progress-20261122`)
+- **배경**: QA 9차 테스트(`?qa=1`) 통화 뒤 복기 화면에 「다음 수업으로 넘어갔어요」와 「복습 목록에 자동으로 저장됐어요」가 뜨고, 실제로 트랙 진도가 3과 → 4과로 올라가며 실수 저장·졸업/재오픈·학습일 사용량까지 사용자 기록에 반영되었다. 머지·배포는 하지 않음.
+- **원인**: `reviewPipeline.ts`의 QA 판정(`qaNow`)이 `/api/review` 요청 본문에만 쓰이고, 저장 단계(진도 증가 `advanceGoalAfterCompletedCall`, 실수 삭제·저장 `deleteCallMistakesForSession`·`saveCallMistakes`, 졸업/재오픈 `applyCallMistakeUpdates`, `review.lessonAdvanced = true`)는 QA 여부와 관계없이 그대로 실행되었다. 또한 `NewCallScreen.tsx`와 `recoveredUsage.ts`가 QA 통화도 `liveMinutes`·`calls`로 기록해 학습일로 집계되었다.
+- **수정**:
+  - **QA 판정·부수효과 정책 (`src/data/qaMode.ts`)**: `isQaCall`(세션 `source` 우선, 없으면 `qaNow`), `CallSideEffects`, `callSideEffects` 추가(QA면 `saveMistakes`·`applyMistakeOutcomes`·`advanceLesson`·`recordLearningUsage` 모두 `false`).
+  - **복기 저장 분리 (`src/services/review/persistReview.ts`, `src/services/review/reviewPipeline.ts`, `src/services/firebase/db.ts`)**: `SessionReviewData`에 `qaCall?: boolean` 추가(`lessonAdvanced` 주석에 QA 미기록 명시). `reviewPipeline.ts` 저장 블록을 `persistReviewOutcome`으로 분리해 QA이면 실수 삭제·저장, 졸업/재오픈(`usedCorrectlyItems`·`repeatedItems`=`[]`), `lessonAdvanced`, `advanceGoalAfterCompletedCall`을 건너뛰고 `qaCall: true`를 기록(`saveSessionReview`만 실행). `saveSessionReview` 실패 시 예외를 던지지 않고 진도 갱신을 건너뛰는 기존 순서를 유지함.
+  - **복기 모달 안내 (`src/services/review/reviewView.ts`, `src/ui/review/ReviewModal.tsx`)**: `shouldShowLessonAdvanced`와 `reviewSaveNotice` 추가(`isEmptyReview`는 유지). `qaCall === true`이면 `mistakesSaved`와 무관하게 QA 안내 문구를 보여 주고 내일 강의·퀴즈 안내 목록 및 `devMode` 「mistakes 컬렉션 자동 저장됨」 문구를 숨김.
+  - **사용량·학습일 분리 (`src/services/usage/usageService.ts`, `src/services/usage/learningLog.ts`, `src/ui/call/NewCallScreen.tsx`, `src/services/session/recoveredUsage.ts`)**: `UsageDelta.qaLiveMinutes?`를 추가해 `estimateCostUsd`에는 반영하되 `buildUsageFields`의 `liveMinutes`·`calls`에는 넣지 않음. `callUsageDelta`를 추가하고 `NewCallScreen.tsx`에서 세션 생성 시점의 `qaCallRef`로 일반/QA 사용량을 분기. `recoveredUsage.ts`는 `source === "qa"` 세션을 `null`로 제외.
+- **방어 조치 (Safeguards)**: `tests/qaMode.test.ts`(A1–A3), `tests/persistReview.test.ts`(A4–A9, 가짜 deps로 호출 순서·실패 처리 검증, Firestore 미사용), `tests/reviewView.test.ts`(A10–A16), `tests/learningLog.test.ts`(A17–A18), `tests/recoveredUsage.test.ts`(A19–A20) 추가.
+- **검증**: `npm test`(379/379 통과), `npm run lint`(`tsc --noEmit`), `npx tsc -p tsconfig.server.json --noEmit`, `npm run build`, 로컬 `node server.ts` 기동 확인. 설계 리뷰: Claude CLI Opus 5.5 high, 구현: agy gemini-4-hydrogen-high.
+
+---
+
 ### [2026-11-22 KST] 핫픽스 — 배포 서버 기동 실패(ERR_MODULE_NOT_FOUND lecturePick) 수정 (브랜치 `englead/hotfix-server-imports-20261122`)
 - **배경**: PR #39(main `970605d`) 머지 후 AI Studio 재게시가 「Failed to publish app」으로 실패했다. 라이브는 이전 번들(`index-Lqzg9F7x.js`) 그대로.
 - **원인**: #39에서 `server.ts`가 `src/services/lecture/lectureSource.ts`를 새로 불러오는데, 이 파일은 `./lecturePick`, `../review/speechCheck`를 확장자 없이 import한다. 배포 서버는 `node server.ts`(tsx 없음)라 확장자 없는 경로를 찾지 못해 컨테이너가 exit(1). 테스트·dev는 tsx라 통과했다.

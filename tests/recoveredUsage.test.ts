@@ -385,3 +385,42 @@ test("recoveredCallUsage: 6초 무마이크 → calls 0, liveMinutes 0.1", () =>
   assert.equal(usage.calls, 0);
   assert.ok(Math.abs(usage.liveMinutes - 0.1) < 1e-9);
 });
+
+test("recoveredCallUsage: source='qa'면 null, source가 없으면 정상 집계 (A19)", () => {
+  const base = {
+    startedAt: "2026-11-21T01:00:00.000Z",
+    lastChunkAt: "2026-11-21T01:04:20.000Z",
+    liveTranscript: [],
+  };
+  assert.equal(recoveredCallUsage({ ...base, source: "qa" }, "2026-11-21"), null);
+  const normal = recoveredCallUsage(base, "2026-11-21");
+  assert.ok(normal);
+  assert.equal(normal.calls, 1);
+  assert.ok(Math.abs(normal.liveMinutes - 260 / 60) < 1e-9);
+});
+
+test("createRecoveredUsageRecorder: QA 세션은 false 반환 및 markRecorded·recordUsage 미호출 (A20)", async () => {
+  let markCalls = 0;
+  let usageCalls = 0;
+
+  const recordOnce = createRecoveredUsageRecorder({
+    getSession: async () => ({
+      startedAt: "2026-11-21T01:00:00.000Z",
+      lastChunkAt: "2026-11-21T01:04:20.000Z",
+      liveTranscript: [],
+      source: "qa",
+    }),
+    markRecorded: async () => {
+      markCalls += 1;
+    },
+    recordUsage: async () => {
+      usageCalls += 1;
+    },
+    todayKst: () => "2026-11-21",
+  });
+
+  const res = await recordOnce("u1", "s-qa");
+  assert.equal(res, false);
+  assert.equal(markCalls, 0);
+  assert.equal(usageCalls, 0);
+});

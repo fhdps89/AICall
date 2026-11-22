@@ -64,3 +64,50 @@ export function outcomeItems<T extends { id?: string }>(ids: string[], pool: T[]
   }
   return result;
 }
+
+/** Return true only when the lesson advanced for a real (non-QA) call. */
+export function shouldShowLessonAdvanced(
+  review: { lessonAdvanced?: boolean; qaCall?: boolean } | null | undefined
+): boolean {
+  return review?.lessonAdvanced === true && review?.qaCall !== true;
+}
+
+export interface ReviewSaveNotice {
+  tone: "info" | "warn" | "ok";
+  text: string;
+  showNextSteps: boolean;
+}
+
+/** Pick the post-call save status notice and whether next-step bullets should appear. */
+export function reviewSaveNotice(input: {
+  qaCall?: boolean;
+  mistakesSaved?: boolean;
+  visibleCount: number;
+}): ReviewSaveNotice {
+  if (input.qaCall === true) {
+    return {
+      tone: "info",
+      text: "QA 통화라서 실수를 복습 목록에 저장하지 않았어요. 진도와 학습 기록도 그대로예요.",
+      showNextSteps: false,
+    };
+  }
+  if (input.mistakesSaved === false) {
+    return {
+      tone: "warn",
+      text: '실수를 앱 복습 목록에 저장하지 못했어요. 아래 "Keep에 붙여넣기용 복사"로 따로 남겨 두세요.',
+      showNextSteps: true,
+    };
+  }
+  if (input.visibleCount > 0) {
+    return {
+      tone: "ok",
+      text: `오늘 실수 ${input.visibleCount}개는 앱 복습 목록에 자동으로 저장됐어요. 따로 옮겨 적지 않아도 돼요.`,
+      showNextSteps: true,
+    };
+  }
+  return {
+    tone: "ok",
+    text: "오늘은 저장할 실수가 없어요.",
+    showNextSteps: true,
+  };
+}
