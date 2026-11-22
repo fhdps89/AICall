@@ -1,6 +1,6 @@
 /**
  * Pure lecture-script helpers: input sanitizing, model-output validation,
- * intro wording, speech plan, and a 5-minute spoken-length budget.
+ * intro wording, speech plan, and a 10-minute spoken-length budget.
  */
 import { kstDateOfIso, addDaysKst, formatLectureDuration } from '../src/services/lecture/lecturePick.ts';
 export { formatLectureDuration };

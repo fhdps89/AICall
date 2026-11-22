@@ -172,6 +172,33 @@ test('openingLine uses real dates, topics, and counts; never hardcodes yesterday
   assert.equal(reviewOnly, '찬식님, 좋은 아침이에요. 복습할 표현 1개를 함께 볼게요.');
 });
 
+test('a single real yesterday item stays honest: last-night wording only for that item, no padded extras', () => {
+  const item = scriptItem({
+    mistakeId: '1tTjWrskCDWqZzEpvXnv',
+    kind: 'new',
+    myPhrase: 'On Friday, I will I will come to my country',
+    naturalPhrase: "I'll be returning to my home country on Friday",
+    explanation: '같은 날을 말할 때는 come 대신 return 또는 be returning이 자연스럽습니다.',
+    similarExample: "I'll be returning to Korea on Monday.",
+    sourceDateKst: '2026-11-21',
+    lessonTitle: 'USA: immigration at Philadelphia airport',
+    meaningKo: '금요일에 본국으로 돌아갑니다.',
+    answerEnglish: "I'll be returning to my home country on Friday",
+  });
+  const plan = buildLectureSpeechPlan('제목', [item], '', LECTURE_DATE);
+  const texts = plan.filter((s) => s.kind === 'speech').map((s) => s.text);
+  assert.equal(
+    texts[0],
+    'Coach: 찬식님, 좋은 아침이에요. 어제 USA: immigration at Philadelphia airport 수업에서 나온 표현 1개를 함께 볼게요.'
+  );
+  assert.equal(texts[1].includes('어젯밤 하신 말은 "On Friday, I will I will come to my country" 였어요.'), true);
+  assert.equal(texts.filter((t) => t.includes('하신 말')).length, 1);
+  assert.equal(texts.filter((t) => t.includes('어젯밤')).length, 1);
+  assert.equal(texts.some((t) => t.includes('새 표현 2개') || t.includes('복습 표현')), false);
+  // opening + item body + answer + closing; no extra items
+  assert.equal(texts.length, 4);
+});
+
 test('buildLectureSpeechPlan: example, skip empty dialogue/meaning, no you-said claim when empty, closing outro', () => {
   const empty = buildLectureSpeechPlan('제목', [], '코치 한마디', LECTURE_DATE);
   const emptyText = empty.filter((s) => s.kind === 'speech').map((s) => s.text).join('\n');

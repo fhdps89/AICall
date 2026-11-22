@@ -10,6 +10,7 @@ import {
   getUserMistakes,
   getDueMistakes,
   getKSTToday,
+  getSessionById,
   advanceMistakeAfterLesson,
 } from "../firebase/db";
 import { authFetch, authJson } from "../api/authFetch";
@@ -23,7 +24,13 @@ import {
   writeUploadFailAt,
   clearUploadFailAt,
 } from "./lectureSyncPolicy";
-import { pickLectureCandidates } from "./lecturePick";
+import {
+  pickLectureCandidates,
+  addDaysKst,
+  previousLectureCutoffIso,
+  PREVIOUS_LECTURE_LOOKBACK_DAYS,
+  type SessionTiming,
+} from "./lecturePick";
 
 export type LectureStatus = "generating" | "ready" | "failed";
 
@@ -74,10 +81,69 @@ export async function getLecture(uid: string, date = getKSTToday()): Promise<Lec
 }
 
 
-/** New = added since yesterday (KST) & never used in a lecture; review = due today (max 3). QA source is excluded. */
-export async function pickLectureMistakes(uid: string, today = getKSTToday()) {
+/** Load startedAt/endedAt (and last activity fallbacks) for the given session ids. Missing docs are null. */
+async function loadSessionsById(
+  uid: string,
+  sessionIds: Array<string | undefined>
+): Promise<Record<string, SessionTiming | null>> {
+  const unique = [...new Set(sessionIds.filter((id): id is string => !!id))];
+  const entries = await Promise.all(
+    unique.map(async (id) => {
+      try {
+        const s = await getSessionById(uid, id);
+        if (!s) return [id, null] as const;
+        return [
+          id,
+          {
+            startedAt: s.startedAt,
+            endedAt: s.endedAt,
+            lastTranscriptAt: s.lastTranscriptAt,
+            lastChunkAt: s.lastChunkAt,
+          },
+        ] as const;
+      } catch {
+        return [id, null] as const;
+      }
+    })
+  );
+  return Object.fromEntries(entries);
+}
+
+/** Walk back up to 30 KST days and stop at the latest ready lecture before `today`. */
+async function loadPreviousLectureCutoff(uid: string, today: string): Promise<string | undefined> {
+  const lectures: Array<{ date: string; status?: string; createdAt?: string }> = [];
+  for (let i = 1; i <= PREVIOUS_LECTURE_LOOKBACK_DAYS; i++) {
+    const date = addDaysKst(today, -i);
+    try {
+      const lec = await getLecture(uid, date);
+      if (lec) lectures.push({ date, status: lec.status, createdAt: lec.createdAt });
+    } catch {
+      // Skip a failed lookup and keep walking; missing cutoff falls back to 24h.
+    }
+    const cutoff = previousLectureCutoffIso(lectures, today);
+    if (cutoff) return cutoff;
+  }
+  return undefined;
+}
+
+/** New = created after the previous ready lecture (or last 24h); review = due today. QA and short sessions are excluded. */
+export async function pickLectureMistakes(uid: string, today = getKSTToday(), nowIso = new Date().toISOString()) {
   const [all, due] = await Promise.all([getUserMistakes(uid), getDueMistakes(uid, today)]);
-  return pickLectureCandidates(all, due, today);
+  const [sessionsById, previousLectureCreatedAt] = await Promise.all([
+    loadSessionsById(uid, [...all, ...due].map((m) => m.sessionId)),
+    loadPreviousLectureCutoff(uid, today),
+  ]);
+  return pickLectureCandidates(all, due, today, {
+    nowIso,
+    previousLectureCreatedAt,
+    sessionsById,
+    onMissingSession: ({ mistakeId, sessionId }) => {
+      console.warn("[lecturePick] session doc missing or has no usable duration; keeping mistake", {
+        mistakeId,
+        sessionId,
+      });
+    },
+  });
 }
 
 export async function startLecture(uid: string, date = getKSTToday(), force = false): Promise<LectureDoc> {

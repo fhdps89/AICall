@@ -8,13 +8,15 @@
 - **배경**: 오늘 강의(12:25 KST, 「일요일 주간 총정리 핵심 영어」)가 9개 표현을 모두 「어젯밤 하신 말」로 소개했다. 1번 「yesterday I go to the office and check the safety gear」는 QA봇이 11:06에 찬식님 계정으로 넣은 테스트 입력이었다. 찬식님은 「내가 한 말이 아닌데?」라고 하셨고, 이어서 10/22 템플릿의 예문·인트로를 적용하고(TG 3963) 분량 상한을 10분으로 바꿨다(TG 3965). 머지·배포는 하지 않음.
 - **원인**:
   - 후보 실수는 Firestore `users/{uid}/mistakes`에서 어제 이후 새 항목(최대 6)과 오늘 복습(최대 3)을 골라 `/api/feed/sync`로 서버에 보낸 뒤 강의로 들어간다. 최종 `myPhrase`는 입력 값으로 덮어쓰므로 모델이 문구를 지어내지는 못한다. 다만 소개 문장 「어젯밤 하신 말」이 날짜·복습 여부와 관계없이 서버 음성 템플릿과 프롬프트에 하드코딩되어 있었다.
+  - 새 후보 창이 KST 달력 기준 「어제 0시 이후」라, 전날 낮의 짧은 QA 테스트 통화까지 「어젯밤」 재료로 들어갔다. 찬식님이 확인하신 오늘 9개 중 본인 항목은 8번 「On Friday, I will I will come to my country」(세션 `call-1795270951478`, 11/21 23:22–23:28 KST, 6분 9초, 여행 1과)뿐이었고, 나머지는 47초–2분 32초짜리 QA 통화였다.
   - 실수 문서의 `source`는 `call`/`keep_import`뿐이라 QA 통화와 본인 연습을 구분할 수 없었다. 일요일 주간 총정리는 제목·코치 한마디 톤만 바꾸고 후보 풀을 넓히지는 않았다. 묶음(clusters)은 강의 재료가 아니다.
   - 10/22 템플릿에 있던 「비슷한 예로」 예문과 「찬식님, 좋은 아침이에요… 화이팅이에요, 찬식님!」 인트로·마무리가 생성기에 없었고, 수업 주제도 전달되지 않았다. 홈 카드는 `durationSec`를 분으로만 반올림해 7분 42초 오디오가 다른 분 수로 보일 수 있었다.
 - **수정**:
   - 모델 출력을 입력 ID·문구·kind에 맞춰 검증하고, 소개 문구는 항목의 실제 날짜를 따른다. 후보가 없으면 `NOTHING_TO_TEACH`.
   - QA 모드(`?qa=1` / `oc_qa_mode`): 그 브라우저에서 시작한 통화의 실수를 `source: 'qa'`로 저장하고 강의·피드 후보에서 뺀다. 과거 문서는 소급하지 않음.
+  - 새 후보는 이전 ready 강의의 `createdAt` 이후(없으면 최근 24시간)만 고르고, 통화 시간 3분 미만 세션은 새·복습 후보에서 모두 제외한다. 세션 길이는 `startedAt`–`endedAt`(없으면 마지막 전사/청크 시각). 세션 문서가 없으면 남기고 로그(fail open). 실제 항목이 하나여도 그 항목만 쓰고 가짜 재료를 채우지 않는다.
   - 항목마다 「비슷한 예로」 예문 1개, 실제 재료로 채운 인트로와 연습 마무리, 난도별 해설 1~5문장, 수업 주제(`lessonTitle`)를 대화에 반영. 오디오 상한 10분. 예문·해설은 줄이지 않고, 넘칠 때만 복습부터 항목을 통째로 제외. 카드 길이는 「7분 42초」처럼 표시.
-- **방어 조치 (Safeguards)**: `tests/lecturePick.test.ts`, `tests/lectureMaterial.test.ts`, `tests/qaMode.test.ts`에서 후보 선정·QA 제외, 대본 검증, 소개 문구, 10분 예산(항목 제거·예문 유지), `NOTHING_TO_TEACH`를 결정론적으로 확인.
+- **방어 조치 (Safeguards)**: `tests/lecturePick.test.ts`, `tests/lectureMaterial.test.ts`, `tests/qaMode.test.ts`에서 후보 선정·QA 제외·이전 강의 시각 컷오프·3분 미만 세션 제외(오늘 9개 재현 시 본인 항목만 남음), 대본 검증, 소개 문구(항목 1개여도 어젯밤 표현이 그 항목에만), 10분 예산(항목 제거·예문 유지), `NOTHING_TO_TEACH`를 결정론적으로 확인.
 - **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build`.
 - **모델**: 설계 Claude CLI Opus 5.5 high(`/workspace/collab/onecall_lecture_source_20261122/claude_design_out.md`). 구현은 그 명세와 TG 3965(10분 상한·예문/해설 유지)를 따라 작성. 샘플 대본은 `/workspace/collab/oncall_lecture_template_check_20261122/`.
 
