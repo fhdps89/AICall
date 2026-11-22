@@ -325,8 +325,10 @@ export interface SessionReviewData {
   lessonTitle?: string;
   /** false when saving this call's mistakes to the app's review list failed */
   mistakesSaved?: boolean;
-  /** false when nothing the learner said was recorded, so the lesson was not counted as done */
+  /** false when nothing the learner said was recorded, so the lesson was not counted as done; QA는 기록하지 않음(undefined) */
   lessonAdvanced?: boolean;
+  /** true when this review belongs to a QA test call (?qa=1) */
+  qaCall?: boolean;
 }
 
 export interface SessionData {

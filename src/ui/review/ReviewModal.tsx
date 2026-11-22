@@ -23,7 +23,13 @@ import {
 import { authFetch } from "../../services/api/authFetch";
 import { useDevMode } from "../../data/devMode";
 import type { ReviewTiming } from "../../services/review/reviewTiming";
-import { isEmptyReview, levelBadge, sourceSttLabel } from "../../services/review/reviewView";
+import {
+  isEmptyReview,
+  levelBadge,
+  reviewSaveNotice,
+  shouldShowLessonAdvanced,
+  sourceSttLabel,
+} from "../../services/review/reviewView";
 
 export interface ReviewModalProps {
   userId?: string;
@@ -273,7 +279,7 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
               <span>이번 통화 성과</span>
             </h3>
 
-            {review?.lessonAdvanced === true && (
+            {shouldShowLessonAdvanced(review) && (
               <div className="text-xs font-semibold text-emerald-300 flex items-center gap-1.5">
                 <CheckCircle size={14} className="shrink-0" />
                 <span>다음 수업으로 넘어갔어요</span>
@@ -329,7 +335,7 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
               <span className="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
               오늘의 실수 교정 내역 ({visibleMistakes.length}개)
             </h3>
-            {devMode && (
+            {devMode && review?.qaCall !== true && (
               <span className="text-xs text-slate-400">
                 mistakes 컬렉션 자동 저장됨
               </span>
@@ -467,25 +473,28 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
             <p className="text-xs text-slate-200 leading-relaxed">
               같은 과로 다시 걸어 주세요
             </p>
-          ) : (
-            <>
-              {review?.mistakesSaved === false ? (
-                <p className="text-xs text-amber-300 leading-relaxed">
-                  실수를 앱 복습 목록에 저장하지 못했어요. 아래 "Keep에 붙여넣기용 복사"로 따로 남겨 두세요.
+          ) : (() => {
+            const notice = reviewSaveNotice({
+              qaCall: review?.qaCall,
+              mistakesSaved: review?.mistakesSaved,
+              visibleCount: visibleMistakes.length,
+            });
+            const noticeToneClass =
+              notice.tone === "warn" ? "text-amber-300" : "text-slate-200";
+            return (
+              <>
+                <p className={`text-xs ${noticeToneClass} leading-relaxed`}>
+                  {notice.text}
                 </p>
-              ) : (
-                <p className="text-xs text-slate-200 leading-relaxed">
-                  {visibleMistakes.length > 0
-                    ? `오늘 실수 ${visibleMistakes.length}개는 앱 복습 목록에 자동으로 저장됐어요. 따로 옮겨 적지 않아도 돼요.`
-                    : "오늘은 저장할 실수가 없어요."}
-                </p>
-              )}
-              <ul className="text-xs text-slate-300 leading-relaxed list-disc pl-4 space-y-0.5">
-                <li>내일 아침 강의에서 오늘 실수를 다시 들어요.</li>
-                <li>내일 홈의 "퀴즈 풀기"로 맞게 말할 수 있는지 확인해요. 맞히면 그 실수는 졸업이에요.</li>
-              </ul>
-            </>
-          )}
+                {notice.showNextSteps && (
+                  <ul className="text-xs text-slate-300 leading-relaxed list-disc pl-4 space-y-0.5">
+                    <li>내일 아침 강의에서 오늘 실수를 다시 들어요.</li>
+                    <li>내일 홈의 "퀴즈 풀기"로 맞게 말할 수 있는지 확인해요. 맞히면 그 실수는 졸업이에요.</li>
+                  </ul>
+                )}
+              </>
+            );
+          })()}
         </div>
 
         {/* Google Keep backup copy (B-4 requirement 4, optional) */}

@@ -1,4 +1,4 @@
-import type { UsageMonth } from "./usageService";
+import type { UsageDelta, UsageMonth } from "./usageService";
 
 export const REST_BANNER_MIN_DAYS = 2;
 
@@ -136,6 +136,18 @@ export function getRecentMonthKeys(today: string, count = 3): string[] {
  */
 export function callsForDuration(sec: number): number {
   return Number.isFinite(sec) && sec >= 10 ? 1 : 0;
+}
+
+/**
+ * 통화 종료 시 기록할 사용량 증분을 계산한다.
+ * QA 통화는 비용만 남기도록 qaLiveMinutes만 반환하고 liveMinutes·calls는 넣지 않는다.
+ */
+export function callUsageDelta(durationSec: number, isQa: boolean): UsageDelta {
+  const sec = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
+  if (isQa) {
+    return { qaLiveMinutes: sec / 60 };
+  }
+  return { liveMinutes: sec / 60, calls: callsForDuration(sec) };
 }
 
 /**

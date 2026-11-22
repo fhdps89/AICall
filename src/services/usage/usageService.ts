@@ -10,6 +10,7 @@ import { getKSTToday } from "../firebase/db";
 
 export interface UsageDelta {
   liveMinutes?: number;
+  qaLiveMinutes?: number;
   sttMinutes?: number;
   sttEngine?: "gemini" | "assemblyai";
   textInputTokens?: number;
@@ -49,6 +50,7 @@ export function estimateCostUsd(d: UsageDelta): number {
   const tts = (d.ttsEngine || DEFAULT_TTS_ENGINE) === "elevenlabs" ? r.ttsPer1kCharsElevenLabs : r.ttsPer1kCharsGemini;
   return (
     (d.liveMinutes || 0) * r.livePerMinute +
+    (d.qaLiveMinutes || 0) * r.livePerMinute +
     (d.sttMinutes || 0) * stt +
     ((d.textInputTokens || 0) / 1000) * r.textPer1kInputTokens +
     ((d.textOutputTokens || 0) / 1000) * r.textPer1kOutputTokens +

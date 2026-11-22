@@ -42,19 +42,20 @@ export interface RecoveredTranscriptItem {
 
 export type RecoveredUsageSession = Pick<
   SessionData,
-  "startedAt" | "endedAt" | "lastChunkAt" | "lastTranscriptAt" | "usageRecordedAt"
+  "startedAt" | "endedAt" | "lastChunkAt" | "lastTranscriptAt" | "usageRecordedAt" | "source"
 > & {
   liveTranscript?: ReadonlyArray<RecoveredTranscriptItem>;
 };
 
 /**
  * 정상 종료(`endedAt`)나 복구 집계(`usageRecordedAt`)가 없는 오늘(KST) 통화의 사용량을 산출한다.
- * 다른 날 시작한 통화나 길이 0 이하 통화는 null을 반환한다.
+ * QA 통화(`source === "qa"`), 다른 날 시작한 통화나 길이 0 이하 통화는 null을 반환한다.
  */
 export function recoveredCallUsage(
   s: RecoveredUsageSession,
   todayKst: string
 ): { liveMinutes: number; calls: number } | null {
+  if (s.source === "qa") return null;
   if (s.endedAt || s.usageRecordedAt) return null;
 
   const startMs = Date.parse(s.startedAt);

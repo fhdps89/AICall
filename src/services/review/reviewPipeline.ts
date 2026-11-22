@@ -43,11 +43,11 @@ import {
 import { PromptPlaceholders } from "../../data/promptCustomizer";
 import { buildTodayLessonSystemPrompt } from "../../data/lessonPromptBuilder";
 import { mergeChunksToWav, groupChunks } from "../recording/audioMerge";
-import { isQaMode, resolveMistakeSource } from "../../data/qaMode";
-import { keepKnownIds, mergeMinuteTranscripts, MinutePartial } from "./reviewRules";
+import { isQaCall, isQaMode } from "../../data/qaMode";
+import { mergeMinuteTranscripts, MinutePartial } from "./reviewRules";
 import { decideSttSource } from "./speechCheck";
 import { createStepTimer, ReviewTiming } from "./reviewTiming";
-import { outcomeItems } from "./reviewView";
+import { persistReviewOutcome } from "./persistReview";
 import {
   createChunkDownloadTracker,
   failureReasonForStatus,
@@ -429,109 +429,46 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
 
     onProgress?.("3/3 복기 결과 및 실수 보관함 저장 중...");
 
+    const isQa = isQaCall(sess, isQaMode());
     let mistakeDocs: MistakeData[] = [];
     let sttFinalData!: SttFinalData;
     timer.start("save");
     try {
-      // Step 6: Save mistakes to mistakes collection (stage 1, status reviewing, nextReviewAt=내일)
       const tomorrow = getKSTTomorrow();
-      const mistakeSource = resolveMistakeSource(sess, isQaMode());
       const nowIso = new Date().toISOString();
-      const toDoc = (
-        m: { myPhrase: string; naturalPhrase: string; reason: string; sourceStt?: string },
-        source: MistakeData["source"]
-      ): MistakeData => ({
-        myPhrase: m.myPhrase,
-        naturalPhrase: m.naturalPhrase,
-        reason: m.reason,
-        sourceStt: m.sourceStt || sourceStt,
-        stage: 1,
-        status: "reviewing",
-        nextReviewAt: tomorrow,
-        nextReviewDate: tomorrow,
-        source,
-        sessionId,
-        goalId: goal.id,
-        lessonIndex,
-        lessonTitle: currentLessonTitle,
-        createdAt: nowIso,
-      });
-      const primaryDocs: MistakeData[] = (review.mistakes || []).map((m) => toDoc(m, mistakeSource));
-      const extras = Array.isArray(review.extraMistakes) ? review.extraMistakes : [];
-      const extraDocs: MistakeData[] =
-        mistakeSource === "qa"
-          ? []
-          : extras.map((m) => toDoc(m, "transcript_analysis"));
-      mistakeDocs = [...primaryDocs, ...extraDocs];
-
-      try {
-        // Re-running the review for the same call (after an earlier failure) replaces what that run
-        // saved instead of adding duplicates.
-        const removed = await deleteCallMistakesForSession(userId, sessionId);
-        if (removed > 0) console.log(`[ReviewPipeline] Replaced ${removed} mistakes from an earlier review of this call.`);
-        if (mistakeDocs.length > 0) {
-          const ids = await saveCallMistakes(userId, mistakeDocs);
-          // Keep each mistake's id in the saved review, so 「이건 내가 한 말이 아니에요」 can remove it.
-          review.mistakes = (review.mistakes || []).map((m, i) => (ids[i] ? { ...m, id: ids[i] } : m));
-          if (extraDocs.length > 0) {
-            review.extraMistakes = extras.map((m, i) =>
-              ids[primaryDocs.length + i] ? { ...m, id: ids[primaryDocs.length + i] } : m
-            );
-          }
-          console.log(`[ReviewPipeline] Saved ${mistakeDocs.length} new mistakes to mistakes collection.`);
-        }
-        review.mistakesSaved = true;
-      } catch (mistakeErr) {
-        review.mistakesSaved = false;
-        console.error("[ReviewPipeline] Failed to save mistakes collection:", mistakeErr);
-      }
-
-      // B-5 Requirement 3: 빠른 졸업 & 다시 복습 (usedCorrectly -> graduated, repeatedMistakes -> reviewing stage 1)
-      try {
-        // The model returns ids; trust only ids from the lists it was given, and only in the right
-        // direction (a "reviewing" item can graduate, a "graduated" one can be reopened).
-        const usedList = keepKnownIds(review.usedCorrectly, reviewingMistakes.map((m) => m.id));
-        const repeatedList = keepKnownIds(review.repeatedMistakes, graduatedMistakes.map((m) => m.id));
-        review.usedCorrectly = usedList;
-        review.repeatedMistakes = repeatedList;
-        review.usedCorrectlyItems = outcomeItems(usedList, reviewingMistakes).map((m) => ({
-          id: m.id || "",
-          myPhrase: m.myPhrase || "",
-          naturalPhrase: m.naturalPhrase || "",
-        }));
-        review.repeatedItems = outcomeItems(repeatedList, graduatedMistakes).map((m) => ({
-          id: m.id || "",
-          myPhrase: m.myPhrase || "",
-          naturalPhrase: m.naturalPhrase || "",
-        }));
-        if (usedList.length > 0 || repeatedList.length > 0) {
-          const updateResult = await applyCallMistakeUpdates(userId, usedList, repeatedList);
-          console.log(`[ReviewPipeline] Applied B-5 mistake updates: ${updateResult.graduatedCount} graduated, ${updateResult.reopenedCount} reopened.`);
-        }
-      } catch (b5Err) {
-        console.error("[ReviewPipeline] Failed to apply B-5 usedCorrectly/repeatedMistakes:", b5Err);
-      }
-
-      // Step 7: Save review & sttFinal to session document, mark done
       sttFinalData = {
         transcript: sttFinalText,
         sourceStt,
-        createdAt: new Date().toISOString(),
+        createdAt: nowIso,
         engine: "gemini-3.5-transcribe",
         mode: "VERBATIM",
       };
-
-      review.lessonAdvanced = true;
-      try {
-        await saveSessionReview(userId, sessionId, review, sttFinalData);
-        console.log(`[ReviewPipeline] Updated session ${sessionId} to status 'done' with review report.`);
-        // B-9 Requirement 2: 완료한 날만 nextLessonIndex += 1 (스케줄 규칙: 하루 빠진 날은 과를 건너뛰지 않음)
-        await advanceGoalAfterCompletedCall(userId, goal.id, lessonIndex).catch((advErr) => {
-          console.warn("[ReviewPipeline] advanceGoalAfterCompletedCall error:", advErr);
-        });
-      } catch (saveErr) {
-        console.error("[ReviewPipeline] Failed to save session review:", saveErr);
-      }
+      const persisted = await persistReviewOutcome(
+        {
+          deleteCallMistakesForSession,
+          saveCallMistakes,
+          applyCallMistakeUpdates,
+          saveSessionReview,
+          advanceGoalAfterCompletedCall,
+        },
+        {
+          userId,
+          sessionId,
+          goalId: goal.id,
+          lessonIndex,
+          lessonTitle: currentLessonTitle,
+          review,
+          sttFinal: sttFinalData,
+          sourceStt,
+          isQa,
+          tomorrow,
+          nowIso,
+          reviewingMistakes,
+          graduatedMistakes,
+        }
+      );
+      review = persisted.review;
+      mistakeDocs = persisted.mistakeDocs;
     } finally {
       timer.end("save");
     }

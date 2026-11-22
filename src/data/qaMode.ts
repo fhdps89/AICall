@@ -75,3 +75,25 @@ export function resolveMistakeSource(
   if (sessionDoc) return sessionDoc.source === "qa" ? "qa" : "call";
   return qaNow ? "qa" : "call";
 }
+
+/** 세션 문서가 있으면 그 source를 따르고, 없을 때만 지금 브라우저 플래그를 본다 (resolveMistakeSource와 같은 규칙). */
+export function isQaCall(sessionDoc: { source?: string } | null | undefined, qaNow: boolean): boolean {
+  return resolveMistakeSource(sessionDoc, qaNow) === "qa";
+}
+
+export interface CallSideEffects {
+  saveMistakes: boolean;          // deleteCallMistakesForSession + saveCallMistakes
+  applyMistakeOutcomes: boolean;  // applyCallMistakeUpdates(졸업·재오픈) + 성과 항목 표시
+  advanceLesson: boolean;         // advanceGoalAfterCompletedCall + lessonAdvanced=true
+  recordLearningUsage: boolean;   // liveMinutes / calls
+}
+
+export function callSideEffects(isQa: boolean): CallSideEffects {
+  const allow = !isQa;
+  return {
+    saveMistakes: allow,
+    applyMistakeOutcomes: allow,
+    advanceLesson: allow,
+    recordLearningUsage: allow,
+  };
+}
