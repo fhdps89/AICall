@@ -4,6 +4,21 @@
 
 ---
 
+### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 코치 자연어 진도 조정 (`propose_progress_adjust`, 확인 후 반영, QA/stale/moved 가드·페이스(`lessonsPerCall`)·오늘 트랙·응 만료·QA 진도 가드) (브랜치 `englead/coach-progress-adjust-20261122`)
+- **배경**: 원콜 「코치와 대화하기」에서 "하루 미뤄줘", "시험 때문에 이틀치 땡겨줘", "OPIc 매 통화 2과씩 나가줘", "여행 5과부터 할래", "방금 거 되돌려줘" 같은 자연어 진도 조정 요청을 받고, 사용자 확인 후에만 기존 `planChanges` → `goals.nextLessonIndex`·`goals.lessonsPerCall` 경로로 안전하게 반영할 수 있어야 한다. 또한 오늘 고른 트랙 반영, 오래된 제안 빠른 답장 방지, QA 통화의 진도 증가 차단이 필요하다. 머지·배포는 하지 않음.
+- **원인**: 기존 코치 도구(`propose_plan_change`)는 자유 형식 `goalPatches`에 의존해 `nextLessonIndex` 경계·요일 패턴 계산·되돌리기·QA 가드가 일관되지 않았고, 미루기(`postpone`), 매 통화 반복 속도(`set_pace`), 오늘 트랙(`todayGoalId`) 우선 해석, 제안 10분 만료·세션 소속 검사, QA 통화 시 `advanceGoalAfterCompletedCall` 차단이 없었다.
+- **수정**:
+  - **순수 페이스·만료 게이트·진도 조정 규칙 (`src/data/planValidation.ts`, `src/data/lessonPace.ts`, `src/data/coachProposalGate.ts`, `src/data/progressAdjust.ts`)**: Firebase·DOM 의존 없이 `normalizeLessonsPerCall`(1~3)·`sanitizePlanChangeAfter` `lessonsPerCall` 검증, `lastLessonIndex`·`paceTarget`·`nextIndexAfterCompletedCall`(마지막 과 보호, `currentNext >= t`이면 null), `canApplyPendingProposal`·`selectQuickReplyTarget`(10분 만료, 미래 시각 60초 초과 만료, 빠른 답장은 현재 세션 카드만 허용), `set_pace`·`reconcileProgressIntent`·`parseDayCount`·`sanitizeTodayGoalId`(명시→`all`→시험/오픽→`todayGoalId`→오늘 패턴→되묻기)·`buildProgressCardView`·`formatAppliedProgressReply`·`describeUndoOffer` 및 `lessonsPerCall` 대상 `isProgressChange`/`isStaleProgressChange`/`pickUndoTarget` 구현. `postpone`은 항상 `noop` + 오늘을 제외한 다음 수업일 안내.
+  - **DB 페이스 저장·복원 및 QA 진도 가드 (`src/services/firebase/db.ts`, `src/services/review/reviewPipeline.ts`)**: `GoalData`·`PlanChangeSnapshot`에 `lessonsPerCall` 추가, `applyPlanChange`/`revertPlanChange`가 `lessonsPerCall` 스냅샷(미설정 시 1 기록)·복원, `advanceGoalAfterCompletedCall`이 `nextIndexAfterCompletedCall` 사용(시그니처 유지). `reviewPipeline.ts`는 `mistakeSource !== "qa"`일 때만 `review.lessonAdvanced = true` 및 `advanceGoalAfterCompletedCall` 호출(QA면 `delete review.lessonAdvanced`로 빈 복기 오판 방지).
+  - **서버 엔드포인트 (`server.ts`, `/api/coach/chat`)**: 요청 body의 `todayGoalId`를 `sanitizeTodayGoalId`로 검증해 상태·컨텍스트에 전달, `propose_progress_adjust` 도구에 `set_pace` 추가 및 시스템 프롬프트 규칙 7 갱신, `buildProgressProposal` + `sanitizePlanChangeAfter`로 서버에서 `after`와 `reply`를 결정론적으로 생성.
+  - **코치 UI (`src/ui/coach/CoachModal.tsx`)**: 전송 시 `loadDailyOverride`로 `todayGoalId` 전달, `sessionChangeIdsRef`로 현재 세션 카드만 빠른 답장 대상(`selectQuickReplyTarget`)으로 제한, `canApplyPendingProposal`로 대화·이력 탭 만료(10분 초과 시 승인 대신 만료 안내·라벨) 적용(거절은 허용, Firestore 상태는 변경하지 않음), `buildProgressCardView`·`formatAppliedProgressReply`·`describeUndoOffer` 반영, 환영 예시와 칩(`⏩ "OPIc 매 통화 2과씩 나가줘"`) 갱신, `handleApplyChange` stale 가드 및 `handleRevertChange` `moved`·QA 가드 유지.
+  - **문서 (`PROJECT_CONTEXT.md`)**: 「스케줄 불변 안전망」·「코치 UI 및 LLM 통제」·「트랙 바꾸기」에 `lessonsPerCall`, `set_pace`, 교정 규칙, `todayGoalId`, 10분 만료, QA 진도 가드를 추가.
+- **방어 조치 (Safeguards)**: `tests/lessonPace.test.ts`, `tests/coachProposalGate.test.ts`, `tests/planValidation.test.ts`, `tests/progressAdjust.test.ts`(1–39)로 페이스·마지막 과 보호·의도 교정·오늘 트랙·10분 만료·카드 문구·stale/undo 검증, `tests/serverNodeImports.test.ts`로 순수 node 로드 검증, `tests/userFacingText.test.ts`로 UI 내부 용어 비노출 검증.
+- **검증**: `npm test`(413/413 통과), `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build` 통과. 로컬 재실행으로 확인. 머지·배포 미실행.
+- **모델 및 PR 겹침 메모**: 설계 Claude CLI Opus 5.5 high, 구현 agy gemini-4-hydrogen-high. 머지 시 `reviewPipeline.ts` 저장 블록은 `#41`의 `persistReviewOutcome`을 유지했다. QA면 `callSideEffects.advanceLesson`이 꺼져 `advanceGoalAfterCompletedCall`을 호출하지 않고 `lessonAdvanced`를 기록하지 않음(`false` 금지). 페이스는 `advanceGoalAfterCompletedCall`→`nextIndexAfterCompletedCall`이 적용한다. `#42`의 `HomeScreen`·`TrackPickerSheet`·`trackOptions`는 수정하지 않음(`dailyTrackOverride.ts`는 import만). 문서 상단(`changelog.md`·`PROJECT_CONTEXT.md`)은 같은 자리를 수정함.
+
+---
+
 ### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 주간 복기일 「트랙 골라 통화」 피커에서 진행 가능한 트랙 선택 시 바로 통화 준비 시작 (브랜치 `englead/weekly-review-start-call-20261122`)
 - **배경**: 일요일(주간 복기일) 오늘 수업 카드의 「트랙 골라 통화」 버튼으로 트랙 피커를 열어 트랙을 눌러도 통화 준비 화면으로 이어지지 않아, 주간 복기일에 바로 트랙 통화를 시작할 수 있도록 수정함. 머지·배포는 하지 않음.
 - **원인**: P0-3이 주간 복기 카드에 「트랙 골라 통화」를 넣었으나, `d201b80` 이후 피커(`TrackPickerSheet`)가 트랙만 고르고 닫혀 이미 선택된 주간 복기를 누르면 통화를 시작하지 못함.

@@ -16,7 +16,8 @@ import {
 } from "firebase/firestore";
 import { db, auth } from "./config";
 import { DEFAULT_VOICE, normalizeVoiceName } from "../../config/voices";
-import { sanitizePlanChangeAfter, isEmptyPlanChange } from "../../data/planValidation";
+import { sanitizePlanChangeAfter, isEmptyPlanChange, normalizeLessonsPerCall } from "../../data/planValidation";
+import { lastLessonIndex, nextIndexAfterCompletedCall } from "../../data/lessonPace";
 import type { ReviewTiming } from "../review/reviewTiming";
 import {
   DEFAULT_STALE_SESSION_MS,
@@ -91,6 +92,7 @@ export interface GoalData {
   tutorPrompt: string;
   lessons: { index: number; title: string; completed?: boolean }[];
   nextLessonIndex: number;
+  lessonsPerCall?: number;
   status: "active" | "paused" | "done";
   deadline?: string; // ISO date string (e.g. OPIc test date)
   updatedAt: string;
@@ -128,7 +130,15 @@ export const DEFAULT_WEEKLY_PATTERN: WeeklyPattern = {
 
 export interface PlanChangeSnapshot {
   plan?: Partial<UserPlanData>;
-  goals?: Record<string, { nextLessonIndex?: number; deadline?: string; status?: "active" | "paused" | "done" }>;
+  goals?: Record<
+    string,
+    {
+      nextLessonIndex?: number;
+      lessonsPerCall?: number;
+      deadline?: string;
+      status?: "active" | "paused" | "done";
+    }
+  >;
 }
 
 export interface PlanChangeData {
@@ -1174,12 +1184,16 @@ export async function applyPlanChange(userId: string, changeId: string): Promise
         const g = gSnap.data() as GoalData;
         before.goals[goalId] = {
           ...(typeof patch.nextLessonIndex === "number" ? { nextLessonIndex: g.nextLessonIndex } : {}),
+          ...(typeof patch.lessonsPerCall === "number"
+            ? { lessonsPerCall: normalizeLessonsPerCall(g.lessonsPerCall) }
+            : {}),
           ...(patch.deadline !== undefined ? { deadline: g.deadline ?? "" } : {}),
           ...(patch.status ? { status: g.status } : {}),
         };
       }
       const updates: any = { updatedAt: new Date().toISOString() };
       if (typeof patch.nextLessonIndex === "number") updates.nextLessonIndex = patch.nextLessonIndex;
+      if (typeof patch.lessonsPerCall === "number") updates.lessonsPerCall = patch.lessonsPerCall;
       if (patch.deadline !== undefined) updates.deadline = patch.deadline;
       if (patch.status) updates.status = patch.status;
       await updateDoc(gRef, updates).catch(() => {});
@@ -1243,6 +1257,9 @@ export async function revertPlanChange(userId: string, changeId: string): Promis
       const updates: any = { updatedAt: new Date().toISOString() };
       if (typeof afterPatch.nextLessonIndex === "number" && typeof beforePatch.nextLessonIndex === "number") {
         updates.nextLessonIndex = beforePatch.nextLessonIndex;
+      }
+      if (typeof afterPatch.lessonsPerCall === "number" && typeof beforePatch.lessonsPerCall === "number") {
+        updates.lessonsPerCall = beforePatch.lessonsPerCall;
       }
       if (afterPatch.deadline !== undefined) {
         // No deadline before → remove the one this change added
@@ -1403,19 +1420,25 @@ export async function saveUserSettings(
 }
 
 /**
- * 완료한 날만 nextLessonIndex += 1 (스케줄 규칙 B-9)
+ * 완료한 날만 nextLessonIndex += lessonsPerCall (기본 1, 마지막 과는 건너뛰지 않음)
  */
 export async function advanceGoalAfterCompletedCall(
   userId: string,
   goalId: string,
   completedLessonIndex: number
 ): Promise<void> {
-  const nextLessonIndex = completedLessonIndex + 1;
   // Never move backwards: reviewing an older unfinished call (e.g. lesson 3 after lesson 4 was
   // already done) must not reset progress.
   const snap = await getDoc(doc(db, "users", userId, "goals", goalId));
-  const current = snap.exists() ? Number((snap.data() as GoalData).nextLessonIndex) || 0 : 0;
-  if (current >= nextLessonIndex) return;
+  const data = snap.exists() ? (snap.data() as GoalData) : undefined;
+  const currentNext = data ? Number(data.nextLessonIndex) || 0 : 0;
+  const nextLessonIndex = nextIndexAfterCompletedCall({
+    completedLessonIndex,
+    currentNext,
+    lessonsPerCall: data?.lessonsPerCall,
+    lastLesson: lastLessonIndex(data?.lessons),
+  });
+  if (nextLessonIndex === null) return;
   await updateGoalProgress(userId, goalId, nextLessonIndex);
 }
 
