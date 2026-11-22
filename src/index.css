@@ -35,7 +35,3 @@
 /* Spacer at the end of the home scroll so the fixed unfinished-call pill never covers content.
    Pill height (~3rem) + gap + the same inset as .bottom-safe. A separate box avoids losing
    the space when a parent also sets padding-bottom (e.g. Tailwind py-6). */
-.unfinished-pill-space {
-  height: calc(5.5rem + env(safe-area-inset-bottom, 0px));
-  flex-shrink: 0;
-}

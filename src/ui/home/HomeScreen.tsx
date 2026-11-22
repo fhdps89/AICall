@@ -75,8 +75,9 @@ interface HomeScreenProps {
   onStartCall: (goal: GoalData, lessonIndex: number) => void;
   onOpenSettings: () => void;
   onLogout: () => void;
-  /** When the fixed "끝나지 않은 통화" pill is visible, reserve scroll space so it cannot cover content. */
-  reserveBottomForPill?: boolean;
+  /** Number of unfinished calls; when > 0 a flow banner is shown at the top of the page. */
+  unfinishedCount?: number;
+  onOpenUnfinished?: () => void;
 }
 
 export const HomeScreen: React.FC<HomeScreenProps> = ({
@@ -90,7 +91,8 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   onStartCall,
   onOpenSettings,
   onLogout,
-  reserveBottomForPill = false,
+  unfinishedCount = 0,
+  onOpenUnfinished,
 }) => {
   const devMode = useDevMode();
   const [selectedPromptGoal, setSelectedPromptGoal] = useState<GoalData | null>(null);
@@ -388,6 +390,16 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
 
       {/* Main Content */}
       <main className="max-w-5xl mx-auto px-4 py-6 w-full flex-1 space-y-6">
+        {unfinishedCount > 0 && onOpenUnfinished && (
+          <button
+            type="button"
+            data-testid="unfinished-call-pill"
+            onClick={onOpenUnfinished}
+            className="w-full px-4 py-3 rounded-2xl bg-amber-500 text-slate-950 text-sm font-bold shadow-lg shadow-amber-500/10 cursor-pointer text-left"
+          >
+            끝나지 않은 통화 {unfinishedCount}개 · 복기하기
+          </button>
+        )}
         {/* B-9 Requirement 5: 쉰 날 배너 — usage days(KST) 기준, 오늘 포함 2일 이상 미학습일 때만 */}
         {restDays !== null && userSettings?.coachNudges?.includes("absence2d") && (
           <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-amber-500/20 via-[#1F2737] to-[#161D2A] border border-amber-500/40 text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xl">
@@ -923,9 +935,6 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
         </div>
           </div>
         </section>
-              {reserveBottomForPill && (
-          <div data-testid="unfinished-pill-spacer" className="unfinished-pill-space" aria-hidden="true" />
-        )}
       </main>
 
       {/* Tutor Prompt Viewer Modal */}

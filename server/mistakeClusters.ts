@@ -15,6 +15,7 @@ import {
   cleanEmbeddingField,
   clusterBySimilarity,
   clusterKey,
+  findOverlappingNameEntry,
   isClusterableMistake,
   decodeVecBase64,
   encodeVecBase64,
@@ -70,7 +71,10 @@ interface CachedEmbeddingEntry {
 interface CachedNameEntry {
   name: string;
   description: string;
+  memberIds?: string[];
 }
+
+const MAX_CACHED_NAMES = 80;
 
 interface UserClusterCache {
   v: 1;
@@ -211,10 +215,14 @@ function pruneCache(
     }
   }
   const names: Record<string, CachedNameEntry> = {};
+  const prefer = activeClusterKeys;
   for (const [key, entry] of Object.entries(cache.names)) {
-    if (!activeClusterKeys || activeClusterKeys.has(key)) {
-      names[key] = entry;
-    }
+    if (prefer && prefer.has(key)) names[key] = entry;
+  }
+  for (const [key, entry] of Object.entries(cache.names)) {
+    if (key in names) continue;
+    if (Object.keys(names).length >= MAX_CACHED_NAMES) break;
+    names[key] = entry;
   }
   return { v: 1, embeddings, names };
 }
@@ -471,7 +479,7 @@ export async function computeMistakeClusters(
   const missingForNaming: ClusterNamingInput[] = [];
 
   for (const c of preClusters) {
-    const cachedName = cache.names[c.key];
+    const cachedName = cache.names[c.key] || findOverlappingNameEntry(c.memberIds, cache.names);
     const cleanName = sanitizeLine(cachedName?.name);
     const cleanDesc = sanitizeLine(cachedName?.description);
     if (!cachedName || !isValidClusterName(cleanName, cleanDesc)) {
@@ -521,8 +529,10 @@ export async function computeMistakeClusters(
           const name = sanitizeLine(outItem.name);
           const description = sanitizeLine(outItem.description);
           if (isValidClusterName(name, description)) {
-            freshNames.set(outItem.key, { name, description });
-            cache.names[outItem.key] = { name, description };
+            const members = preClusters.find((c) => c.key === outItem.key)?.memberIds;
+            const entry = { name, description, ...(members ? { memberIds: members } : {}) };
+            freshNames.set(outItem.key, entry);
+            cache.names[outItem.key] = entry;
           }
         }
       }
@@ -534,7 +544,7 @@ export async function computeMistakeClusters(
 
   const finalClusters: MistakeCluster[] = preClusters.map((c, idx) => {
     const fromFresh = freshNames.get(c.key);
-    const fromCache = cache.names[c.key];
+    const fromCache = cache.names[c.key] || findOverlappingNameEntry(c.memberIds, cache.names);
     const candidate = fromFresh ?? fromCache;
     if (candidate) {
       const name = sanitizeLine(candidate.name);
@@ -561,12 +571,20 @@ export async function computeMistakeClusters(
   // Remove any invalid/fallback entries from cache.names before saving
   const cleanedNames: Record<string, CachedNameEntry> = {};
   for (const [key, entry] of Object.entries(cache.names)) {
-    if (!activeKeys.has(key)) continue;
     const name = sanitizeLine(entry?.name);
     const description = sanitizeLine(entry?.description);
-    if (isValidClusterName(name, description)) {
-      cleanedNames[key] = { name, description };
-    }
+    if (!isValidClusterName(name, description)) continue;
+    const members = entry.memberIds || preClusters.find((c) => c.key === key)?.memberIds;
+    cleanedNames[key] = { name, description, ...(members ? { memberIds: members } : {}) };
+  }
+  // Also stamp memberIds on names used this turn (exact or overlap).
+  for (const c of preClusters) {
+    const used = cache.names[c.key] || findOverlappingNameEntry(c.memberIds, cleanedNames);
+    if (!used) continue;
+    const name = sanitizeLine(used.name);
+    const description = sanitizeLine(used.description);
+    if (!isValidClusterName(name, description)) continue;
+    cleanedNames[c.key] = { name, description, memberIds: c.memberIds };
   }
   cache.names = cleanedNames;
 

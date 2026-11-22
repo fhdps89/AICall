@@ -112,6 +112,35 @@ export function clusterKey(memberIds: string[]): string {
   return sha256Hex(JSON.stringify(sorted)).slice(0, 16);
 }
 
+export const NAME_OVERLAP_THRESHOLD = 0.6;
+
+export function jaccard(a: string[], b: string[]): number {
+  const aSet = new Set(a);
+  const bSet = new Set(b);
+  let inter = 0;
+  for (const id of aSet) if (bSet.has(id)) inter += 1;
+  const union = aSet.size + bSet.size - inter;
+  return union === 0 ? 0 : inter / union;
+}
+
+export function findOverlappingNameEntry<T extends { memberIds?: string[] }>(
+  memberIds: string[],
+  names: Record<string, T>,
+  threshold = NAME_OVERLAP_THRESHOLD
+): T | null {
+  let best: T | null = null;
+  let bestScore = -1;
+  for (const entry of Object.values(names)) {
+    if (!entry.memberIds || entry.memberIds.length === 0) continue;
+    const score = jaccard(memberIds, entry.memberIds);
+    if (score >= threshold && score > bestScore) {
+      best = entry;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
 export function cosine(a: ArrayLike<number>, b: ArrayLike<number>): number {
   if (a.length !== b.length) {
     throw new Error(`Vector dimension mismatch: ${a.length} !== ${b.length}`);

@@ -10,8 +10,9 @@ import { requireAuth, verifyFirebaseIdToken, setAfterAuthHook } from './server/a
 import { ensureUserGeminiKey, getUserSuppliedKey } from './server/userKey.ts';
 import { saveFeedBackup, deleteFeedBackup, saveLectureBackup } from './server/feedStore.ts';
 import { geminiLimit, clusterLimit, checkLiveSessionStart } from './server/rateLimit.ts';
-import { DATA_DIR, startLectureJob, startLectureAudioRebuild, readLectureState, lectureAudioPath, lectureHasLocalScript, kstToday, LECTURE_AUDIO_MISSING, LECTURE_AUDIO_SCRIPT_MISSING } from './server/lecture.ts';
+import { DATA_DIR, startLectureJob, startLectureAudioRebuild, readLectureState, lectureAudioPath, lectureHasLocalScript, lectureStatusPayload, kstToday, LECTURE_AUDIO_MISSING, LECTURE_AUDIO_SCRIPT_MISSING } from './server/lecture.ts';
 import type { LectureState } from './server/lecture.ts';
+import { mimeForAudioFile } from './server/lectureAudioEncode.ts';
 import { computeMistakeClusters, validateClusterRequestBody } from './server/mistakeClusters.ts';
 import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive } from './server/sttBench.ts';
 import { LIVE_MODEL, TEXT_MODEL, GEMINI_STT_MODEL, GEMINI_TTS_LITE_MODEL } from './src/config/models.ts';
@@ -1140,7 +1141,7 @@ app.get('/api/lecture/status', requireAuth, async (req: Request, res: Response) 
     }
   }
   try {
-    res.json({ ok: true, lecture: readLectureState(uid, date) });
+    res.json({ ok: true, lecture: lectureStatusPayload(uid, date) });
   } catch (err: any) {
     apiError(res, 400, 'BAD_REQUEST', '날짜 형식이 올바르지 않아요.');
   }
@@ -1160,7 +1161,10 @@ app.get('/api/lecture/audio', requireAuth, (req: Request, res: Response) => {
       });
       return;
     }
-    res.type('audio/wav').sendFile(file, SEND_DATA_FILE);
+    const st = readLectureState(uid, date);
+    const mime = st?.audioMime || mimeForAudioFile(st?.audioFile || file);
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.type(mime).sendFile(file, SEND_DATA_FILE);
   } catch (err: any) {
     apiError(res, 400, 'BAD_REQUEST', '날짜 형식이 올바르지 않아요.');
   }
@@ -1274,7 +1278,7 @@ app.get(['/feed/:secret/today', '/feed/:secret/today.json'], async (req: Request
 
 app.get('/feed/:secret/audio/:file', async (req: Request, res: Response) => {
   const st = await loadFeedForSecret(String(req.params.secret));
-  const m = /^(\d{4}-\d{2}-\d{2})\.wav$/.exec(String(req.params.file));
+  const m = /^(\d{4}-\d{2}-\d{2})\.(wav|m4a|mp3)$/.exec(String(req.params.file));
   if (!st || !m) {
     res.status(404).send('Not found');
     return;
@@ -1293,7 +1297,8 @@ app.get('/feed/:secret/audio/:file', async (req: Request, res: Response) => {
     return;
   }
   res.set('X-Robots-Tag', 'noindex');
-  res.type('audio/wav').sendFile(file, SEND_DATA_FILE);
+  res.set('Accept-Ranges', 'bytes');
+  res.type(mimeForAudioFile(file)).sendFile(file, SEND_DATA_FILE);
 });
 
 // B-10 Keep import: split pasted Keep "English mistake log" text into [내가 한 말 / 자연스러운 표현 / 이유]

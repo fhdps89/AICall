@@ -10,6 +10,8 @@ import {
   buildEmbeddingText,
   clusterBySimilarity,
   clusterKey,
+  findOverlappingNameEntry,
+  jaccard,
   cosine,
   decodeVecBase64,
   encodeVecBase64,
@@ -876,7 +878,7 @@ test('naming failure -> enabled:true with fallback titles (and not cached)', asy
   }
 });
 
-test('naming cached per cluster key; adding member triggers naming only for changed cluster', async () => {
+test('naming cached per cluster key; overlapping membership reuses the name without a new Gemini call', async () => {
   const tmp = makeTempDir();
   const namedKeyBatches: string[][] = [];
   const vecByWrong: Record<string, number[]> = {
@@ -926,14 +928,14 @@ test('naming cached per cluster key; adding member triggers naming only for chan
     await computeMistakeClusters(deps, 'user-1', base);
     assert.equal(namedKeyBatches.length, 1);
 
-    // Add a3 to cluster A -> only cluster A's new key is sent to naming
-    await computeMistakeClusters(deps, 'user-1', [
+    // Add a3 to cluster A: membership overlaps the cached set, so the name is reused
+    // and Gemini is not called again.
+    const withMember = await computeMistakeClusters(deps, 'user-1', [
       ...base,
       makeItem('m5', en('a3'), en('right'), 'why'),
     ]);
-    assert.equal(namedKeyBatches.length, 2);
-    assert.equal(namedKeyBatches[1].length, 1);
-    assert.equal(namedKeyBatches[1][0], clusterKey(['m1', 'm2', 'm5']));
+    assert.equal(namedKeyBatches.length, 1);
+    assert.equal(withMember.clusters.find((c) => c.memberIds.includes('m5'))?.name, '패턴 이름');
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -1042,4 +1044,14 @@ test('response only includes size >= 2, max 8 clusters, no vectors; usage separa
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test('jaccard and findOverlappingNameEntry reuse a name when most members overlap', () => {
+  assert.equal(jaccard(['a', 'b', 'c'], ['b', 'c', 'd']), 0.5);
+  const names = {
+    old: { name: '과거시제 누락', description: '동사 시제', memberIds: ['t1', 't2', 't3'] },
+  };
+  const hit = findOverlappingNameEntry(['t1', 't2', 't4'], names, 0.5);
+  assert.equal(hit?.name, '과거시제 누락');
+  assert.equal(findOverlappingNameEntry(['x'], names, 0.6), null);
 });
