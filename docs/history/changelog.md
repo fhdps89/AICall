@@ -4,6 +4,19 @@
 
 ---
 
+### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 통합 브랜치 `englead/integrate-20261122` (#37+#36+#33+#34)
+- **배경**: 열린 Draft PR #37(재시작 시 강의 유지)·#36(TTS 지시문 낭독)·#33(QA 6차)·#34(트랙·말소리·목소리)를 main(`3450071`, #35 포함) 위에 한 브랜치로 합침. 이 PR이 네 건을 대체한다. 기존 PR은 닫지 않았고, 머지·배포는 하지 않음.
+- **합친 내용**:
+  - **#37** (`englead/feed-persist`): ready 강의 대본을 Firestore `feeds/{id}/days/{date}`에 암호화 백업하고, 재시작 뒤에는 같은 대본으로 TTS만 다시 만듦. 피드 `audioUrl`은 https. 홈 카드는 ready 문서를 즉시 표시하고 Storage 업로드는 백그라운드. Firestore `days` 규칙과 Storage lectures 경로는 콘솔에서 따로 게시해야 함.
+  - **#36** (`englead/tts-strip-directions`): 1인 TTS도 스타일을 `speechMetadata.style`로만 보내고, `(pause)` 등 지시문은 낭독 전에 제거함(`myPhrase`는 유지).
+  - **#33** (`englead/qa6-r30-28-24-29-track`): 강의 오디오 status 폴링(전체 15분·정체 3분), ffmpeg가 있으면 AAC/MP3 압축, 홈 흐름 배너, 묶음 이름 재사용, 진도 문서 덮어쓰기 방지.
+  - **#34** (`englead/feedback-1122-track-voice-audio`): 홈 카드에서 트랙 바로 바꾸기(오늘만 저장), 말소리 선행 버퍼 120–400ms, 설정에서 AI 목소리 선택(기본 Kore).
+- **충돌 해결** (`lecture.ts` 등): #36의 지시문 제거·#37의 작업 epoch/백업과 #33의 병렬 TTS·인코딩·`lectureStatusPayload`를 한 `renderAndSaveAudio`에 모음. 홈 카드는 #37의 메타데이터 동기화+백그라운드 복사를 유지하고, 복사는 #33처럼 mime/확장자를 따름. 피드 오디오 URL은 실제 확장자(wav/m4a/mp3)를 쓰고, 오늘 날짜면 #37의 백업 복원 검사를 함. changelog·PROJECT_CONTEXT는 네 PR 내용을 모두 담아 정리함.
+- **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build`(통합 브랜치에서 실행).
+- **배포 시 주의**: 첫 배포 때는 days 백업이 없어 서버 재시작 시 오늘 강의가 한 번 더 바뀔 수 있음. Firestore `days` 규칙과 Storage lectures 규칙은 AI Studio Republish만으로 바뀌지 않으며 콘솔에서 따로 게시해야 함. 붙여넣기용 최종 텍스트: `/workspace/collab/onecall_rules_20261122/firestore.rules.txt`, `storage.rules.txt`.
+
+---
+
 ### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 재시작 시 오늘 강의 유지, 피드 https URL, 홈 카드 지연·Storage 403 가드 (브랜치 `englead/feed-persist`)
 - **배경**: 2026-11-22 10:56 KST에 ready였던 오늘 강의(「자연스러운 입국 심사와 출장 표현」)가 11:01 Republish 뒤 `today.json`에서 사라지고, 11:06에 다른 제목의 강의가 새로 만들어졌다. QA봇이 같은 라이브 main `3450071`에서 Storage 업로드 403(34행)과 새로고침 후 카드가 「불러오는 중…」에 40–67초 머무는 현상(28행)을 재현했다. 피드 JSON의 `audioUrl`이 `http://`로 나가 열면 500이 나고, `https://`로 바꾸면 재생됐다. 머지·배포는 하지 않음.
 - **원인**:
@@ -18,8 +31,6 @@
 - **방어 조치 (Safeguards)**: `tests/lecturePersist.test.ts`(백업 필드·복원 시 startJob 0회·재빌드 중 generating+제목·404/500·epoch·single-flight·규칙 텍스트 검사), `tests/feedBaseUrl.test.ts`, `tests/lectureSyncPolicy.test.ts`(즉시 표시·백오프·덮어쓰기 가드·lectureDate·규칙 문서와 경로 일치). 기존 `lectureJobTimeout`·`lectureAudio`·`feedStore` 테스트 유지.
 - **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build`.
 - **배포 시 주의**: 첫 배포 때는 오늘 강의의 days 백업이 아직 없어, 배포로 `.data/`가 지워지면 피드가 한 번 더 새로 만들 수 있다(그 이후부터 백업이 유지됨). 앱은 기존 Firestore 강의를 유지하므로 그날 하루 피드와 앱 제목이 다를 수 있다. Firestore `days` 규칙과 Storage lectures 규칙은 AI Studio Republish만으로 바뀌지 않으며 콘솔에서 따로 게시해야 한다. 규칙이 아직이면 백업 쓰기는 403으로 로그만 남고 동작은 지금과 같다.
-
----
 
 ---
 
@@ -49,6 +60,17 @@
 - **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit` 통과. 라이브 오늘 피드 복구는 이 PR만으로는 불가(현재 프로세스의 멈춘 작업은 재시작 후에야 `INTERRUPTED`로 풀림).
 
 ---
+
+### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 사용자 피드백 3건 (홈 트랙 바로 바꾸기, AI 말소리 끊김, 목소리 고정·선택) (브랜치 `englead/feedback-1122-track-voice-audio`, Draft PR #33 위에 쌓음)
+- **배경**: 찬식님이 어제 앱을 써 보고 남긴 피드백. 1) 트랙 바꾸기가 하단 「더 보기」에 숨어 있음 2) AI 말소리가 살짝씩 끊김 3) AI 목소리가 통화 중 바뀜. 운영에서 「이 트랙으로 바꾸기」 선택이 새로고침하면 사라진다는 버그도 함께 확인됨. 머지·배포는 하지 않음.
+- **원인과 수정**:
+  - **트랙 선택 저장 안 됨**: `HomeScreen`의 `overrideGoalId`가 `useState(null)`뿐이었음. 오늘(KST) 날짜를 키로 `localStorage`(`onecall_today_track_override:{uid}`)에 저장(`dailyTrackOverride.ts`). 다음 날, 깨진 값, 목록에 없는 트랙은 무시.
+  - **트랙 바로 바꾸기**: 오늘 수업 카드 「트랙: …」 칩 → `TrackPickerSheet`(`trackOptions.ts`). 진행할 과가 없는 트랙은 비활성, 복기일에는 「주간 복기(오늘 루틴)」 항목. 요일별 주간 루틴을 설정에서 고치는 곳은 아직 없음(미구현).
+  - **말소리 끊김**: `geminiLiveProvider.playAudioChunk`가 청크 도착 즉시 예약해 선행 버퍼가 없었음(네트워크·메인스레드 지연 = 무음). `audioPlaybackScheduler.ts`(선행 120ms~400ms 적응, 새 발화 구분, interrupted 때만 리셋)로 교체. 샘플레이트는 출력 컨텍스트·버퍼 모두 24000으로 일치해 원인이 아님. 홀수 바이트 청크 예외 방지, `playback_stats` 로그 추가.
+  - **목소리**: 모든 경로가 이미 `voiceName: "Kore"`를 보내고 있어 「미지정」은 원인이 아님. 모델(`gemini-3.8-live`) 자체의 음색 흔들림이 Google 포럼에 다수 보고됨(앱이 완전히 막을 수 없음). 앱 쪽 불일치(경로·시도마다 `languageCode` 유무가 다름, 허용 목록 검증이 서버에만 있음, 기본값 `Kore` 흩어짐)를 `src/config/voices.ts` + `server/liveConfig.ts`로 통일하고, 설정 「AI 목소리」 탭(허용 5종, 미리 듣기, `settings/general.voiceName`)을 추가.
+- **방어 조치 (Safeguards)**: 허용 목록 밖 값은 클라·서버 모두 Kore로 정규화. 설정 읽기는 통화 시작을 1.5초 넘게 막지 않음(캐시 → localStorage → 원격). 선택한 목소리는 다음 통화부터 적용. 아침 강의 두 화자 구조는 건드리지 않음.
+- **테스트**: `tests/audioPlaybackScheduler.test.ts`, `trackOptions.test.ts`, `dailyTrackOverride.test.ts`, `voices.test.ts`, `liveConfig.test.ts`, `voicePreference.test.ts`, `audioPlayable.test.ts` 추가, `liveWire.test.ts`·`a11yCloseButtons.test.ts` 갱신. `npm test` 284/284, lint, server tsc, build 통과. 스크린샷: `/workspace/collab/onecall_feedback_20261122/shots/`.
+- **배포 후 확인 필요**: 실기기 통화에서 끊김 체감, 음색 일관성(모델 측 흔들림은 남을 수 있음), 서버 로그 `[Live] stage=playback_stats`.
 
 ### [2026-11-21 KST] v2.10.0 이후 수정(미배포) — QA 6차 재확인 후속 (30·28·24·29/33행, 브랜치 `englead/qa6-r30-28-24-29-track`)
 - **배경**: QA봇이 #32 머지·배포(main `1c445d7`, 번들 `index-Bb2KsfTc.js`)를 다시 확인한 부분 실패·신규 이슈를 Draft PR로 고침. 머지·배포는 하지 않음.

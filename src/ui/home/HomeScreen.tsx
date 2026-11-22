@@ -27,6 +27,7 @@ import {
   Calendar,
   BookOpen,
   ChevronRight,
+  ChevronDown,
   FileText,
   Sparkles,
   CheckCircle,
@@ -54,6 +55,9 @@ import { KeepImportModal } from "../keep/KeepImportModal";
 import { SttBenchmarkModal } from "../sttBench/SttBenchmarkModal";
 import { CoachModal } from "../coach/CoachModal";
 import { LessonChangeSheet } from "./LessonChangeSheet";
+import { TrackPickerSheet } from "./TrackPickerSheet";
+import { buildTrackOptions } from "./trackOptions";
+import { loadDailyOverride, saveDailyOverride } from "./dailyTrackOverride";
 import { getUsageMonths, USAGE_UPDATED_EVENT } from "../../services/usage/usageService";
 import {
   deriveHomeLearningStatus,
@@ -253,7 +257,22 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const currentDayKey = DAY_KEYS[kstDayIndex];
 
   const [showMore, setShowMore] = useState<boolean>(false);
-  const [overrideGoalId, setOverrideGoalId] = useState<string | null>(null);
+  const [overrideGoalId, setOverrideGoalId] = useState<string | null>(() => {
+    try {
+      return loadDailyOverride(window.localStorage, user.uid, Date.now());
+    } catch {
+      return null;
+    }
+  });
+  const chooseOverrideGoal = (goalId: string | null) => {
+    setOverrideGoalId(goalId);
+    try {
+      saveDailyOverride(window.localStorage, user.uid, Date.now(), goalId);
+    } catch {
+      // localStorage 접근 실패 시 상태만 갱신한다.
+    }
+  };
+  const [showTrackPicker, setShowTrackPicker] = useState<boolean>(false);
   const [lessonChangeGoal, setLessonChangeGoal] = useState<GoalData | null>(null);
   const lectureCardRef = useRef<HTMLDivElement>(null);
   const goalsSectionRef = useRef<HTMLDivElement>(null);
@@ -262,13 +281,23 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const currentPattern = userPlan?.weeklyPattern || DEFAULT_WEEKLY_PATTERN;
   const dayAssignedGoals = currentPattern[currentDayKey] || [];
   const isPlanReviewDay = dayAssignedGoals.length === 0;
+  const routineGoalId =
+    dayAssignedGoals.length > 0 ? dayAssignedGoals[0] : isPlanReviewDay ? null : todayRoutine.goalId;
 
-  // Resolved today goal ID (manual override > plan assigned goal > fallback to default routine)
-  const resolvedGoalId = overrideGoalId || (dayAssignedGoals.length > 0 ? dayAssignedGoals[0] : (isPlanReviewDay ? null : todayRoutine.goalId));
+  // Resolved today goal ID (manual override if present in goals > plan assigned goal > fallback to default routine)
+  const overrideGoal = overrideGoalId ? goals.find((g) => g.id === overrideGoalId) : undefined;
+  const activeOverrideGoalId = overrideGoal ? overrideGoal.id : null;
+  const resolvedGoalId = activeOverrideGoalId || routineGoalId;
   const todayGoal = resolvedGoalId ? goals.find((g) => g.id === resolvedGoalId) : null;
   const currentLesson = todayGoal?.lessons.find(
     (l) => l.index === (todayGoal.nextLessonIndex || 1)
   );
+  const trackOptionsResult = buildTrackOptions({
+    goals,
+    routineGoalId,
+    overrideGoalId: activeOverrideGoalId,
+    isPlanReviewDay,
+  });
 
   const handleLessonChange = async (goalId: string, newLessonIndex: number) => {
     await onUpdateGoalProgress(goalId, newLessonIndex);
@@ -447,7 +476,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
             </div>
           </div>
 
-          {isPlanReviewDay && !overrideGoalId ? (
+          {isPlanReviewDay && !activeOverrideGoalId ? (
             <div className="relative z-10 py-6 text-center space-y-3">
               <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center mx-auto">
                 <Calendar className="w-6 h-6" />
@@ -476,12 +505,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    setShowMore(true);
-                    setTimeout(() => {
-                      goalsSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-                    }, 0);
-                  }}
+                  onClick={() => setShowTrackPicker(true)}
                   className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white border border-slate-700 text-xs font-semibold transition-colors cursor-pointer"
                 >
                   트랙 골라 통화
@@ -491,20 +515,29 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
           ) : todayGoal && currentLesson ? (
             <div className="relative z-10 space-y-5">
               <div>
-                <div className="flex items-center gap-2 text-slate-400 text-xs font-medium mb-1">
-                  <span>트랙:</span>
-                  <span className="text-amber-300 font-semibold">{todayGoal.title}</span>
-                  <span className="text-slate-600">·</span>
+                <div className="flex flex-wrap items-center gap-2 text-slate-400 text-xs font-medium mb-1">
+                  <button
+                    type="button"
+                    onClick={() => setShowTrackPicker(true)}
+                    className="inline-flex items-center gap-1.5 min-h-[44px] px-3.5 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 hover:text-amber-200 text-xs font-bold transition-colors cursor-pointer"
+                  >
+                    <span>트랙: {todayGoal.title}</span>
+                    <ChevronDown className="w-3.5 h-3.5 shrink-0" />
+                  </button>
                   <span>총 {todayGoal.lessons.length}개 과 중 {currentLesson.index}번째</span>
-                  {overrideGoalId && (
+                  {activeOverrideGoalId && (
                     <button
-                      onClick={() => setOverrideGoalId(null)}
-                      className="ml-1 text-[11px] text-slate-400 underline hover:text-white cursor-pointer"
+                      type="button"
+                      onClick={() => chooseOverrideGoal(null)}
+                      className="ml-1 min-h-[44px] px-1 text-[11px] text-slate-400 underline hover:text-white cursor-pointer"
                     >
                       오늘 루틴으로 되돌리기
                     </button>
                   )}
                 </div>
+                <p className="text-[11px] text-slate-400 mb-2">
+                  트랙 바꾸기 · 위 트랙 버튼을 눌러 바로 바꿀 수 있어요
+                </p>
                 <h2 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
                   {currentLesson.index}과. {currentLesson.title}
                 </h2>
@@ -918,7 +951,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
                     ) : (
                       <button
                         onClick={() => {
-                          setOverrideGoalId(goal.id);
+                          chooseOverrideGoal(goal.id);
                           window.scrollTo({ top: 0, behavior: "smooth" });
                         }}
                         className="w-full py-2 px-3 rounded-xl text-slate-400 hover:text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer border border-slate-800 hover:border-slate-600"
@@ -1022,6 +1055,17 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
           currentIndex={lessonChangeGoal.nextLessonIndex || 1}
           onConfirm={(newLessonIndex) => handleLessonChange(lessonChangeGoal.id, newLessonIndex)}
           onClose={() => setLessonChangeGoal(null)}
+        />
+      )}
+
+      {/* Quick Track Picker Sheet */}
+      {showTrackPicker && (
+        <TrackPickerSheet
+          options={trackOptionsResult.options}
+          isPlanReviewDay={isPlanReviewDay}
+          reviewDaySelected={trackOptionsResult.reviewDaySelected}
+          onSelect={(goalId) => chooseOverrideGoal(goalId)}
+          onClose={() => setShowTrackPicker(false)}
         />
       )}
 

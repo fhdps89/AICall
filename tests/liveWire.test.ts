@@ -240,3 +240,23 @@ test('redactSocketUrl strips access_token and token query parameters', () => {
   assert.equal(proxyRedacted.includes('secret-id-token-value'), false);
   assert.equal(proxyRedacted.includes('?'), false);
 });
+
+test('buildDirectSetup omits languageCode when null/undefined and includes it when specified', () => {
+  const withoutLang = buildDirectSetup({
+    model: LIVE_MODEL,
+    voiceName: 'Kore',
+    systemInstruction: 'sys',
+    resumeHandle: null,
+    languageCode: null,
+  }) as any;
+  assert.equal('languageCode' in withoutLang.setup.generationConfig.speechConfig, false);
+
+  const withLang = buildDirectSetup({
+    model: LIVE_MODEL,
+    voiceName: 'Kore',
+    systemInstruction: 'sys',
+    resumeHandle: null,
+    languageCode: 'en-US',
+  }) as any;
+  assert.equal(withLang.setup.generationConfig.speechConfig.languageCode, 'en-US');
+});
