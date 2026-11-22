@@ -53,6 +53,7 @@ import {
   nextLessonDate,
   pickUndoTarget,
   qaBlocksPlanChange,
+  shouldPersistProposedChange,
 } from "../../data/progressAdjust";
 
 const DAY_LABELS: Record<string, string> = {
@@ -300,7 +301,7 @@ export const CoachModal: React.FC<CoachModalProps> = ({
           at: new Date().toISOString(),
         };
 
-        if (isProgressChange(safeAfter) && isQaMode()) {
+        if (!shouldPersistProposedChange(safeAfter, isQaMode())) {
           planChangeId = `qa-preview-${Date.now()}`;
           createdChange = {
             ...changePayload,

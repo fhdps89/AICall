@@ -23,7 +23,7 @@ import { LIVE_LANGUAGE_CODE, normalizeVoiceName } from './src/config/voices.ts';
 import { buildLiveConfigAttempts } from './server/liveConfig.ts';
 import { userRecordingPath as userRecordingPathIn } from './server/recordingPath.ts';
 import { apiError, noKey, NO_KEY_MESSAGE } from './server/errors.ts';
-import { buildProgressProposal } from './src/data/progressAdjust.ts';
+import { buildProgressProposal, finalizeCoachProgressResponse } from './src/data/progressAdjust.ts';
 import { sanitizePlanChangeAfter, isEmptyPlanChange } from './src/data/planValidation.ts';
 import {
   MAX_STORAGE_FILE_BYTES,
@@ -1218,32 +1218,20 @@ app.post('/api/coach/chat', requireAuth, geminiLimit, async (req: Request, res: 
           userText: text,
         });
 
-        const memoryPatch = proposal?.memoryPatch;
-        if (progressResult.type === 'proposal') {
-          const sanitized = sanitizePlanChangeAfter(progressResult.after, safeGoals);
-          if (isEmptyPlanChange(sanitized)) {
-            reply = '진도 변경 내용을 적용할 수 없어요. 과 번호를 다시 확인해 주세요.';
-            proposal = memoryPatch
-              ? { summary: proposal.summary || '코치 메모', before: {}, after: {}, memoryPatch }
-              : null;
-          } else {
-            proposal = {
-              summary: progressResult.summary,
-              before: progressResult.before,
-              after: sanitized,
-              memoryPatch,
-              status: 'proposed',
-            };
-            reply = progressResult.reply;
-          }
-        } else {
-          reply = progressResult.reply;
-          proposal = memoryPatch
-            ? { summary: proposal.summary || '코치 메모', before: {}, after: {}, memoryPatch }
-            : null;
-          if (progressResult.type === 'undo_request') {
-            progressPayload = { type: 'undo_request' };
-          }
+        const sanitized = progressResult.type === 'proposal'
+          ? sanitizePlanChangeAfter(progressResult.after, safeGoals)
+          : {};
+        const finalized = finalizeCoachProgressResponse({
+          progressResult,
+          sanitizedAfter: sanitized,
+          isEmptyAfter: progressResult.type === 'proposal' ? isEmptyPlanChange(sanitized) : true,
+          existingMemoryPatch: proposal?.memoryPatch,
+          existingSummary: proposal?.summary,
+        });
+        reply = finalized.reply;
+        proposal = finalized.proposal;
+        if (finalized.progress) {
+          progressPayload = finalized.progress;
         }
       }
     }

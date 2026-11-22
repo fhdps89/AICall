@@ -32,7 +32,7 @@
   - `POST /api/coach/chat`: `gemini-3.8-flash` 기반 함수 호출(`propose_plan_change`, `get_progress`, `get_mistake_stats`). 적용하는 도구는 모델에게 아예 주지 않음(제안만 가능).
   - **제안 검사** (`src/data/planValidation.ts`, v2.8.0): 코치가 만든 변경은 카드로 보여 주기 전과 승인해 적용하기 전에 검사. 있는 목표·있는 과 번호·실제 날짜(YYYY-MM-DD)·요일별 목표 id 목록·하루 5~240분만 남기고 나머지는 버림. 남는 게 없으면 카드를 만들지 않음.
   - **승인·되돌리기** (v2.8.0): 승인하는 순간의 실제 값을 `before`로, 실제로 적용한 값을 `after`로 저장. 되돌리기는 그 변경이 바꾼 항목만 복원(그 사이 다른 트랙의 진도는 그대로). 변경 전에 시험일이 없었으면 시험일을 지움. 승인·되돌리기 뒤에는 홈의 목표 목록을 다시 불러옴.
-  - **자연어 진도 조정** (`src/data/progressAdjust.ts`, 2026-11-22): `POST /api/coach/chat`에 `propose_progress_adjust` 도구 추가(`postpone`, `pull_forward`, `set_lesson`, `undo` 구조화 인자만 LLM이 생성하고 `after.goals.*.nextLessonIndex`와 답변 문구는 서버 순수 함수가 계산). `postpone`(미루기)은 데이터 변경 없이 다음 수업일만 안내(`noop`), `pull_forward`(땡기기)는 한 번에 1~7과 점프(매 통화 반복 속도 미지원, `after.plan` 미생성). 승인·되돌리기는 기존 `planChanges` 경로에서 확인 후에만 반영하며, 적용 전 `stale` 검사·되돌리기 전 `moved` 검사·`isQaMode()` 차단(미리보기만 표시)을 수행하고 구글 캘린더 일정은 변경하지 않음.
+  - **자연어 진도 조정** (`src/data/progressAdjust.ts`, 2026-11-22): `POST /api/coach/chat`에 `propose_progress_adjust` 도구 추가(`postpone`, `pull_forward`, `set_lesson`, `undo` 구조화 인자만 LLM이 생성하고 `after.goals.*.nextLessonIndex`와 답변 문구는 서버 순수 함수가 계산). `postpone`(미루기)은 데이터 변경 없이 오늘을 제외한 다음 수업일만 안내(`noop`), `pull_forward`(땡기기)는 한 번에 1~7과 점프(매 통화 반복 속도 미지원, `after.plan` 미생성). 승인·되돌리기는 기존 `planChanges` 경로에서 확인 후에만 반영하며, 적용 전 `stale` 검사·되돌리기 전 `moved` 검사·`isQaMode()` 차단(미리보기만 표시)을 수행하고 구글 캘린더 일정은 변경하지 않음.
 - **먼저 말 걸기 (2일 결석 배너 & 일요일 주간 리뷰)**:
   - usage 일별 기록(KST) 기준, 오늘 포함 2일 이상 학습 기록 없음(오늘 학습 시 숨김, 최근 3개월(usage 문서 3개) 안에 학습 기록이 없으면 숨김(장기 휴식 사용자는 배너가 안 뜸)) 시 홈 상단에 "이틀째 쉬었어요. 오늘 수업만 해도 좋아요"(3일 이상은 "N일째 쉬었어요. 오늘 수업만 해도 좋아요") 배너 노출.
   - 일요일 아침 강의 coachNote를 주간 리뷰 톤으로 자동 편성.

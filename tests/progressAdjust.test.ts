@@ -13,6 +13,8 @@ import {
   nextLessonDate,
   pickUndoTarget,
   qaBlocksPlanChange,
+  shouldPersistProposedChange,
+  finalizeCoachProgressResponse,
   type ProgressContext,
   type ProgressGoal,
   type UndoCandidateChange,
@@ -193,7 +195,7 @@ test("9. unknown goalId('toeic') and unknown intent return invalid", () => {
 });
 
 // 10. postpone
-test("10. postpone: Sunday is noop with 4 next lessons; 11/23(Mon) includeToday=true includes 'OPIc 6과' and '11/23(월)'", () => {
+test("10. postpone: Sunday is noop with 4 next lessons; 11/23(Mon) includeToday=false next OPIc is 11/28(토)", () => {
   const rSun = buildProgressProposal({ intent: "postpone" }, makeCtx({ todayKst: "2026-11-22" }));
   assert.equal(rSun.type, "noop");
   assert.match(rSun.reply, /주간 복기/);
@@ -207,7 +209,8 @@ test("10. postpone: Sunday is noop with 4 next lessons; 11/23(Mon) includeToday=
   const rMon = buildProgressProposal({ intent: "postpone" }, makeCtx({ todayKst: "2026-11-23" }));
   assert.equal(rMon.type, "noop");
   assert.match(rMon.reply, /OPIc 6과/);
-  assert.match(rMon.reply, /11\/23\(월\)/);
+  assert.match(rMon.reply, /11\/28\(토\)/);
+  assert.doesNotMatch(rMon.reply, /다음 수업: 11\/23\(월\)/);
   assert.match(rMon.reply, /그대로/);
   assert.match(rMon.reply, /구글 캘린더/);
 });
@@ -388,4 +391,51 @@ test("18. isStaleProgressChange: true when before=6 and live=7, false when equal
 test("19. isProgressChange: false for deadline-only, true when nextLessonIndex present", () => {
   assert.equal(isProgressChange({ goals: { opic: { deadline: "2026-11-29" } } }), false);
   assert.equal(isProgressChange({ goals: { opic: { nextLessonIndex: 8 } } }), true);
+});
+
+
+test("20. shouldPersistProposedChange: QA progress is preview-only; schedule-only and non-QA persist", () => {
+  const progressAfter = { goals: { opic: { nextLessonIndex: 8 } } };
+  const planOnlyAfter = { plan: { weeklyPattern: { mon: ["opic"] } } };
+  assert.equal(shouldPersistProposedChange(progressAfter, true), false);
+  assert.equal(shouldPersistProposedChange(planOnlyAfter, true), true);
+  assert.equal(shouldPersistProposedChange(progressAfter, false), true);
+});
+
+test("21. finalizeCoachProgressResponse: proposal reply overwrites LLM text, empty after, undo_request, memoryPatch kept", () => {
+  const proposal = buildProgressProposal({ intent: "pull_forward", goalId: "opic", days: 2 }, makeCtx());
+  assert.equal(proposal.type, "proposal");
+  const sanitized = sanitizePlanChangeAfter(proposal.after, makeGoals().map((g) => ({ id: g.id, lessons: g.lessons })));
+  const ok = finalizeCoachProgressResponse({
+    progressResult: proposal,
+    sanitizedAfter: sanitized,
+    isEmptyAfter: false,
+    existingMemoryPatch: { constraints: ["야근"] },
+    existingSummary: "이전 일정 제안",
+  });
+  assert.match(ok.reply, /8과/);
+  assert.equal(ok.proposal?.status, "proposed");
+  assert.deepEqual(ok.proposal?.after, sanitized);
+  assert.deepEqual(ok.proposal?.before, proposal.before);
+  assert.deepEqual(ok.proposal?.memoryPatch, { constraints: ["야근"] });
+  assert.equal(ok.progress, undefined);
+
+  const empty = finalizeCoachProgressResponse({
+    progressResult: proposal,
+    sanitizedAfter: {},
+    isEmptyAfter: true,
+    existingMemoryPatch: { constraints: ["야근"] },
+  });
+  assert.match(empty.reply, /적용할 수 없어요/);
+  assert.deepEqual(empty.proposal?.after, {});
+  assert.deepEqual(empty.proposal?.memoryPatch, { constraints: ["야근"] });
+
+  const undo = finalizeCoachProgressResponse({
+    progressResult: buildProgressProposal({ intent: "undo" }, makeCtx()),
+    sanitizedAfter: {},
+    isEmptyAfter: true,
+  });
+  assert.equal(undo.progress?.type, "undo_request");
+  assert.equal(undo.proposal, null);
+  assert.match(undo.reply, /되돌릴/);
 });

@@ -317,7 +317,7 @@ function buildPostponeResult(args: ProgressArgs, ctx: ProgressContext): Progress
     const goal = ctx.goals.find((g) => g.id === id);
     if (!goal) continue;
     const name = goalShortName(id, ctx.goals);
-    const nextDate = nextLessonDate(ctx.weeklyPattern, id, ctx.todayKst, true);
+    const nextDate = nextLessonDate(ctx.weeklyPattern, id, ctx.todayKst, false);
     const nextStr = nextDate ? `${formatKstDay(nextDate)} 23:00` : "다음 배정 요일";
     items.push(`${name} ${goal.nextLessonIndex}과 그대로(다음 수업: ${nextStr})`);
   }
@@ -712,4 +712,68 @@ export function classifyQuickReply(
 
 export function qaBlocksPlanChange(after: unknown, qa: boolean): boolean {
   return Boolean(qa) && isProgressChange(after);
+}
+
+export function shouldPersistProposedChange(after: unknown, qa: boolean): boolean {
+  return !qaBlocksPlanChange(after, qa);
+}
+
+export type CoachProgressChatOut = {
+  reply: string;
+  proposal: {
+    summary: string;
+    before: unknown;
+    after: unknown;
+    memoryPatch?: unknown;
+    status: "proposed";
+  } | null;
+  progress?: { type: "undo_request" };
+};
+
+/** Builds the /api/coach/chat progress fields after the pure proposal + sanitize step. */
+export function finalizeCoachProgressResponse(opts: {
+  progressResult: ProgressResult;
+  sanitizedAfter: { plan?: unknown; goals?: unknown };
+  isEmptyAfter: boolean;
+  existingMemoryPatch?: unknown;
+  existingSummary?: string;
+}): CoachProgressChatOut {
+  const memoryPatch = opts.existingMemoryPatch;
+  const memoryProposal = memoryPatch
+    ? {
+        summary: opts.existingSummary || "코치 메모",
+        before: {},
+        after: {},
+        memoryPatch,
+        status: "proposed" as const,
+      }
+    : null;
+
+  if (opts.progressResult.type === "proposal") {
+    if (opts.isEmptyAfter) {
+      return {
+        reply: "진도 변경 내용을 적용할 수 없어요. 과 번호를 다시 확인해 주세요.",
+        proposal: memoryProposal,
+      };
+    }
+    return {
+      reply: opts.progressResult.reply,
+      proposal: {
+        summary: opts.progressResult.summary,
+        before: opts.progressResult.before,
+        after: opts.sanitizedAfter,
+        memoryPatch,
+        status: "proposed",
+      },
+    };
+  }
+
+  const out: CoachProgressChatOut = {
+    reply: opts.progressResult.reply,
+    proposal: memoryProposal,
+  };
+  if (opts.progressResult.type === "undo_request") {
+    out.progress = { type: "undo_request" };
+  }
+  return out;
 }
