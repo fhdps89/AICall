@@ -4,6 +4,23 @@
 
 ---
 
+### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 재시작 시 오늘 강의 유지, 피드 https URL, 홈 카드 지연·Storage 403 가드 (브랜치 `englead/feed-persist`)
+- **배경**: 2026-11-22 10:56 KST에 ready였던 오늘 강의(「자연스러운 입국 심사와 출장 표현」)가 11:01 Republish 뒤 `today.json`에서 사라지고, 11:06에 다른 제목의 강의가 새로 만들어졌다. QA봇이 같은 라이브 main `3450071`에서 Storage 업로드 403(34행)과 새로고침 후 카드가 「불러오는 중…」에 40–67초 머무는 현상(28행)을 재현했다. 피드 JSON의 `audioUrl`이 `http://`로 나가 열면 500이 나고, `https://`로 바꾸면 재생됐다. 머지·배포는 하지 않음.
+- **원인**:
+  - 피드 설정은 Firestore `feeds/{id}`에 암호화 백업되지만, 강의 대본·WAV는 서버 `.data/lectures/`에만 있었다. 재시작 후 `buildFeedToday`가 로컬 강의가 없으면 `startLectureJob`으로 새 생성을 시작했다.
+  - 앱의 `syncLectureFromServer`는 `users/{uid}/lectures/{date}.wav`로 올리는데, 문서의 Storage 규칙 예시는 `users/{uid}/recordings/**`만 허용한다. 업로드가 403으로 실패해 `audioUrl`이 비고, 홈 카드는 매 로드마다 전체 WAV(24kHz, 수 분 강의면 수십 MB)를 받은 뒤에야 「불러오는 중…」을 풀었다.
+  - `feedBaseUrl`은 `X-Forwarded-Proto`가 없으면 Express `req.protocol`을 쓰는데, 프록시가 TLS를 종료하면 컨테이너는 http로 보인다. `trust proxy`도 없었다.
+- **수정**:
+  - ready 강의 대본·상태를 Firestore `feeds/{feedDocId}/days/{date}`에 암호화 백업(로그인 없이 PATCH, 필드는 `iv`·`data`·`updatedAt`). 재시작 뒤에는 같은 대본으로 TTS만 다시 만들고(`startLectureAudioRebuild`) 새 강의는 만들지 않음. 미완료 작업은 기존처럼 INTERRUPTED/TIMED_OUT 재시도. #35 타임아웃·epoch 유지. WAV 원본을 Storage에 익명으로 올리는 일은 하지 않음.
+  - `firestore.rules`에 `days/{date}` 규칙 추가(부모 피드 문서가 있을 때만, 익명 삭제 없음). 앱 강의 문서가 이미 ready이면 서버의 다른 ready 강의로 덮어쓰지 않음(`createdAt` 비교). `listenedAt`은 같은 강의에만 이어받고, `lectureDate`는 ready로 처음 바뀔 때만 기록.
+  - 홈 카드는 Firestore에 ready가 있으면 즉시 표시하고, Storage 업로드는 백그라운드·6시간 백오프. 문서의 Storage 규칙 예시에 `users/{uid}/lectures/{date}.wav` 경로를 추가. 규칙 파일(`storage.rules`)은 기존 방침대로 저장소에 만들지 않음.
+  - `publicFeedBaseUrl`: 공개 호스트는 항상 https, localhost는 힌트가 없으면 http. `app.set('trust proxy', 1)`.
+- **방어 조치 (Safeguards)**: `tests/lecturePersist.test.ts`(백업 필드·복원 시 startJob 0회·재빌드 중 generating+제목·404/500·epoch·single-flight·규칙 텍스트 검사), `tests/feedBaseUrl.test.ts`, `tests/lectureSyncPolicy.test.ts`(즉시 표시·백오프·덮어쓰기 가드·lectureDate·규칙 문서와 경로 일치). 기존 `lectureJobTimeout`·`lectureAudio`·`feedStore` 테스트 유지.
+- **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build`.
+- **배포 시 주의**: 첫 배포 때는 오늘 강의의 days 백업이 아직 없어, 배포로 `.data/`가 지워지면 피드가 한 번 더 새로 만들 수 있다(그 이후부터 백업이 유지됨). 앱은 기존 Firestore 강의를 유지하므로 그날 하루 피드와 앱 제목이 다를 수 있다. Firestore `days` 규칙과 Storage lectures 규칙은 AI Studio Republish만으로 바뀌지 않으며 콘솔에서 따로 게시해야 한다. 규칙이 아직이면 백업 쓰기는 403으로 로그만 남고 동작은 지금과 같다.
+
+---
+
 ### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 아침 강의 생성이 generating에 멈추지 않게 타임아웃 추가 (브랜치 `englead/feed-gen-timeout`)
 - **배경**: 2026-11-22 라이브 피드 `today.json`이 07:15부터 `status=generating`(제목만 있음)인 채 수 시간 멈춤. 11/21 아침 피드도 ready가 아니었고, 마지막 ready는 11/20. 머지·배포는 하지 않음.
 - **원인**: `GET /feed/{secret}/today.json`이 날짜가 바뀌면 생성을 시작하지만, `runJob`(대본·TTS)과 각 `generateContent`에 타임아웃이 없음. Gemini 호출이 응답 없이 멈추면 메모리의 `running`이 남아 `generating`이 하루 종일 유지됨. `force`와 피드 재시도도 `running`이 있으면 새 작업을 시작하지 않고, `INTERRUPTED`는 서버 프로세스가 죽은 뒤에만 동작함. 피드 점검 루틴은 generating이면 07:30에도 알리지 않음.
