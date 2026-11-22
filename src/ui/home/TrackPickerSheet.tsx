@@ -1,8 +1,13 @@
 import React from "react";
 import { X, Check } from "lucide-react";
-import type { TrackOption } from "./trackOptions";
+import {
+  trackPickerSubtitle,
+  type TrackOption,
+  type TrackPickerMode,
+} from "./trackOptions";
 
 interface TrackPickerSheetProps {
+  mode: TrackPickerMode;
   options: TrackOption[];
   isPlanReviewDay: boolean;
   reviewDaySelected: boolean;
@@ -14,6 +19,7 @@ interface TrackPickerSheetProps {
  * 홈 오늘 수업 카드에서 수업 트랙을 바로 고르는 바텀시트.
  */
 export const TrackPickerSheet: React.FC<TrackPickerSheetProps> = ({
+  mode,
   options,
   isPlanReviewDay,
   reviewDaySelected,
@@ -39,7 +45,7 @@ export const TrackPickerSheet: React.FC<TrackPickerSheetProps> = ({
           <div className="min-w-0">
             <h3 className="text-base font-bold text-white">트랙 고르기</h3>
             <p className="text-xs text-slate-400 truncate mt-0.5">
-              오늘 통화할 수업 트랙을 골라보세요
+              {trackPickerSubtitle(mode)}
             </p>
           </div>
           <button

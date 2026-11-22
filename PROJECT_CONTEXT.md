@@ -119,7 +119,7 @@
 9. **첫 실행 진도 설정 & 오늘 수업 카드 UI (`src/ui/onboarding/`, `src/ui/home/`)**:
    - 첫 실행 시 OPIc 10/10 1과, 10/11 2과, 10/12 3과 히스토리를 반영한 진도 설정 모달 제공.
    - 홈 화면 「오늘 할 것」 메인 루프: 오늘 수업 카드 → 아침 강의 카드(`MorningLectureCard`) → 복습 & 퀴즈 카드 순서로 상시 노출(`showMore` 접힘 영역에서 아침 강의 분리). 헤더 이메일은 개발자 모드(`devMode`)일 때만 표시.
-   - 일요일(주간 복기일) 카드에는 「오늘 퀴즈」(복습 대상 0개 시 비활성)·「오늘 강의」(강의 카드로 스크롤)·「트랙 골라 통화」(더 보기 펼친 뒤 트랙 섹션으로 스크롤) 3개 액션 제공.
+   - 일요일(주간 복기일) 카드에는 「오늘 퀴즈」(복습 대상 0개 시 비활성)·「오늘 강의」(강의 카드로 스크롤)·「트랙 골라 통화」(트랙 피커를 열고, 진행 가능한 트랙을 누르면 트랙을 저장한 뒤 바로 통화 준비로 이동, 「주간 복기」 선택 시 복기 유지) 3개 액션 제공. 평일이나 복기일에 트랙을 고른 뒤 노출되는 「트랙: …」 칩은 피커를 열어도 통화를 시작하지 않고 트랙만 바꿈.
    - 오늘 수업 카드와 4대 트랙 카드의 인라인 진도 `<select>`를 「진도 바꾸기」 버튼 + 확인 시트(`LessonChangeSheet.tsx`, 「확인」 누르기 전 미저장·동일 과 선택 시 비활성)로 교체. (`README.md` 1단계 홈 항목에도 반영)
 
 ---
@@ -179,7 +179,7 @@
 
 ## 5. 버전 히스토리
 - **v2.10.0 이후 수정(미배포) — 사용자 피드백 3건: 홈 트랙 바로 바꾸기·AI 말소리 끊김·목소리 고정/선택 (2026-11-22 KST, 브랜치 `englead/feedback-1122-track-voice-audio`, #33 위에 쌓음)**:
-  - **트랙 바꾸기**: 오늘 수업 카드의 「트랙: …」을 눌러 바텀시트(`TrackPickerSheet`, 항목 계산은 순수 `trackOptions.ts`)에서 바로 고름. 진행할 과가 없는 트랙은 비활성. 주간 복기일 「트랙 골라 통화」도 같은 시트를 엶. 고른 트랙은 **오늘(KST) 하루만** `localStorage`(`onecall_today_track_override:{uid}`, 순수 `dailyTrackOverride.ts`)에 저장되어 새로고침·통화 뒤 홈으로 돌아와도 유지되고 다음 날 자동으로 사라짐(기존엔 `useState`뿐이라 새로고침하면 주간 복기로 되돌아갔음). 요일별 주간 루틴(`plan.weeklyPattern`)을 설정에서 고치는 화면은 아직 없음.
+  - **트랙 바꾸기**: 오늘 수업 카드의 「트랙: …」 칩을 눌러 바텀시트(`TrackPickerSheet`, 항목 계산 및 선택 정책은 순수 `trackOptions.ts`)에서 바로 고르며, 평일이든 복기일이든 이 칩으로 연 피커(`mode="switchTrack"`)는 통화를 시작하지 않고 트랙만 바꿈. 진행할 과가 없는 트랙은 비활성. 주간 복기일 「트랙 골라 통화」도 같은 시트(`mode="startCall"`)를 열지만, 진행 가능한 트랙을 누르면 고른 트랙을 저장한 뒤 바로 통화 준비로 넘어감(「주간 복기」 선택 시 복기 유지). 고른 트랙은 **오늘(KST) 하루만** `localStorage`(`onecall_today_track_override:{uid}`, 순수 `dailyTrackOverride.ts`)에 저장되어 새로고침·통화 뒤 홈으로 돌아와도 유지되고 다음 날 자동으로 사라짐(기존엔 `useState`뿐이라 새로고침하면 주간 복기로 되돌아갔음). 요일별 주간 루틴(`plan.weeklyPattern`)을 설정에서 고치는 화면은 아직 없음.
   - **말소리 끊김**: `playAudioChunk`가 청크 도착마다 `max(now, nextPlaybackTime)`로 바로 예약해 지터 버퍼가 없었음. 순수 `audioPlaybackScheduler.ts`가 선행 시간(기본 120ms, 언더런마다 +60ms, 최대 400ms)을 두고 이어 붙임. 새 발화(1초 이상 무음 뒤)는 언더런으로 세지 않고, 학습한 선행 시간은 통화 동안 유지하며 50개 무문제 때마다 조금씩 줄임. interrupted 때만 커서 리셋. turnComplete마다 `[Live] stage=playback_stats underruns=… leadMs=… interrupts=…` 로그. 홀수 바이트 청크 예외 방지.
   - **목소리**: 코드상 voiceName은 이미 모든 연결 경로가 `Kore`로 보내고 있었음(미지정이 원인 아님). `gemini-3.8-live` 자체가 같은 voiceName에서도 응답·세션마다 음색이 흔들린다는 보고가 Google 포럼에 다수 있어 앱이 완전히 막을 수 없음. 앱 쪽 불일치만 정리: `src/config/voices.ts`(허용 목록 5종, 기본 Kore, `normalizeVoiceName`, `LIVE_LANGUAGE_CODE=null`)를 클라·서버가 공유하고, `server/liveConfig.ts`의 모든 시도와 직접 연결 setup이 같은 speechConfig(voiceName만, languageCode 없음)를 보냄(경로·시도마다 달랐던 languageCode 제거). 설정 「AI 목소리」 탭(`VoicePanel`)에서 선택·미리 듣기, `users/{uid}/settings/general.voiceName`에 저장(기본 Kore), 통화 시작 때 읽어 다음 통화부터 적용(통화 중 변경 불가). 아침 강의(코치 Kore+상대역 Puck)와 발음 듣기는 선택을 따르지 않음.
   - **검증**: `npm test` 284/284, lint, server tsc, build 통과. 모바일 스크린샷 `/workspace/collab/onecall_feedback_20261122/shots/`. 끊김·음색은 실기기 통화로만 확인 가능(배포 후 확인).
