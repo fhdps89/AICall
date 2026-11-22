@@ -130,6 +130,7 @@
      - 퀴즈·강의 우선순위 재정렬(`prioritizeByClusters`)은 이번 범위에서 제외한 후속 과제.
 10. **B-7 아침 강의 · B-8 그록봇 피드 (`server/lecture.ts`, `server/feed.ts`, `src/ui/lecture/`)**:
    - 새 실수 최대 6개 + 복습 실수 최대 3개로 `gemini-3.8-flash` 대본 → `gemini-3.8-flash-tts` 2인 음성, 답 전 3초 무음, WAV 1개. 앱에서 재생·오프라인 보관.
+   - **TTS 입력 규칙 (`server/speechText.ts`, `server/lecture.ts`)**: 1인·2인 모두 `style`(`TTS_STYLE`)은 `speechMetadata`로만 보내고 `text`에는 말할 말만 넣는다. 대본 저장(`generateScript`)과 오디오 렌더(`renderAndSaveAudio`) 전에 괄호·대괄호·해설자·말투 지시·마크다운을 제거한다(`myPhrase` 원문은 제외).
    - 그록봇은 `/feed/{비밀키}/today(.json)`만 열면 됨. 앱이 홈 화면을 열 때마다 비밀키·후보 실수를 서버에 다시 보냄(`syncFeed`). 강의가 없으면 피드 요청 때 생성 시작, 실패한 강의는 30분에 한 번만 다시 시도.
    - **한계**: 강의 음성·피드 설정은 서버의 `.data/` 폴더에 저장되어, Cloud Run/AI Studio 서버가 다시 켜지면 지워질 수 있음.
    - **만들던 중 서버가 다시 켜진 강의** (v2.8.0): 서버 기록이 "생성 중"인데 실제 작업이 없으면 `failed`/`INTERRUPTED`로 알려 줌. 서버 기록 자체가 지워졌으면 앱이 Firestore의 "생성 중"을 같은 상태로 바꿈. 홈 카드는 "서버가 다시 시작되어 만들던 강의가 멈췄어요"와 **오늘 강의 만들기** 버튼을 보여 주고, 그록봇 피드는 30분 기다리지 않고 바로 다시 만듦.

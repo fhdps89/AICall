@@ -12,6 +12,7 @@ import {
   readLectureState,
   sanitizeLectureScriptPayload,
   startLectureAudioRebuild,
+  toSpeechParts,
   type LecturePcm,
   type LectureScriptItem,
   type LectureState,
@@ -59,7 +60,12 @@ function cleanup(uid: string) {
   fs.rmSync(path.join(DATA_DIR, 'lectures', uid), { recursive: true, force: true });
 }
 
-function writeReadyWithoutWav(uid: string, date: string, script = sampleScript()) {
+function writeReadyWithoutWav(
+  uid: string,
+  date: string,
+  script = sampleScript(),
+  opts: { title?: string; coachNote?: string } = {}
+) {
   const dir = path.join(DATA_DIR, 'lectures', uid);
   fs.mkdirSync(dir, { recursive: true });
   const now = new Date().toISOString();
@@ -67,9 +73,9 @@ function writeReadyWithoutWav(uid: string, date: string, script = sampleScript()
     uid,
     date,
     status: 'ready',
-    title: '테스트 강의',
+    title: opts.title ?? '테스트 강의',
     script,
-    coachNote: '잘하고 있어요',
+    coachNote: opts.coachNote ?? '잘하고 있어요',
     itemCount: script.length,
     newMistakeIds: script.map((s) => s.mistakeId),
     reviewMistakeIds: [],
@@ -208,6 +214,75 @@ test('TTS failure leaves no half-written wav and keeps status ready', async () =
     const dir = path.join(DATA_DIR, 'lectures', uid);
     const leftovers = fs.readdirSync(dir).filter((f) => f.endsWith('.wav') || f.endsWith('.tmp'));
     assert.deepEqual(leftovers, []);
+  } finally {
+    cleanup(uid);
+  }
+});
+
+test('rebuild strips directions before TTS while keeping myPhrase verbatim (R1–R6)', async () => {
+  const uid = uidFor('strip_directions');
+  const date = '2026-11-22';
+  const captured: { text: string; twoSpeakers: boolean }[] = [];
+  const synthCapture: LectureSynthesizeFn = async (_ai, _engine, text, twoSpeakers) => {
+    captured.push({ text, twoSpeakers });
+    return silentPcm();
+  };
+  const myPhrase = 'I go (pause) **home**';
+  const item: LectureScriptItem = {
+    mistakeId: 'm1',
+    kind: 'new',
+    myPhrase,
+    naturalPhrase: 'work for (소속)',
+    explanation: '(pause) 과거시제를 써요.',
+    dialogue: [
+      { speaker: 'Partner', line: 'Partner: Hi' },
+      { speaker: 'Coach', line: '(laughs)' },
+    ],
+    meaningKo: '집에 갔다',
+    answerEnglish: '*I went home*',
+  };
+
+  try {
+    writeReadyWithoutWav(uid, date, [item], {
+      title: '테스트 (pause) 강의',
+      coachNote: '**잘했어요** (pause)',
+    });
+    startLectureAudioRebuild(ai, uid, date, undefined, { synthesizeFn: synthCapture });
+    await lectureRebuildInFlight(uid, date);
+
+    // R1: 4 synth calls (opening, body, answer, coachNote)
+    assert.equal(captured.length, 4);
+
+    // R2: myPhrase stays verbatim in the item body
+    assert.ok(captured[1].text.includes(`"${myPhrase}"`));
+
+    // R3: outside myPhrase, no stage directions, markdown, duplicate labels, or empty Partner lines remain
+    const outsideMyPhrase = captured.map((c) => c.text).join('\n').replaceAll(myPhrase, '');
+    for (const forbidden of ['(pause)', '[', '**', '3초 무음', '(laughs)', 'Partner: Partner']) {
+      assert.equal(outsideMyPhrase.includes(forbidden), false, `unexpected ${forbidden} in TTS input`);
+    }
+    assert.equal(/^Partner:\s*$/m.test(outsideMyPhrase), false);
+
+    // R4: answer call is clean
+    assert.equal(captured[2].text, 'Coach: I went home');
+
+    // R5: stored state.script[0] is cleaned and has numeric startSec
+    const st = readLectureState(uid, date);
+    const saved = st?.script?.[0];
+    assert.ok(saved);
+    assert.equal(saved.myPhrase, myPhrase);
+    assert.equal(saved.naturalPhrase, 'work for (소속)');
+    assert.equal(saved.explanation, '과거시제를 써요.');
+    assert.deepEqual(saved.dialogue, [{ speaker: 'Partner', line: 'Hi' }]);
+    assert.equal(typeof saved.startSec, 'number');
+
+    // R6: toSpeechParts output for every captured call never contains TTS_STYLE text
+    const STYLE_LEAK_RE = /Read this morning English lesson|Korean-accented transliteration/;
+    for (const call of captured) {
+      for (const part of toSpeechParts(call.text, call.twoSpeakers)) {
+        assert.equal(STYLE_LEAK_RE.test(part.text), false);
+      }
+    }
   } finally {
     cleanup(uid);
   }

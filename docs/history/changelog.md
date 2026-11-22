@@ -4,6 +4,21 @@
 
 ---
 
+### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 아침 강의 TTS 지시문 낭독 방지 (브랜치 `englead/tts-strip-directions`)
+- **배경**: 아침 강의 오디오에서 모델이 스타일 지시문을 소리 내어 읽는 문제가 확인되어 수정함. 머지·배포는 하지 않음.
+- **원인**:
+  - `server/lecture.ts`의 1인 경로 `toSpeechParts(text, false)`가 `TTS_STYLE` 문자열을 `text` 앞에 직접 붙여(`\`\${TTS_STYLE}\\n\\n…\``) 보냈고, `gemini-3.8-flash-tts`가 인사·항목별 정답·코치 한마디에서 이를 그대로 낭독함(오늘 강의 전사로 7회 확인, 전사가 비어 있거나 깨진 4회 구간은 `[미확인]`). 2인 경로는 `speechMetadata.style`을 사용해 문제가 없었음.
+  - `(pause)`, `[Coach smiles]`, `Narrator:`, 말투 지시, 마크다운 기호 등은 오늘 오디오에서는 관찰되지 않았으나, 대본에 섞일 경우 TTS가 그대로 읽을 수 있어 예방 수정함(프롬프트 규칙 2의 `"(3초 무음은 시스템이 넣음)"` 문구 포함).
+- **수정**:
+  - `server/speechText.ts` (신규): 순수 함수 `stripSpeechDirections`·`cleanLectureScriptItem`과 좁은 타입 `LectureScriptItemLike`를 구현(순환 참조 방지를 위해 `lecture.ts` 미참조). 해설자 줄, 라벨 괄호, 말투 접두어, 제목/목록 기호, 마크다운 기호(인라인 코드·굵게·기울임), 대괄호, 영/한 지시어 소괄호를 줄 단위로 멱등 제거하며 `thank you (감사합니다)`·`work for (소속)`·`1990s`·`(쉼표)`·`5 * 3 = 15` 등 일반 문장은 유지함. `cleanLectureScriptItem`은 `myPhrase`·`naturalPhrase`·`mistakeId`·`kind`·`startSec`을 보존하고 `explanation`·`meaningKo`·`answerEnglish`(빈 값이면 `naturalPhrase` 폴백)·`dialogue[].line`(중복 `Coach:`/`Partner:` 제거 및 빈 줄 제외)만 정화함.
+  - `server/lecture.ts`: `TTS_STYLE`을 export하고, `toSpeechParts` 1인 경로를 `[{ text: body, speechMetadata: { style: TTS_STYLE } }]`(단일 화자라 `speaker` 키 제외)로 변경하며 빈 줄·빈 line 제외 및 빈 입력 시 `[]` 반환(내부에서 strip하지 않아 `myPhrase` 보호). `generateScript` 프롬프트 규칙 2에서 `"(3초 무음은 시스템이 넣음)"`을 제거하고 무음 표기 금지 문장을 추가했으며, 지시문·마크다운·화자 접두 금지 규칙 8을 신설. `generateScript` 반환값과 `renderAndSaveAudio` 앞부분(`title`·`naturalPhrase`·`coachNote` 템플릿 및 `items` 사본, `myPhrase` 원문 유지, `startSec` 기록 및 `state.script = items` 저장)에 정화를 적용함.
+  - `PROJECT_CONTEXT.md`: B-7 아침 강의 항목에 TTS 입력 규칙(1인·2인 모두 `style`은 `speechMetadata`로 전송, `text`는 말할 말만 유지, 저장·렌더 전 지시문 제거 및 `myPhrase` 예외) 기록.
+- **방어 조치 (Safeguards)**:
+  - `tests/speechText.test.ts` (신규): 제거(S1–S15)·유지(K1–K10)·빈 입력/줄 정리(E1–E4)·멱등성·`cleanLectureScriptItem`(C1–C6) 단위 테스트 추가.
+  - `tests/server.test.ts`: `toSpeechParts` 1인/2인 회귀 테스트(T1–T10, T6 기존 테스트 유지) 및 프롬프트 소스 가드(P1–P2) 추가.
+  - `tests/lectureAudio.test.ts`: `startLectureAudioRebuild`에서 `synthesizeFn` 입력을 캡처해 4회 호출, `myPhrase` 원문 유지, 지시문/마크다운/중복 라벨 제거, `state.script[0]` 정화, `toSpeechParts` 누출 없음을 검증하는 통합 테스트(R1–R6) 추가.
+- **검증**: `npm test` 252/252 통과, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build` 통과. 실제 Gemini TTS API가 1인 요청의 `speechMetadata.style`을 400 없이 수용하는지, 그리고 음성 톤 변화는 라이브 스모크 테스트 전까지 `[미확인]`.
+
 ### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 아침 강의 생성이 generating에 멈추지 않게 타임아웃 추가 (브랜치 `englead/feed-gen-timeout`)
 - **배경**: 2026-11-22 라이브 피드 `today.json`이 07:15부터 `status=generating`(제목만 있음)인 채 수 시간 멈춤. 11/21 아침 피드도 ready가 아니었고, 마지막 ready는 11/20. 머지·배포는 하지 않음.
 - **원인**: `GET /feed/{secret}/today.json`이 날짜가 바뀌면 생성을 시작하지만, `runJob`(대본·TTS)과 각 `generateContent`에 타임아웃이 없음. Gemini 호출이 응답 없이 멈추면 메모리의 `running`이 남아 `generating`이 하루 종일 유지됨. `force`와 피드 재시도도 `running`이 있으면 새 작업을 시작하지 않고, `INTERRUPTED`는 서버 프로세스가 죽은 뒤에만 동작함. 피드 점검 루틴은 generating이면 07:30에도 알리지 않음.

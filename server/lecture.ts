@@ -10,6 +10,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
 import { TEXT_MODEL, GEMINI_TTS_MODEL } from '../src/config/models.ts';
+import { stripSpeechDirections, cleanLectureScriptItem } from './speechText.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const DATA_DIR = path.resolve(__dirname, '..', '.data');
@@ -490,12 +491,13 @@ ${fmt(reviewList, 'review')}
 
 [대본 규칙 - 반드시 지킬 것]
 1. 영어는 영어 철자 그대로 쓰세요. 영어를 한글 발음으로 적지 마세요(예: "땡큐" 금지, "thank you"로).
-2. 항목마다 순서: 어젯밤 하신 말(myPhrase, 입력 그대로, 고치지 말 것) → 자연스러운 표현(naturalPhrase) → 이유 1~2문장(explanation, 한국어) → 짧은 2인 대화(dialogue, 2~4줄, Coach와 Partner가 번갈아 영어로, naturalPhrase가 자연스럽게 들어감) → 한국어 뜻(meaningKo, naturalPhrase의 한국어 뜻) → (3초 무음은 시스템이 넣음) → 정답 영어(answerEnglish = naturalPhrase).
+2. 항목마다 순서: 어젯밤 하신 말(myPhrase, 입력 그대로, 고치지 말 것) → 자연스러운 표현(naturalPhrase) → 이유 1~2문장(explanation, 한국어) → 짧은 2인 대화(dialogue, 2~4줄, Coach와 Partner가 번갈아 영어로, naturalPhrase가 자연스럽게 들어감) → 한국어 뜻(meaningKo, naturalPhrase의 한국어 뜻) → 정답 영어(answerEnglish = naturalPhrase). 한국어 뜻과 정답 사이의 무음은 시스템이 따로 넣으니, 대본에는 무음·쉼·초 표시를 쓰지 마세요.
 3. 입력 목록 순서대로, 각 항목의 mistakeId와 kind는 입력 값 그대로 쓰세요. 항목을 빼거나 합치지 마세요.
 4. 전체 분량은 5분 이내가 되도록 explanation과 dialogue를 짧게 유지하세요.
 5. title: 오늘 강의 제목(한국어, 20자 이내).
 6. coachNote: 끝에 코치 한마디(한국어 2~3문장).${sunday ? ' 오늘은 일요일이므로 한 주를 총정리하는 주간 리뷰 톤으로 쓰세요. 이번 주 완수한 수업 진도와 누적 복습/졸업 표현 성과를 짚어주고 다음 주 실전 통화를 응원하는 따뜻하고 구체적인 코칭 메시지로 작성하세요.' : ''}
-7. 시험·교재의 상표나 문제를 복제하지 마세요.`;
+7. 시험·교재의 상표나 문제를 복제하지 마세요.
+8. 모든 문자열 값은 음성 합성기가 글자 그대로 소리 내어 읽습니다. 실제로 말할 문장만 쓰세요. 다음은 쓰지 마세요: ① 괄호나 대괄호로 된 연기·동작·효과 지시(예: (pause), (웃으며), [Coach smiles], (3초 무음)) ② "Narrator:", "내레이션:" 같은 해설자 줄 ③ "Say cheerfully:" 같은 말투 지시 ④ 마크다운 기호(**, *, \`, #, 목록 기호). dialogue.line에는 화자 이름을 붙이지 말고 대사만 쓰세요(화자는 speaker 필드에 씁니다). 뜻을 덧붙이는 괄호는 써도 됩니다(예: work for (소속)).`;
 
   const response = await withTimeout(ai.models.generateContent({
     model: SCRIPT_MODEL,
@@ -556,9 +558,9 @@ ${fmt(reviewList, 'review')}
     });
   if (items.length === 0) throw new Error('대본 생성 결과가 비어 있습니다.');
   return {
-    title: String(parsed.title || '오늘 아침 강의'),
-    items,
-    coachNote: String(parsed.coachNote || ''),
+    title: stripSpeechDirections(String(parsed.title || '')) || '오늘 아침 강의',
+    items: items.map(cleanLectureScriptItem),
+    coachNote: stripSpeechDirections(String(parsed.coachNote || '')),
     tokens: Number(response.usageMetadata?.totalTokenCount || 0),
   };
 }
@@ -594,21 +596,24 @@ async function synthesizeElevenLabs(_text: string, _twoSpeakers: boolean): Promi
   throw new Error('ElevenLabs 경로는 아직 미구현(비교용 예정)');
 }
 
-const TTS_STYLE = 'Read this morning English lesson warmly and clearly. Korean lines in natural Korean; English lines in natural American English (never Korean-accented transliteration).';
+export const TTS_STYLE = 'Read this morning English lesson warmly and clearly. Korean lines in natural Korean; English lines in natural American English (never Korean-accented transliteration).';
 
 /**
- * Script lines look like "Coach: ..." / "Partner: ...". Multi-speaker TTS now requires one text
- * part per turn with speechMetadata.speaker (a single text block is rejected with 400
- * "must specify speech_metadata.speaker for each text part"). Single voice: drop the label so it
- * is not read aloud.
+ * Script lines look like "Coach: ..." / "Partner: ...". Both single- and multi-speaker TTS
+ * receive style via speechMetadata so the model never reads style instructions aloud.
  */
 export function toSpeechParts(text: string, twoSpeakers: boolean): any[] {
   const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-  const parsed = lines.map((l) => {
-    const m = /^(Coach|Partner)\s*:\s*(.*)$/.exec(l);
-    return m ? { speaker: m[1], line: m[2] } : { speaker: 'Coach', line: l };
-  });
-  if (!twoSpeakers) return [{ text: `${TTS_STYLE}\n\n${parsed.map((p) => p.line).join('\n')}` }];
+  const parsed = lines
+    .map((l) => {
+      const m = /^(Coach|Partner)\s*:\s*(.*)$/.exec(l);
+      return m ? { speaker: m[1], line: m[2].trim() } : { speaker: 'Coach', line: l };
+    })
+    .filter((p) => p.line.length > 0);
+  if (!twoSpeakers) {
+    const body = parsed.map((p) => p.line).join('\n');
+    return body ? [{ text: body, speechMetadata: { style: TTS_STYLE } }] : [];
+  }
   // Merge consecutive lines of the same speaker into one part.
   const parts: { text: string; speechMetadata: { speaker: string; style: string } }[] = [];
   for (const p of parsed) {
@@ -736,16 +741,20 @@ async function renderAndSaveAudio(
   };
   const silence = (sec: number) => push(Buffer.alloc(Math.round(sec * RATE) * 2));
 
-  await say(`Coach: 좋은 아침이에요. 오늘 아침 강의, ${script.title}. 모두 ${script.items.length}개 표현을 함께 볼게요.`, false);
+  const title = stripSpeechDirections(script.title || '') || '오늘 아침 강의';
+  const coachNote = stripSpeechDirections(script.coachNote || '');
+  const items = script.items.map(cleanLectureScriptItem);
+
+  await say(`Coach: 좋은 아침이에요. 오늘 아침 강의, ${title}. 모두 ${items.length}개 표현을 함께 볼게요.`, false);
   silence(0.6);
 
-  for (let i = 0; i < script.items.length; i++) {
-    const it = script.items[i];
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
     it.startSec = Math.round((totalBytes / 2 / RATE) * 10) / 10;
     const label = it.kind === 'review' ? '복습 표현' : '새 표현';
     const body = [
       `Coach: ${i + 1}번, ${label}이에요. 어젯밤 하신 말은 "${it.myPhrase}" 였어요.`,
-      `Coach: 자연스러운 표현은 "${it.naturalPhrase}" 입니다. ${it.explanation}`,
+      `Coach: 자연스러운 표현은 "${stripSpeechDirections(it.naturalPhrase)}" 입니다. ${it.explanation}`,
       `Coach: 짧은 대화로 들어 볼게요.`,
       ...it.dialogue.map((d) => `${d.speaker === 'Partner' ? 'Partner' : 'Coach'}: ${d.line}`),
       `Coach: 한국어 뜻은 "${it.meaningKo}". 영어로 말해 보세요.`,
@@ -755,8 +764,8 @@ async function renderAndSaveAudio(
     await say(`Coach: ${it.answerEnglish}`, false);
     silence(0.8);
   }
-  if (script.coachNote) {
-    await say(`Coach: 오늘의 코치 한마디. ${script.coachNote}`, false);
+  if (coachNote) {
+    await say(`Coach: 오늘의 코치 한마디. ${coachNote}`, false);
   }
 
   const pcm = Buffer.concat(pieces);
@@ -771,7 +780,7 @@ async function renderAndSaveAudio(
     try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
     throw err;
   }
-  state.script = script.items;
+  state.script = items;
   state.chars = chars;
   state.durationSec = Math.round(pcm.length / 2 / RATE);
   state.audioFile = fileName;
