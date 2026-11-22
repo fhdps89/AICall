@@ -5,22 +5,24 @@ import path from 'path';
 
 const root = path.resolve(import.meta.dirname, '..');
 
-test('unfinished-call pill and home padding share one visibility flag', () => {
+test('unfinished-call pill is an in-flow home banner, not a fixed overlay', () => {
   const app = fs.readFileSync(path.join(root, 'src/App.tsx'), 'utf8');
   const home = fs.readFileSync(path.join(root, 'src/ui/home/HomeScreen.tsx'), 'utf8');
   const css = fs.readFileSync(path.join(root, 'src/index.css'), 'utf8');
 
   assert.match(app, /const showUnfinishedPill =/);
-  assert.match(app, /reserveBottomForPill=\{showUnfinishedPill\}/);
-  assert.match(app, /\{showUnfinishedPill && \(/);
-  assert.match(app, /whitespace-nowrap/);
-  assert.match(app, /data-testid="unfinished-call-pill"/);
+  assert.match(app, /unfinishedCount=\{showUnfinishedPill \? unfinishedSessions\.length : 0\}/);
+  assert.match(app, /onOpenUnfinished=\{\(\) => setShowUnfinishedModal\(true\)\}/);
+  assert.doesNotMatch(app, /data-testid="unfinished-call-pill"/);
+  assert.doesNotMatch(app, /reserveBottomForPill/);
+  assert.doesNotMatch(app, /fixed bottom-safe left-1\/2/);
 
-  assert.match(home, /reserveBottomForPill\?: boolean/);
-  assert.match(home, /reserveBottomForPill = false/);
-  assert.match(home, /unfinished-pill-spacer/);
-  assert.match(home, /unfinished-pill-space/);
+  assert.match(home, /unfinishedCount\?: number/);
+  assert.match(home, /onOpenUnfinished\?: \(\) => void/);
+  assert.match(home, /data-testid="unfinished-call-pill"/);
+  assert.match(home, /unfinishedCount > 0 && onOpenUnfinished/);
+  assert.doesNotMatch(home, /unfinished-pill-spacer/);
+  assert.doesNotMatch(home, /fixed bottom-safe/);
 
-  assert.match(css, /\.unfinished-pill-space\s*\{/);
-  assert.match(css, /env\(safe-area-inset-bottom/);
+  assert.doesNotMatch(css, /\.unfinished-pill-space/);
 });

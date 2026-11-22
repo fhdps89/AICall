@@ -17,6 +17,7 @@
 import crypto from 'crypto';
 import { firestoreDocUrl } from './userKey.ts';
 import type { FeedSyncState } from './feed.ts';
+import type { LectureState } from './lecture.ts';
 
 export interface FeedBackup {
   state: FeedSyncState;
@@ -34,19 +35,122 @@ function feedCipherKey(secret: string): Buffer {
   return sha256(`aicall-feed-key:${secret}`);
 }
 
-export function encryptFeed(secret: string, backup: FeedBackup): { iv: string; data: string } {
+function encryptJson<T>(secret: string, payload: T): { iv: string; data: string } {
   const iv = crypto.randomBytes(12);
   const c = crypto.createCipheriv('aes-256-gcm', feedCipherKey(secret), iv);
-  const body = Buffer.concat([c.update(JSON.stringify(backup), 'utf8'), c.final(), c.getAuthTag()]);
+  const body = Buffer.concat([c.update(JSON.stringify(payload), 'utf8'), c.final(), c.getAuthTag()]);
   return { iv: iv.toString('base64'), data: body.toString('base64') };
 }
 
-export function decryptFeed(secret: string, iv: string, data: string): FeedBackup {
+function decryptJson<T>(secret: string, iv: string, data: string): T {
   const raw = Buffer.from(data, 'base64');
   const d = crypto.createDecipheriv('aes-256-gcm', feedCipherKey(secret), Buffer.from(iv, 'base64'));
   d.setAuthTag(raw.subarray(raw.length - 16));
   const json = Buffer.concat([d.update(raw.subarray(0, raw.length - 16)), d.final()]).toString('utf8');
-  return JSON.parse(json);
+  return JSON.parse(json) as T;
+}
+
+export function encryptFeed(secret: string, backup: FeedBackup): { iv: string; data: string } {
+  return encryptJson(secret, backup);
+}
+
+export function decryptFeed(secret: string, iv: string, data: string): FeedBackup {
+  return decryptJson<FeedBackup>(secret, iv, data);
+}
+
+export function encryptLectureBackup(secret: string, state: LectureState): { iv: string; data: string } {
+  return encryptJson(secret, state);
+}
+
+export function decryptLectureBackup(secret: string, iv: string, data: string): LectureState {
+  return decryptJson<LectureState>(secret, iv, data);
+}
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function sanitizeReadyLectureForBackup(state: LectureState): LectureState | null {
+  if (!state || state.status !== 'ready') return null;
+  if (typeof state.uid !== 'string' || !state.uid) return null;
+  if (typeof state.date !== 'string' || !DATE_RE.test(state.date)) return null;
+  if (!Array.isArray(state.script) || state.script.length === 0) return null;
+  return {
+    uid: state.uid,
+    date: state.date,
+    status: 'ready',
+    ...(typeof state.title === 'string' ? { title: state.title } : {}),
+    script: state.script,
+    ...(typeof state.coachNote === 'string' ? { coachNote: state.coachNote } : {}),
+    ...(typeof state.itemCount === 'number' ? { itemCount: state.itemCount } : {}),
+    newMistakeIds: Array.isArray(state.newMistakeIds) ? state.newMistakeIds : [],
+    reviewMistakeIds: Array.isArray(state.reviewMistakeIds) ? state.reviewMistakeIds : [],
+    ttsEngine: state.ttsEngine === 'elevenlabs' ? 'elevenlabs' : 'gemini',
+    ...(typeof state.chars === 'number' ? { chars: state.chars } : {}),
+    ...(typeof state.textTokens === 'number' ? { textTokens: state.textTokens } : {}),
+    ...(typeof state.durationSec === 'number' ? { durationSec: state.durationSec } : {}),
+    createdAt: state.createdAt,
+    updatedAt: state.updatedAt || new Date().toISOString(),
+  };
+}
+
+/**
+ * Write (or replace) a ready lecture script/state backup without user login.
+ * Firestore rules gate writes on a valid parent feed doc and strictly typed {iv, data, updatedAt}.
+ */
+export async function saveLectureBackup(secret: string, state: LectureState): Promise<void> {
+  if (!secret) return;
+  const clean = sanitizeReadyLectureForBackup(state);
+  if (!clean) return;
+  const url = firestoreDocUrl(`feeds/${feedDocId(secret)}/days/${clean.date}`);
+  if (!url) return;
+  const { iv, data } = encryptLectureBackup(secret, clean);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fields: {
+          iv: { stringValue: iv },
+          data: { stringValue: data },
+          updatedAt: { stringValue: clean.updatedAt },
+        },
+      }),
+    });
+  } catch (err: any) {
+    throw new Error(err?.name ? `Firestore fetch ${err.name}` : 'Firestore fetch failed');
+  }
+  if (!res.ok) throw new Error(`Firestore ${res.status}`);
+}
+
+/** Read and verify a ready lecture backup for the requested date without login. */
+export async function loadLectureBackup(secret: string, date: string): Promise<LectureState | null> {
+  if (!secret || !DATE_RE.test(date)) return null;
+  const url = firestoreDocUrl(`feeds/${feedDocId(secret)}/days/${date}`);
+  if (!url) return null;
+  let res: Response;
+  try {
+    res = await fetch(url);
+  } catch (err: any) {
+    throw new Error(err?.name ? `Firestore fetch ${err.name}` : 'Firestore fetch failed');
+  }
+  if (res.status === 404 || res.status === 403) return null;
+  if (!res.ok) throw new Error(`Firestore ${res.status}`);
+  const json: any = await res.json();
+  const iv = String(json?.fields?.iv?.stringValue || '');
+  const data = String(json?.fields?.data?.stringValue || '');
+  if (!iv || !data) return null;
+  let backup: LectureState;
+  try {
+    backup = decryptLectureBackup(secret, iv, data);
+  } catch {
+    return null;
+  }
+  if (!backup || typeof backup !== 'object') return null;
+  if (typeof backup.uid !== 'string' || !backup.uid) return null;
+  if (backup.date !== date) return null;
+  if (backup.status !== 'ready') return null;
+  if (!Array.isArray(backup.script) || backup.script.length === 0) return null;
+  return backup;
 }
 
 /** Write (or replace) the backup as the signed-in user. */

@@ -20,6 +20,18 @@ service cloud.firestore {
       allow create: if isSingleAllowedUser(request.resource.data.uid);
       allow update: if isSingleAllowedUser(resource.data.uid) && isSingleAllowedUser(request.resource.data.uid);
       allow delete: if isSingleAllowedUser(resource.data.uid);
+
+      // 강의 백업(server/feedStore.ts): 서버가 로그인 없이 씀. 내용은 피드 비밀값으로 암호화, 문서 id가 쓰기 권한.
+      match /days/{date} {
+        allow get: if true;
+        allow create, update: if date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+          && exists(/databases/$(database)/documents/feeds/$(feedId))
+          && request.resource.data.keys().hasOnly(['iv', 'data', 'updatedAt'])
+          && request.resource.data.iv is string && request.resource.data.iv.size() <= 32
+          && request.resource.data.data is string && request.resource.data.data.size() <= 800000
+          && request.resource.data.updatedAt is string;
+        allow delete: if isSingleAllowedUser(get(/databases/$(database)/documents/feeds/$(feedId)).data.uid);
+      }
     }
 
     // User profile and subcollections

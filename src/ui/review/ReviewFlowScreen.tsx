@@ -48,7 +48,7 @@ export const ReviewFlowScreen: React.FC<ReviewFlowScreenProps> = ({
             <h3 className="text-sm font-bold text-white">복기를 만들지 못했어요</h3>
           </div>
           <p className="text-xs text-slate-300 leading-relaxed mb-1">{friendlyReviewError(errorMessage)}</p>
-          <p className="text-[11px] text-slate-500 mb-4">통화 녹음은 저장돼 있어요. 나중에 홈 화면 아래의 '끝나지 않은 통화' 버튼에서 다시 만들 수 있어요.</p>
+          <p className="text-[11px] text-slate-500 mb-4">통화 녹음은 저장돼 있어요. 나중에 홈 화면 위의 '끝나지 않은 통화' 버튼에서 다시 만들 수 있어요.</p>
           <div className="flex gap-2">
             <button
               onClick={onRetry}

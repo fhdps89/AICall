@@ -5,15 +5,19 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
-import { GoogleGenAI, Modality, Type } from '@google/genai';
+import { GoogleGenAI, Type } from '@google/genai';
 import { requireAuth, verifyFirebaseIdToken, setAfterAuthHook } from './server/auth.ts';
 import { ensureUserGeminiKey, getUserSuppliedKey } from './server/userKey.ts';
-import { saveFeedBackup, deleteFeedBackup } from './server/feedStore.ts';
+import { saveFeedBackup, deleteFeedBackup, saveLectureBackup } from './server/feedStore.ts';
 import { geminiLimit, clusterLimit, checkLiveSessionStart } from './server/rateLimit.ts';
-import { DATA_DIR, startLectureJob, startLectureAudioRebuild, readLectureState, lectureAudioPath, lectureHasLocalScript, kstToday, LECTURE_AUDIO_MISSING, LECTURE_AUDIO_SCRIPT_MISSING } from './server/lecture.ts';
+import { DATA_DIR, startLectureJob, startLectureAudioRebuild, readLectureState, lectureAudioPath, lectureHasLocalScript, lectureStatusPayload, kstToday, LECTURE_AUDIO_MISSING, LECTURE_AUDIO_SCRIPT_MISSING } from './server/lecture.ts';
+import type { LectureState } from './server/lecture.ts';
+import { mimeForAudioFile } from './server/lectureAudioEncode.ts';
 import { computeMistakeClusters, validateClusterRequestBody } from './server/mistakeClusters.ts';
 import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive } from './server/sttBench.ts';
 import { LIVE_MODEL, TEXT_MODEL, GEMINI_STT_MODEL, GEMINI_TTS_LITE_MODEL } from './src/config/models.ts';
+import { LIVE_LANGUAGE_CODE, normalizeVoiceName } from './src/config/voices.ts';
+import { buildLiveConfigAttempts } from './server/liveConfig.ts';
 import { userRecordingPath as userRecordingPathIn } from './server/recordingPath.ts';
 import { apiError, noKey, NO_KEY_MESSAGE } from './server/errors.ts';
 import {
@@ -29,12 +33,14 @@ import {
   storageMediaUrl,
   storageObjectPath,
 } from './server/storageRelay.ts';
-import { isValidFeedSecret, writeFeedSync, loadFeedForSecret, buildFeedToday, feedAudioFile, renderFeedHtml } from './server/feed.ts';
+import { isValidFeedSecret, writeFeedSync, loadFeedForSecret, feedForUid, ensureTodayLecture, buildFeedToday, feedAudioFile, renderFeedHtml, publicFeedBaseUrl } from './server/feed.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+// First hop is the Cloud Run / AI Studio proxy that terminates TLS.
+app.set('trust proxy', 1);
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const isProd = process.env.NODE_ENV === 'production';
 
@@ -364,12 +370,7 @@ app.post('/api/gemini/tts', requireAuth, geminiLimit, async (req: Request, res: 
   }
 
   try {
-    const validVoices = ['Kore', 'Puck', 'Charon', 'Fenrir', 'Zephyr'];
-    let voice = 'Kore';
-    if (typeof voiceName === 'string') {
-      const match = validVoices.find(v => v.toLowerCase() === voiceName.trim().toLowerCase());
-      if (match) voice = match;
-    }
+    const voice = normalizeVoiceName(voiceName);
 
     const response = await ai.models.generateContent({
       model: FALLBACK_TTS_MODEL,
@@ -1077,7 +1078,7 @@ app.post('/api/coach/chat', requireAuth, geminiLimit, async (req: Request, res: 
 
 // Health check endpoints for Cloud Run container probes
 // B-7 Morning Lecture (auth required: Firebase ID token of the single allowed user)
-app.post('/api/lecture/generate', requireAuth, geminiLimit, (req: Request, res: Response) => {
+app.post('/api/lecture/generate', requireAuth, geminiLimit, async (req: Request, res: Response) => {
   const uid = res.locals.user.uid as string;
   const { date, newMistakes, reviewMistakes, force } = req.body || {};
   const ai = createGenAI();
@@ -1085,8 +1086,35 @@ app.post('/api/lecture/generate', requireAuth, geminiLimit, (req: Request, res: 
     noKey(res);
     return;
   }
+  const day = typeof date === 'string' ? date : kstToday();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+    apiError(res, 400, 'BAD_REQUEST', '날짜 형식이 올바르지 않아요.');
+    return;
+  }
+  const isForce = Boolean(force);
+  const feed = feedForUid(uid);
+  if (!isForce && feed) {
+    try {
+      await ensureTodayLecture(ai, feed, day);
+    } catch (err: any) {
+      console.warn('[Lecture] backup check before generate failed:', err?.message || err);
+      apiError(res, 503, 'LECTURE_FAILED', '오늘 강의를 확인하지 못했어요. 잠시 후 다시 시도해 주세요.');
+      return;
+    }
+  }
   try {
-    const state = startLectureJob(ai, uid, typeof date === 'string' ? date : kstToday(), newMistakes || [], reviewMistakes || [], { force: Boolean(force) });
+    const state = startLectureJob(ai, uid, day, newMistakes || [], reviewMistakes || [], {
+      force: isForce,
+      onReady: async (s: LectureState) => {
+        const f = feedForUid(uid);
+        if (!f) return;
+        try {
+          await saveLectureBackup(f.secret, s);
+        } catch (err: any) {
+          console.warn('[Lecture] backup save failed:', err?.message || err);
+        }
+      },
+    });
     res.json({ ok: true, lecture: state });
   } catch (err: any) {
     console.warn('[Lecture] start failed:', err?.message || err);
@@ -1094,11 +1122,23 @@ app.post('/api/lecture/generate', requireAuth, geminiLimit, (req: Request, res: 
   }
 });
 
-app.get('/api/lecture/status', requireAuth, (req: Request, res: Response) => {
+app.get('/api/lecture/status', requireAuth, async (req: Request, res: Response) => {
   const uid = res.locals.user.uid as string;
+  const date = typeof req.query.date === 'string' ? req.query.date : kstToday();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    apiError(res, 400, 'BAD_REQUEST', '날짜 형식이 올바르지 않아요.');
+    return;
+  }
+  const feed = feedForUid(uid);
+  if (feed) {
+    try {
+      await ensureTodayLecture(createGenAI(), feed, date);
+    } catch (err: any) {
+      console.warn('[Lecture] backup check on status failed:', err?.message || err);
+    }
+  }
   try {
-    const date = typeof req.query.date === 'string' ? req.query.date : kstToday();
-    res.json({ ok: true, lecture: readLectureState(uid, date) });
+    res.json({ ok: true, lecture: lectureStatusPayload(uid, date) });
   } catch (err: any) {
     apiError(res, 400, 'BAD_REQUEST', '날짜 형식이 올바르지 않아요.');
   }
@@ -1118,7 +1158,10 @@ app.get('/api/lecture/audio', requireAuth, (req: Request, res: Response) => {
       });
       return;
     }
-    res.type('audio/wav').sendFile(file, SEND_DATA_FILE);
+    const st = readLectureState(uid, date);
+    const mime = st?.audioMime || mimeForAudioFile(st?.audioFile || file);
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.type(mime).sendFile(file, SEND_DATA_FILE);
   } catch (err: any) {
     apiError(res, 400, 'BAD_REQUEST', '날짜 형식이 올바르지 않아요.');
   }
@@ -1178,6 +1221,11 @@ app.post('/api/feed/sync', requireAuth, async (req: Request, res: Response) => {
     syncedAt: new Date().toISOString(),
   };
   writeFeedSync(state);
+  try {
+    await ensureTodayLecture(createGenAI(), state, kstToday());
+  } catch (err: any) {
+    console.warn('[feed] ensure lecture after sync failed:', err?.message || err);
+  }
   // Firestore backup so the feed URL survives a fresh server (see server/feedStore.ts).
   const idToken = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
   let backedUp = false;
@@ -1194,9 +1242,13 @@ app.post('/api/feed/sync', requireAuth, async (req: Request, res: Response) => {
 });
 
 function feedBaseUrl(req: Request): string {
-  const proto = String(req.headers['x-forwarded-proto'] || req.protocol).split(',')[0].trim();
-  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '');
-  return `${proto}://${host}`;
+  return publicFeedBaseUrl({
+    forwardedProto: req.headers['x-forwarded-proto'],
+    forwarded: req.headers['forwarded'],
+    forwardedHost: req.headers['x-forwarded-host'],
+    host: req.headers.host,
+    protocol: req.protocol,
+  });
 }
 
 app.get(['/feed/:secret/today', '/feed/:secret/today.json'], async (req: Request, res: Response) => {
@@ -1207,21 +1259,43 @@ app.get(['/feed/:secret/today', '/feed/:secret/today.json'], async (req: Request
     res.status(404).send('Not found');
     return;
   }
-  const today = buildFeedToday(createGenAI(), st, feedBaseUrl(req));
+  const date = kstToday();
+  const ai = createGenAI();
+  let skipStart = false;
+  try {
+    await ensureTodayLecture(ai, st, date);
+  } catch (err: any) {
+    skipStart = true;
+    console.warn('[feed] could not check lecture backup:', err?.message || err);
+  }
+  const today = buildFeedToday(ai, st, feedBaseUrl(req), { date, skipStart });
   if (req.path.endsWith('.json')) res.json(today);
   else res.type('html').send(renderFeedHtml(today));
 });
 
 app.get('/feed/:secret/audio/:file', async (req: Request, res: Response) => {
   const st = await loadFeedForSecret(String(req.params.secret));
-  const m = /^(\d{4}-\d{2}-\d{2})\.wav$/.exec(String(req.params.file));
-  const file = st && m ? feedAudioFile(st, m[1]) : null;
+  const m = /^(\d{4}-\d{2}-\d{2})\.(wav|m4a|mp3)$/.exec(String(req.params.file));
+  if (!st || !m) {
+    res.status(404).send('Not found');
+    return;
+  }
+  const date = m[1];
+  if (date === kstToday()) {
+    try {
+      await ensureTodayLecture(createGenAI(), st, date);
+    } catch (err: any) {
+      console.warn('[feed] could not check lecture backup:', err?.message || err);
+    }
+  }
+  const file = feedAudioFile(st, date);
   if (!file) {
     res.status(404).send('Not found');
     return;
   }
   res.set('X-Robots-Tag', 'noindex');
-  res.type('audio/wav').sendFile(file, SEND_DATA_FILE);
+  res.set('Accept-Ranges', 'bytes');
+  res.type(mimeForAudioFile(file)).sendFile(file, SEND_DATA_FILE);
 });
 
 // B-10 Keep import: split pasted Keep "English mistake log" text into [내가 한 말 / 자연스러운 표현 / 이유]
@@ -1439,12 +1513,7 @@ async function startServer() {
           // One Live session per socket: a repeated init would leave the first session open.
           if (liveSession || initStarted) return;
           initStarted = true;
-          const validVoices = ['Kore', 'Puck', 'Charon', 'Fenrir', 'Zephyr'];
-          let voiceName = 'Kore';
-          if (typeof msg.voiceName === 'string') {
-            const match = validVoices.find(v => v.toLowerCase() === msg.voiceName.trim().toLowerCase());
-            if (match) voiceName = match;
-          }
+          const voiceName = normalizeVoiceName(msg.voiceName);
           const systemInstruction = msg.systemInstruction || 'You are a friendly English conversation tutor on a phone call. Speak natural, simple American English in short turns, and keep the learner talking.';
 
           console.log('[Gemini Live] stage=init_received');
@@ -1535,50 +1604,14 @@ async function startServer() {
             },
           });
 
-          // Target Language configuration: English dialog with bilingual Korean support
-          const targetLang = typeof msg.languageCode === 'string' && msg.languageCode ? msg.languageCode : 'en-US';
+          // Target Language configuration: ignore client languageCode, share fixed LIVE_LANGUAGE_CODE across paths
+          const configsToTry = buildLiveConfigAttempts({
+            voiceName,
+            systemInstruction,
+            resumeHandle: msg.resumeHandle,
+          });
 
-          const configsToTry: Array<{
-            desc: string;
-            config: any;
-            lock: string;
-          }> = [
-            {
-              desc: `gemini-3.8-live with session resumption & context compression`,
-              config: {
-                responseModalities: [Modality.AUDIO],
-                inputAudioTranscription: {},
-                outputAudioTranscription: {},
-                sessionResumption: {
-                  handle: msg.resumeHandle || undefined,
-                },
-                contextWindowCompression: {
-                  slidingWindow: {},
-                },
-                speechConfig: {
-                  voiceConfig: { prebuiltVoiceConfig: { voiceName } },
-                  languageCode: targetLang,
-                },
-                systemInstruction,
-              },
-              lock: targetLang,
-            },
-            {
-              desc: 'gemini-3.8-live standard audio session',
-              config: {
-                responseModalities: [Modality.AUDIO],
-                inputAudioTranscription: {},
-                outputAudioTranscription: {},
-                speechConfig: {
-                  voiceConfig: { prebuiltVoiceConfig: { voiceName } },
-                },
-                systemInstruction,
-              },
-              lock: targetLang,
-            },
-          ];
-
-          let activeLock: string = targetLang;
+          let activeLock: string | null = LIVE_LANGUAGE_CODE;
           let activeModel = NATIVE_AUDIO_MODEL;
           let connectError: any = null;
 

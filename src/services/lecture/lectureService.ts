@@ -16,6 +16,15 @@ import {
 } from "../firebase/db";
 import { authFetch, authJson } from "../api/authFetch";
 import { recordUsage } from "../usage/usageService";
+import {
+  shouldCopyLectureAudio,
+  shouldOverwriteFirestoreLecture,
+  listenedAtToKeep,
+  shouldMarkLectureDate,
+  readUploadFailAt,
+  writeUploadFailAt,
+  clearUploadFailAt,
+} from "./lectureSyncPolicy";
 
 export type LectureStatus = "generating" | "ready" | "failed";
 
@@ -49,6 +58,10 @@ export interface LectureDoc {
   createdAt: string;
   updatedAt?: string;
   error?: string;
+  audioStatus?: "ready" | "rebuilding" | "missing";
+  audioMime?: string;
+  hasAudio?: boolean;
+  audioProgress?: { completed: number; total: number };
 }
 
 const lectureRef = (uid: string, date: string) => doc(db, "users", uid, "lectures", date);
@@ -97,10 +110,10 @@ export async function startLecture(uid: string, date = getKSTToday(), force = fa
 }
 
 /**
- * Sync server job → Firestore. When the server finished, copy WAV to Cloud Storage
- * and store audioUrl. Returns the up-to-date Firestore doc (or null).
+ * Sync server job metadata → Firestore. Does not download the WAV.
+ * A different ready lecture on the server does not replace an already-ready Firestore doc.
  */
-export async function syncLectureFromServer(uid: string, date = getKSTToday()): Promise<LectureDoc | null> {
+export async function syncLectureStatus(uid: string, date = getKSTToday()): Promise<LectureDoc | null> {
   const current = await getLecture(uid, date);
   if (current?.status === "ready" && current.audioUrl) return current;
   const { lecture } = await authJson<{ lecture: any }>(`/api/lecture/status?date=${date}`, undefined, "GET");
@@ -112,6 +125,9 @@ export async function syncLectureFromServer(uid: string, date = getKSTToday()): 
       await setDoc(lectureRef(uid, date), failed, { merge: true });
       return failed;
     }
+    return current;
+  }
+  if (current?.status === "ready" && !shouldOverwriteFirestoreLecture(current, lecture)) {
     return current;
   }
   if (lecture.status !== "ready") {
@@ -129,25 +145,12 @@ export async function syncLectureFromServer(uid: string, date = getKSTToday()): 
     return patch;
   }
 
-  // ready → copy audio into Cloud Storage
-  let audioUrl: string | null = null;
-  try {
-    const audioRes = await authFetch(`/api/lecture/audio?date=${date}`);
-    if (!audioRes.ok) throw new Error(`audio ${audioRes.status}`);
-    const blob = await audioRes.blob();
-    const sref = ref(storage, `users/${uid}/lectures/${date}.wav`);
-    await uploadBytes(sref, blob, { contentType: "audio/wav" });
-    audioUrl = await getDownloadURL(sref);
-  } catch (err) {
-    console.warn("[Lecture] Cloud Storage upload failed; will stream from server:", err);
-  }
-
   const readyDoc: LectureDoc = {
     date,
     status: "ready",
     title: lecture.title,
     script: lecture.script,
-    audioUrl,
+    audioUrl: current?.audioUrl || null,
     coachNote: lecture.coachNote,
     itemCount: lecture.itemCount,
     newMistakeIds: lecture.newMistakeIds,
@@ -156,25 +159,85 @@ export async function syncLectureFromServer(uid: string, date = getKSTToday()): 
     chars: lecture.chars,
     textTokens: lecture.textTokens,
     durationSec: lecture.durationSec,
-    listenedAt: current?.listenedAt || null,
+    listenedAt: listenedAtToKeep(current, lecture.createdAt),
     createdAt: lecture.createdAt,
     updatedAt: new Date().toISOString(),
+    audioStatus: (lecture as LectureDoc).audioStatus,
+    audioMime: (lecture as LectureDoc).audioMime,
+    hasAudio: Boolean((lecture as LectureDoc).hasAudio),
+    audioProgress: (lecture as LectureDoc).audioProgress,
   };
   await setDoc(lectureRef(uid, date), readyDoc, { merge: true });
-  if (current?.status !== "ready") {
+  if (shouldMarkLectureDate(current?.status, "ready")) {
     // B-10 usage: lecture script tokens + TTS chars (once per lecture)
     recordUsage(uid, { textTokens: lecture.textTokens || 0, ttsChars: lecture.chars || 0, ttsEngine: "gemini" });
-  }
-
-  // Mark new mistakes as used so tomorrow's lecture won't repeat them
-  for (const id of lecture.newMistakeIds || []) {
-    try {
-      await updateDoc(doc(db, "users", uid, "mistakes", id), { lectureDate: date });
-    } catch {
-      // ignore (mistake may be deleted)
+    for (const id of lecture.newMistakeIds || []) {
+      try {
+        await updateDoc(doc(db, "users", uid, "mistakes", id), { lectureDate: date });
+      } catch {
+        // ignore (mistake may be deleted)
+      }
     }
   }
   return readyDoc;
+}
+
+const audioCopyInFlight = new Map<string, Promise<LectureDoc | null>>();
+
+function browserStorage(): Storage | undefined {
+  try {
+    return typeof localStorage === "undefined" ? undefined : localStorage;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Download the server WAV and upload to Cloud Storage. Single-flight + backoff on failure. */
+export async function copyLectureAudio(uid: string, date: string, current?: LectureDoc | null): Promise<LectureDoc | null> {
+  const key = `${uid}:${date}`;
+  const existing = audioCopyInFlight.get(key);
+  if (existing) return existing;
+  const work = (async () => {
+    const latest = current ?? (await getLecture(uid, date));
+    if (!latest || latest.status !== "ready") return latest;
+    if (latest.audioUrl) return latest;
+    if (latest.hasAudio === false) return latest;
+    let audioUrl: string | null = null;
+    try {
+      const audioRes = await authFetch(`/api/lecture/audio?date=${date}`);
+      if (!audioRes.ok) throw new Error(`audio ${audioRes.status}`);
+      const blob = await audioRes.blob();
+      const mime = audioRes.headers.get("content-type") || latest.audioMime || "audio/wav";
+      const ext = mime.includes("mpeg") || mime.includes("mp3") ? "mp3" : mime.includes("wav") ? "wav" : "m4a";
+      const sref = ref(storage, `users/${uid}/lectures/${date}.${ext}`);
+      await uploadBytes(sref, blob, { contentType: mime });
+      audioUrl = await getDownloadURL(sref);
+      clearUploadFailAt(browserStorage(), uid, date);
+    } catch (err) {
+      writeUploadFailAt(browserStorage(), uid, date, Date.now());
+      console.warn("[Lecture] Cloud Storage upload failed; will stream from server:", err);
+      return latest;
+    }
+    const readyDoc: LectureDoc = { ...latest, audioUrl, updatedAt: new Date().toISOString() };
+    await setDoc(lectureRef(uid, date), { audioUrl, updatedAt: readyDoc.updatedAt }, { merge: true });
+    return readyDoc;
+  })().finally(() => {
+    if (audioCopyInFlight.get(key) === work) audioCopyInFlight.delete(key);
+  });
+  audioCopyInFlight.set(key, work);
+  return work;
+}
+
+/**
+ * Sync server job → Firestore. Metadata first; WAV copy is optional and skipped during backoff.
+ */
+export async function syncLectureFromServer(uid: string, date = getKSTToday()): Promise<LectureDoc | null> {
+  const docData = await syncLectureStatus(uid, date);
+  const store = browserStorage();
+  if (shouldCopyLectureAudio(docData, Date.now(), readUploadFailAt(store, uid, date))) {
+    return copyLectureAudio(uid, date, docData);
+  }
+  return docData;
 }
 
 export async function rebuildLectureAudio(lecture: LectureDoc): Promise<void> {
@@ -193,54 +256,115 @@ export async function rebuildLectureAudio(lecture: LectureDoc): Promise<void> {
   await authJson<{ lecture: unknown }>("/api/lecture/audio/rebuild", body);
 }
 
+export async function fetchLectureStatus(date: string): Promise<LectureDoc | null> {
+  const { lecture } = await authJson<{ lecture: LectureDoc | null }>(
+    `/api/lecture/status?date=${date}`,
+    undefined,
+    "GET"
+  );
+  return lecture ?? null;
+}
+
 export async function waitForLectureAudio(
   date: string,
-  opts: { timeoutMs?: number; intervalMs?: number; signal?: AbortSignal } = {}
+  opts: {
+    timeoutMs?: number;
+    intervalMs?: number;
+    stallMs?: number;
+    signal?: AbortSignal;
+    onProgress?: (lecture: LectureDoc | null) => void;
+  } = {}
 ): Promise<boolean> {
-  const timeoutMs = opts.timeoutMs ?? 180_000;
+  const timeoutMs = opts.timeoutMs ?? 15 * 60_000;
   const intervalMs = opts.intervalMs ?? 3000;
+  const stallMs = opts.stallMs ?? 3 * 60_000;
   const started = Date.now();
+  let lastSig = "";
+  let lastChange = Date.now();
   while (Date.now() - started < timeoutMs) {
     if (opts.signal?.aborted) return false;
-    const res = await authFetch(`/api/lecture/audio?date=${date}`);
-    if (res.ok) return true;
+    const st = await fetchLectureStatus(date).catch(() => null);
+    opts.onProgress?.(st);
+    if (st?.hasAudio || st?.audioStatus === "ready") {
+      const res = await authFetch(`/api/lecture/audio?date=${date}`);
+      if (res.ok) return true;
+    }
+    if (st?.audioStatus === "missing" && st.error && st.error !== "GENERATION_FAILED") {
+      return false;
+    }
+    const sig = `${st?.audioStatus ?? ""}:${st?.audioProgress?.completed ?? ""}:${st?.updatedAt ?? ""}`;
+    if (sig !== lastSig) {
+      lastSig = sig;
+      lastChange = Date.now();
+    } else if (Date.now() - lastChange > stallMs && st?.audioStatus !== "rebuilding") {
+      return false;
+    } else if (st?.audioStatus === "rebuilding" && Date.now() - lastChange > stallMs) {
+      return false;
+    }
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
   return false;
 }
 
-/** Get a playable URL: Cloud Storage first, server stream as fallback. If the WAV was lost on the server, rebuild TTS from the saved script and poll until ready. */
+export async function fetchLectureAudioBlob(date: string): Promise<{ url: string; blob: Blob; mime: string } | null> {
+  const res = await authFetch(`/api/lecture/audio?date=${date}`);
+  if (!res.ok) return null;
+  const blob = await res.blob();
+  const mime = res.headers.get("content-type") || "audio/mp4";
+  return { url: URL.createObjectURL(blob), blob, mime };
+}
+
+/** Get a playable URL: Cloud Storage first, server stream as fallback. If the file was lost on the server, rebuild TTS from the saved script and poll status until ready. */
 export async function resolveLectureAudio(
   lecture: LectureDoc,
-  opts: { onRebuilding?: () => void; signal?: AbortSignal } = {}
-): Promise<string> {
-  if (lecture.audioUrl) return lecture.audioUrl;
-  const res = await authFetch(`/api/lecture/audio?date=${lecture.date}`);
-  if (res.ok) return URL.createObjectURL(await res.blob());
-  if (res.status === 404 && (lecture.script?.length || 0) > 0) {
+  opts: {
+    onRebuilding?: () => void;
+    onProgress?: (lecture: LectureDoc | null) => void;
+    signal?: AbortSignal;
+  } = {}
+): Promise<{ url: string; blob?: Blob; mime?: string }> {
+  if (lecture.audioUrl) return { url: lecture.audioUrl };
+  const existing = await fetchLectureAudioBlob(lecture.date);
+  if (existing) return existing;
+  if ((lecture.script?.length || 0) > 0) {
     opts.onRebuilding?.();
     await rebuildLectureAudio(lecture);
-    const ready = await waitForLectureAudio(lecture.date, { signal: opts.signal });
+    const ready = await waitForLectureAudio(lecture.date, {
+      signal: opts.signal,
+      onProgress: opts.onProgress,
+    });
     if (ready) {
-      const again = await authFetch(`/api/lecture/audio?date=${lecture.date}`);
-      if (again.ok) return URL.createObjectURL(await again.blob());
+      const again = await fetchLectureAudioBlob(lecture.date);
+      if (again) return again;
     }
   }
   throw new Error("강의 오디오를 불러오지 못했어요.");
 }
 
-const CACHE_NAME = "onecall-lectures-v1";
+const CACHE_NAME = "onecall-lectures-v2";
 
-/** B-7 #5 Offline pre-download: Cache API, falls back to streaming. Returns object URL or null. */
-export async function cacheLectureAudio(url: string): Promise<string | null> {
-  if (!("caches" in window) || url.startsWith("blob:")) return null;
+/** Offline pre-download: Cache API, including blob: results from an authenticated fetch. */
+export async function cacheLectureAudio(
+  url: string,
+  opts?: { blob?: Blob; mime?: string; cacheKey?: string }
+): Promise<string | null> {
+  if (!("caches" in window)) return null;
   try {
     const cache = await caches.open(CACHE_NAME);
-    let hit = await cache.match(url);
+    const key = opts?.cacheKey || url;
+    if (url.startsWith("blob:") && !opts?.blob) return null;
+    let hit = !url.startsWith("blob:") ? await cache.match(key) : undefined;
     if (!hit) {
-      const res = await fetch(url, { mode: "cors" });
-      if (!res.ok) return null;
-      await cache.put(url, res.clone());
+      const blob =
+        opts?.blob ||
+        (await (async () => {
+          const res = await fetch(url, { mode: "cors" });
+          if (!res.ok) return null;
+          return res.blob();
+        })());
+      if (!blob) return null;
+      const res = new Response(blob, { headers: { "Content-Type": opts?.mime || blob.type || "audio/mp4" } });
+      await cache.put(key, res.clone());
       hit = res;
     }
     return URL.createObjectURL(await hit.blob());

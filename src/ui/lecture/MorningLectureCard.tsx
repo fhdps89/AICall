@@ -3,7 +3,8 @@ import { friendlyError } from "../common/friendlyError";
 import { User } from "firebase/auth";
 import { Headphones, Loader2, Play, RefreshCw, AlertTriangle } from "lucide-react";
 import { getKSTToday } from "../../services/firebase/db";
-import { LectureDoc, getLecture, startLecture, syncLectureFromServer } from "../../services/lecture/lectureService";
+import { LectureDoc, getLecture, startLecture, syncLectureStatus, copyLectureAudio } from "../../services/lecture/lectureService";
+import { shouldCopyLectureAudio, shouldShowLectureImmediately, readUploadFailAt } from "../../services/lecture/lectureSyncPolicy";
 import { LectureModal } from "./LectureModal";
 
 interface MorningLectureCardProps {
@@ -36,14 +37,35 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
   const firstRefreshDoneRef = useRef(false);
   const today = getKSTToday();
 
+  const maybeCopyAudio = (l: LectureDoc | null) => {
+    if (!l) return;
+    let store: Storage | undefined;
+    try {
+      store = typeof localStorage === "undefined" ? undefined : localStorage;
+    } catch {
+      store = undefined;
+    }
+    if (!shouldCopyLectureAudio(l, Date.now(), readUploadFailAt(store, user.uid, today))) return;
+    void copyLectureAudio(user.uid, today, l)
+      .then((updated) => {
+        if (updated) setLecture(updated);
+      })
+      .catch(() => { /* stream from the server instead */ });
+  };
+
   const refresh = async () => {
     try {
       let l = await getLecture(user.uid, today);
-      if (!l || l.status !== "ready" || !l.audioUrl) {
-        // Server may have generated it (e.g. via the Grok Bot feed) → sync
-        l = (await syncLectureFromServer(user.uid, today).catch(() => l)) || l;
+      if (shouldShowLectureImmediately(l)) {
+        setLecture(l);
+        setLoading(false);
+        maybeCopyAudio(l);
+        return l;
       }
+      // Server may have generated it (e.g. via the Grok Bot feed) → metadata only
+      l = (await syncLectureStatus(user.uid, today).catch(() => l)) || l;
       setLecture(l);
+      maybeCopyAudio(l);
       return l;
     } finally {
       setLoading(false);
@@ -57,7 +79,7 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
       firstRefreshDoneRef.current = true;
       if (autoOpenRef.current && !autoOpenHandledRef.current) {
         autoOpenHandledRef.current = true;
-        if (l?.status === "ready" && l.audioUrl) {
+        if (l?.status === "ready") {
           setOpen(true);
         }
         onAutoOpenHandledRef.current?.();
@@ -77,7 +99,7 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
   useEffect(() => {
     if (!autoOpen || !firstRefreshDoneRef.current || autoOpenHandledRef.current) return;
     autoOpenHandledRef.current = true;
-    if (lecture?.status === "ready" && lecture.audioUrl) {
+    if (lecture?.status === "ready") {
       setOpen(true);
     }
     onAutoOpenHandledRef.current?.();

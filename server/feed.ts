@@ -7,10 +7,19 @@
 import fs from 'fs';
 import path from 'path';
 import type { GoogleGenAI } from '@google/genai';
-import { DATA_DIR, kstToday, readLectureState, startLectureJob, lectureAudioPath } from './lecture.ts';
-import type { LectureMistakeInput } from './lecture.ts';
+import {
+  DATA_DIR,
+  kstToday,
+  readLectureState,
+  startLectureJob,
+  restoreReadyLecture,
+  lectureAudioPath,
+  lectureRebuildInFlight,
+  LECTURE_AUDIO_MISSING,
+} from './lecture.ts';
+import type { LectureMistakeInput, LectureState, LectureSynthesizeFn } from './lecture.ts';
 import { safeEqual } from './auth.ts';
-import { loadFeedBackup } from './feedStore.ts';
+import { loadFeedBackup, loadLectureBackup, saveLectureBackup } from './feedStore.ts';
 import { setUserKeyFromFeed } from './userKey.ts';
 
 const FEED_FILE = path.join(DATA_DIR, 'feed.json');
@@ -49,6 +58,13 @@ export function feedForSecret(secret: string): FeedSyncState | null {
   return st;
 }
 
+/** Returns the local synced state when it belongs to uid and holds a valid secret. */
+export function feedForUid(uid: string): FeedSyncState | null {
+  const st = readFeed();
+  if (!st || st.uid !== uid || !isValidFeedSecret(st.secret)) return null;
+  return st;
+}
+
 /**
  * Like feedForSecret, but a fresh server (empty .data/) restores the state, and the user's
  * Gemini key when it was backed up, from Firestore first.
@@ -80,8 +96,112 @@ export interface FeedToday {
   error?: string;
 }
 
-export function buildFeedToday(ai: GoogleGenAI | null, st: FeedSyncState, baseUrl: string): FeedToday {
-  const date = kstToday();
+export interface EnsureTodayLectureDeps {
+  loadBackup?: (secret: string, date: string) => Promise<LectureState | null>;
+  restoreLecture?: typeof restoreReadyLecture;
+  synthesizeFn?: LectureSynthesizeFn;
+}
+
+const ensureInFlight = new Map<string, Promise<void>>();
+
+/**
+ * Ensure today's lecture is restored from Firestore backup if local state is missing or failed
+ * and no generation job is actively running. Single-flight per uid:date.
+ * Rejects on transient backup read failures (5xx/network) so callers do not start a duplicate job.
+ */
+export async function ensureTodayLecture(
+  ai: GoogleGenAI | null,
+  st: FeedSyncState,
+  date: string,
+  deps: EnsureTodayLectureDeps = {}
+): Promise<void> {
+  const key = `${st.uid}:${date}`;
+  const inflight = ensureInFlight.get(key);
+  if (inflight) return inflight;
+  const work = ensureTodayLectureOnce(ai, st, date, deps).finally(() => {
+    if (ensureInFlight.get(key) === work) ensureInFlight.delete(key);
+  });
+  ensureInFlight.set(key, work);
+  return work;
+}
+
+async function ensureTodayLectureOnce(
+  ai: GoogleGenAI | null,
+  st: FeedSyncState,
+  date: string,
+  deps: EnsureTodayLectureDeps
+): Promise<void> {
+  const local = readLectureState(st.uid, date);
+  if (local?.status === 'ready' && lectureAudioPath(st.uid, date)) return;
+  // readLectureState only returns 'generating' when an active job is in memory.
+  if (local?.status === 'generating') return;
+  if (lectureRebuildInFlight(st.uid, date)) return;
+
+  if (local?.status === 'ready' && Array.isArray(local.script) && local.script.length > 0) {
+    if (!ai && !deps.synthesizeFn) return;
+    const restore = deps.restoreLecture || restoreReadyLecture;
+    restore(ai as GoogleGenAI, st.uid, date, local, { synthesizeFn: deps.synthesizeFn });
+    return;
+  }
+
+  const load = deps.loadBackup || loadLectureBackup;
+  const backup = await load(st.secret, date);
+  if (
+    !backup ||
+    backup.uid !== st.uid ||
+    backup.date !== date ||
+    backup.status !== 'ready' ||
+    !Array.isArray(backup.script) ||
+    backup.script.length === 0
+  ) {
+    return;
+  }
+  if (!ai && !deps.synthesizeFn) return;
+  const restore = deps.restoreLecture || restoreReadyLecture;
+  restore(ai as GoogleGenAI, st.uid, date, backup, { synthesizeFn: deps.synthesizeFn });
+}
+
+
+/**
+ * Absolute origin for public feed links (today.json audioUrl).
+ * Behind Cloud Run / AI Studio the container sees HTTP, so req.protocol is http
+ * unless trust proxy is on and X-Forwarded-Proto is present. Public hosts always
+ * get https; localhost / loopback keep http unless the forwarded proto is https.
+ */
+export function publicFeedBaseUrl(input: {
+  forwardedProto?: string | string[];
+  forwarded?: string | string[];
+  forwardedHost?: string | string[];
+  host?: string | string[];
+  protocol?: string;
+}): string {
+  const first = (v?: string | string[]) =>
+    String(Array.isArray(v) ? v[0] : v || '').split(',')[0].trim();
+  const fwdRaw = first(input.forwarded);
+  const fwdProto = (fwdRaw.match(/(?:^|[;,\s])proto="?([A-Za-z]+)"?/i) || [])[1]?.toLowerCase() || '';
+  const fwdHost = (fwdRaw.match(/(?:^|[;,\s])host="?([^;,"\s]+)"?/i) || [])[1] || '';
+  const host = first(input.forwardedHost) || fwdHost || first(input.host);
+  const xf = first(input.forwardedProto).toLowerCase();
+  const declared = xf || fwdProto || String(input.protocol || '').toLowerCase();
+  const isLocal = !host || /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(host);
+  let proto = declared === 'http' || declared === 'https' ? declared : isLocal ? 'http' : 'https';
+  if (!isLocal) proto = 'https';
+  return `${proto}://${host}`;
+}
+
+export interface BuildFeedTodayOpts {
+  date?: string;
+  skipStart?: boolean;
+  startJob?: typeof startLectureJob;
+}
+
+export function buildFeedToday(
+  ai: GoogleGenAI | null,
+  st: FeedSyncState,
+  baseUrl: string,
+  opts: BuildFeedTodayOpts = {}
+): FeedToday {
+  const date = opts.date || kstToday();
   let lecture = readLectureState(st.uid, date);
   const hasCandidates = st.newMistakes.length + st.reviewMistakes.length > 0;
   // Retry a failed lecture at most once per FAILED_RETRY_COOLDOWN_MS, so a feed that is
@@ -90,8 +210,17 @@ export function buildFeedToday(ai: GoogleGenAI | null, st: FeedSyncState, baseUr
     && Date.now() - Date.parse(lecture.updatedAt || lecture.createdAt) > FAILED_RETRY_COOLDOWN_MS;
   // A job cut off by a server restart did not fail on its own, so it is retried right away.
   const interrupted = lecture?.status === 'failed' && (lecture.error === 'INTERRUPTED' || lecture.error === 'TIMED_OUT');
-  if ((!lecture || failedLongAgo || interrupted) && hasCandidates && ai) {
-    lecture = startLectureJob(ai, st.uid, date, st.newMistakes, st.reviewMistakes);
+  const startJob = opts.startJob || startLectureJob;
+  if (!opts.skipStart && (!lecture || failedLongAgo || interrupted) && hasCandidates && ai) {
+    lecture = startJob(ai, st.uid, date, st.newMistakes, st.reviewMistakes, {
+      onReady: async (s) => {
+        try {
+          await saveLectureBackup(st.secret, s);
+        } catch (err: any) {
+          console.warn('[feed] lecture backup failed:', err?.message || err);
+        }
+      },
+    });
   }
   const base: FeedToday = {
     date,
@@ -104,15 +233,21 @@ export function buildFeedToday(ai: GoogleGenAI | null, st: FeedSyncState, baseUr
   };
   if (!lecture) return base;
   if (lecture.status === 'generating') return { ...base, status: 'generating', title: lecture.title || null };
-  if (lecture.status === 'ready' && lectureAudioPath(st.uid, date)) {
-    return {
-      ...base,
-      status: 'ready',
-      title: lecture.title || null,
-      itemCount: lecture.itemCount || 0,
-      coachNote: lecture.coachNote || null,
-      audioUrl: `${baseUrl}/feed/${st.secret}/audio/${date}.wav`,
-    };
+  if (lecture.status === 'ready') {
+    if (lectureAudioPath(st.uid, date)) {
+      return {
+        ...base,
+        status: 'ready',
+        title: lecture.title || null,
+        itemCount: lecture.itemCount || 0,
+        coachNote: lecture.coachNote || null,
+        audioUrl: `${baseUrl}/feed/${st.secret}/audio/${lecture.audioFile || `${date}.wav`}`,
+      };
+    }
+    if (lecture.audioStatus === 'rebuilding' || lectureRebuildInFlight(st.uid, date)) {
+      return { ...base, status: 'generating', title: lecture.title || null };
+    }
+    return { ...base, error: lecture.error || LECTURE_AUDIO_MISSING };
   }
   return { ...base, ...(lecture.error && lecture.error !== 'NOTHING_TO_TEACH' ? { error: lecture.error } : {}) };
 }

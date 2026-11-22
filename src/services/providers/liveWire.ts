@@ -2,6 +2,8 @@
  * Gemini Live WebSocket 송신 와이어 형식(direct / proxy) 빌더·검증기·URL 마스킹(순수 모듈, DOM/Firebase 비의존).
  */
 
+import { normalizeVoiceName } from "../../config/voices";
+
 export type LiveWireKind = "direct" | "proxy";
 
 export const LIVE_INPUT_AUDIO_MIME = "audio/pcm;rate=16000";
@@ -36,6 +38,7 @@ export interface DirectSetupInput {
   voiceName: string;
   systemInstruction: string;
   resumeHandle: string | null;
+  languageCode?: string | null;
 }
 
 export interface ProxyInitInput {
@@ -82,18 +85,23 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * 키 순서를 @google/genai SDK(live.connect) 와 동일하게 유지한다.
  */
 export function buildDirectSetup(input: DirectSetupInput): DirectClientMessage {
+  const speechConfig: Record<string, unknown> = {
+    voiceConfig: {
+      prebuiltVoiceConfig: {
+        voiceName: normalizeVoiceName(input.voiceName),
+      },
+    },
+  };
+  if (input.languageCode) {
+    speechConfig.languageCode = input.languageCode;
+  }
+
   return {
     setup: {
       model: `models/${input.model}`,
       generationConfig: {
         responseModalities: ["AUDIO"],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: {
-              voiceName: input.voiceName,
-            },
-          },
-        },
+        speechConfig,
       },
       systemInstruction: {
         parts: [{ text: input.systemInstruction }],
@@ -117,7 +125,7 @@ export function buildProxyInit(input: ProxyInitInput): ProxyClientMessage {
   return {
     type: "init",
     systemInstruction: input.systemInstruction,
-    voiceName: input.voiceName,
+    voiceName: normalizeVoiceName(input.voiceName),
     resumeHandle: input.resumeHandle,
     languageCode: input.languageCode,
   };
