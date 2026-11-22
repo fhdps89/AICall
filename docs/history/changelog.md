@@ -4,6 +4,20 @@
 
 ---
 
+### [2026-11-23 KST] v2.10.0 이후 수정(미배포) — 아침 강의 생성 정체를 wall-clock 15분으로 풀기 (브랜치 `englead/feed-wallclock-timeout-20261123`)
+- **배경**:
+  - 11/21·11/22·11/23 사흘 연속 아침 피드가 `status=generating`에 머물렀다. PR #35(프로세스 `setTimeout` 15분)는 11/22 10:58 머지되어 #44 라이브(`index-DZ567Gqg.js`)에 포함돼 있었지만, 11/23 07:30 점검에서도 정체를 막지 못했다. 11/23은 서버에 요청을 이어 보낸 뒤 07:52에 같은 제목으로 ready가 되었고, Republish는 하지 않았다.
+- **원인**:
+  - 생성 잡은 프로세스 메모리의 `running`과 `.data` JSON에만 있다. AI Studio/Cloud Run은 요청 사이에 CPU를 거의 주지 않아 `setTimeout`(15분)이 벽시계 기준으로 만료되지 않는다. `readLectureState`의 `INTERRUPTED` 오버레이는 `running`이 비어 있을 때만 동작해서, 프로세스는 살아 있고 타이머만 멈춘 상태에서는 피드가 재시작하지 않는다. `force`도 `running`이 있으면 새 작업을 시작하지 않는다.
+- **수정**:
+  - `server/lecture.ts`: `createdAt` 기준 벽시계가 `LECTURE_JOB_TIMEOUT_MS`(15분)를 넘긴 `generating`은 `running`이 남아 있어도 `failed`/`TIMED_OUT`으로 읽는다. `startLectureJob`은 이 오버레이를 보면 epoch를 올려 바로 다시 시작한다. 기존 프로세스 타임아웃·epoch 가드는 유지한다.
+  - 피드(`buildFeedToday`)는 기존대로 `TIMED_OUT`을 즉시 재시도한다.
+- **방어 조치 (Safeguards)**: `tests/lectureJobTimeout.test.ts`에 wall-clock 초과 시 TIMED_OUT, `running`이 남아 있어도 재시작, 15분 미만은 generating 유지, 프로세스 재시작 시 INTERRUPTED 우선, 재시작 후 늦은 쓰기가 새 작업을 덮어쓰지 않음을 추가함.
+- **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build`.
+- **모델**: 원인 조사·수정 설계는 Engineering Lead, 리뷰는 Claude CLI Opus 5.5 high.
+
+---
+
 ### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — QA 10차 37·43–48행 수정 (`qaPreview` 영속화·미루기 정보 카드·QA 빠른 답장 가로채기·홈 코치 링크·트랙 부제·클러스터 QA 필터) (브랜치 `englead/qa10-fixes-20261122`)
 - **배경**: QA 10차 검증에서 ① 주간 복기 「트랙 골라 통화」 피커 부제 문구(37행), ② 미루기 응답에 카드가 없어 보이는 문제(43행), ③ QA 모드에서 진도 제안을 받고 「응」을 보내면 같은 제안 카드가 반복되고 새로고침 시 카드가 사라지며(44·45행), 본문에는 `[승인]`/`'응'` 안내가 남고 카드에는 「QA 모드에서는 실제 진도를 바꾸지 않습니다」가 나오는 모순(46행), ④ 홈 오늘 수업 카드에서 바로 코치로 가는 작은 링크 필요(47행), ⑤ QA 통화 뒤 「반복되는 실수」 설명 문구 변경(48행)이 보고되었다. 머지·배포는 하지 않음.
 - **원인**:
