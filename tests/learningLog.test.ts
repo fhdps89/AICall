@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   addDaysToDateStr,
+  callUsageDelta,
   callsForDuration,
   deriveHomeLearningStatus,
   getRecentMonthKeys,
@@ -16,6 +17,7 @@ import {
   estimateCostUsd,
   type UsageMonth,
 } from '../src/services/usage/usageService.ts';
+import { PRICING_RATES } from '../src/config/models.ts';
 
 function makeMonth(
   days: Record<string, { calls?: number; liveMinutes?: number }>,
@@ -488,4 +490,46 @@ test('streak and rest banner never coexist (property)', () => {
 
 test('deriveHomeLearningStatus(null) hides both', () => {
   assert.deepEqual(deriveHomeLearningStatus(null), { streakDays: null, restDays: null });
+});
+
+test('callUsageDelta isolates QA calls from liveMinutes and calls while keeping qaLiveMinutes (A17)', () => {
+  assert.deepEqual(callUsageDelta(260, false), { liveMinutes: 260 / 60, calls: 1 });
+
+  const qa = callUsageDelta(260, true);
+  assert.deepEqual(qa, { qaLiveMinutes: 260 / 60 });
+  assert.equal('liveMinutes' in qa, false);
+  assert.equal('calls' in qa, false);
+
+  assert.deepEqual(callUsageDelta(5, false), { liveMinutes: 5 / 60, calls: 0 });
+  assert.deepEqual(callUsageDelta(Number.NaN, false), { liveMinutes: 0, calls: 0 });
+});
+
+test('qaLiveMinutes adds estCostUsd without counting as an active learning day or streak (A18)', () => {
+  const qaDayFields = buildUsageFields({ qaLiveMinutes: 4 }, (n) => n);
+  assert.equal(qaDayFields.liveMinutes, 0);
+  assert.equal(qaDayFields.calls, 0);
+  assert.equal(qaDayFields.estCostUsd, 4 * PRICING_RATES.livePerMinute);
+
+  const monthOnlyQa: UsageMonth = {
+    liveMinutes: qaDayFields.liveMinutes,
+    sttMinutes: qaDayFields.sttMinutes,
+    textTokens: qaDayFields.textTokens,
+    ttsChars: qaDayFields.ttsChars,
+    estCostUsd: qaDayFields.estCostUsd,
+    calls: qaDayFields.calls,
+    days: { '22': qaDayFields },
+  };
+  const summaryOnlyQa = summarizeLearningLog({ '2026-11': monthOnlyQa }, '2026-11-22');
+  assert.deepEqual(summaryOnlyQa.today, { calls: 0, minutes: 0 });
+  assert.equal(summaryOnlyQa.thisMonth.activeDays, 0);
+  assert.equal(summaryOnlyQa.streakDays, 0);
+
+  const monthWithYesterday = makeMonth(
+    { '21': { calls: 1, liveMinutes: 5 } },
+    { days: { '21': { calls: 1, liveMinutes: 5 }, '22': qaDayFields } }
+  );
+  const summaryWithYesterday = summarizeLearningLog({ '2026-11': monthWithYesterday }, '2026-11-22');
+  assert.deepEqual(summaryWithYesterday.today, { calls: 0, minutes: 0 });
+  assert.equal(summaryWithYesterday.thisMonth.activeDays, 1);
+  assert.equal(summaryWithYesterday.streakDays, 1);
 });

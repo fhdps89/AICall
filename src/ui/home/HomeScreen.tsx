@@ -56,7 +56,11 @@ import { SttBenchmarkModal } from "../sttBench/SttBenchmarkModal";
 import { CoachModal } from "../coach/CoachModal";
 import { LessonChangeSheet } from "./LessonChangeSheet";
 import { TrackPickerSheet } from "./TrackPickerSheet";
-import { buildTrackOptions } from "./trackOptions";
+import {
+  buildTrackOptions,
+  resolveTrackPick,
+  type TrackPickerMode,
+} from "./trackOptions";
 import { loadDailyOverride, saveDailyOverride } from "./dailyTrackOverride";
 import { getUsageMonths, USAGE_UPDATED_EVENT } from "../../services/usage/usageService";
 import {
@@ -272,7 +276,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       // localStorage 접근 실패 시 상태만 갱신한다.
     }
   };
-  const [showTrackPicker, setShowTrackPicker] = useState<boolean>(false);
+  const [trackPickerMode, setTrackPickerMode] = useState<TrackPickerMode | null>(null);
   const [lessonChangeGoal, setLessonChangeGoal] = useState<GoalData | null>(null);
   const lectureCardRef = useRef<HTMLDivElement>(null);
   const goalsSectionRef = useRef<HTMLDivElement>(null);
@@ -361,6 +365,16 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
     }
   }
 }
+
+  const handleTrackPick = (goalId: string | null) => {
+    const action = resolveTrackPick({ mode: trackPickerMode ?? "switchTrack", pickedGoalId: goalId, goals });
+    if (action.type === "none") return;
+    chooseOverrideGoal(action.goalId);
+    if (action.type === "startCall") {
+      const g = goals.find((x) => x.id === action.goalId);
+      if (g) onStartCall(g, action.lessonIndex);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-[#0F141C] text-slate-100 flex flex-col">
@@ -505,7 +519,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
                 </button>
                 <button
                   type="button"
-                  onClick={() => setShowTrackPicker(true)}
+                  onClick={() => setTrackPickerMode("startCall")}
                   className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white border border-slate-700 text-xs font-semibold transition-colors cursor-pointer"
                 >
                   트랙 골라 통화
@@ -518,7 +532,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
                 <div className="flex flex-wrap items-center gap-2 text-slate-400 text-xs font-medium mb-1">
                   <button
                     type="button"
-                    onClick={() => setShowTrackPicker(true)}
+                    onClick={() => setTrackPickerMode("switchTrack")}
                     className="inline-flex items-center gap-1.5 min-h-[44px] px-3.5 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 hover:text-amber-200 text-xs font-bold transition-colors cursor-pointer"
                   >
                     <span>트랙: {todayGoal.title}</span>
@@ -1059,13 +1073,14 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
       )}
 
       {/* Quick Track Picker Sheet */}
-      {showTrackPicker && (
+      {trackPickerMode && (
         <TrackPickerSheet
+          mode={trackPickerMode}
           options={trackOptionsResult.options}
           isPlanReviewDay={isPlanReviewDay}
           reviewDaySelected={trackOptionsResult.reviewDaySelected}
-          onSelect={(goalId) => chooseOverrideGoal(goalId)}
-          onClose={() => setShowTrackPicker(false)}
+          onSelect={handleTrackPick}
+          onClose={() => setTrackPickerMode(null)}
         />
       )}
 

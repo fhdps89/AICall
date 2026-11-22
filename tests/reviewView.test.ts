@@ -1,9 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import type { SessionReviewData } from '../src/services/firebase/db.ts';
 import {
   isEmptyReview,
   levelBadge,
   outcomeItems,
+  reviewSaveNotice,
+  shouldShowLessonAdvanced,
   sourceSttLabel,
 } from '../src/services/review/reviewView.ts';
 
@@ -54,4 +57,47 @@ test('outcomeItems drops unknown ids and preserves ids order', () => {
     { id: 'c', myPhrase: 'third' },
     { id: 'a', myPhrase: 'first' },
   ]);
+});
+
+test('reviewSaveNotice handles QA, save failure, saved count, and zero mistakes (A10-A14)', () => {
+  const qa = reviewSaveNotice({ qaCall: true, visibleCount: 2 });
+  assert.equal(qa.tone, 'info');
+  assert.ok(qa.text.includes('QA 통화'));
+  assert.ok(qa.text.includes('저장하지 않았어요'));
+  assert.ok(!qa.text.includes('저장하지 못했어요'));
+  assert.ok(!qa.text.includes('자동으로 저장됐어요'));
+  assert.equal(qa.showNextSteps, false);
+
+  const qaEvenWithSavedFalse = reviewSaveNotice({ qaCall: true, mistakesSaved: false, visibleCount: 1 });
+  assert.deepEqual(qaEvenWithSavedFalse, qa);
+
+  const failed = reviewSaveNotice({ mistakesSaved: false, visibleCount: 1 });
+  assert.equal(failed.tone, 'warn');
+  assert.equal(
+    failed.text,
+    '실수를 앱 복습 목록에 저장하지 못했어요. 아래 "Keep에 붙여넣기용 복사"로 따로 남겨 두세요.'
+  );
+  assert.equal(failed.showNextSteps, true);
+
+  const saved = reviewSaveNotice({ mistakesSaved: true, visibleCount: 3 });
+  assert.equal(saved.tone, 'ok');
+  assert.equal(saved.text, '오늘 실수 3개는 앱 복습 목록에 자동으로 저장됐어요. 따로 옮겨 적지 않아도 돼요.');
+  assert.equal(saved.showNextSteps, true);
+
+  const zero = reviewSaveNotice({ visibleCount: 0 });
+  assert.equal(zero.tone, 'ok');
+  assert.equal(zero.text, '오늘은 저장할 실수가 없어요.');
+  assert.equal(zero.showNextSteps, true);
+});
+
+test('shouldShowLessonAdvanced requires lessonAdvanced=true and qaCall!=true (A15)', () => {
+  assert.equal(shouldShowLessonAdvanced({ lessonAdvanced: true }), true);
+  assert.equal(shouldShowLessonAdvanced({ lessonAdvanced: true, qaCall: true }), false);
+  assert.equal(shouldShowLessonAdvanced({}), false);
+  assert.equal(shouldShowLessonAdvanced(null), false);
+});
+
+test('isEmptyReview does not treat a QA review as empty when transcript source is valid (A16)', () => {
+  const qaReview: Partial<SessionReviewData> = { qaCall: true };
+  assert.equal(isEmptyReview(qaReview, 'sttFinal'), false);
 });

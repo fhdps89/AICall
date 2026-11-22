@@ -6,6 +6,8 @@ import {
   applyQaParam,
   readQaMode,
   resolveMistakeSource,
+  isQaCall,
+  callSideEffects,
   type QaStore,
 } from '../src/data/qaMode.ts';
 
@@ -64,4 +66,26 @@ test('resolveMistakeSource: session wins; missing session falls back to current 
   assert.equal(resolveMistakeSource(null, true), 'qa');
   assert.equal(resolveMistakeSource(null, false), 'call');
   assert.equal(resolveMistakeSource(undefined, true), 'qa');
+});
+
+test('isQaCall: session source wins even when browser QA flag is off (A1-A2)', () => {
+  assert.equal(isQaCall({ source: 'qa' }, false), true);
+  assert.equal(isQaCall({}, true), false);
+  assert.equal(isQaCall(null, true), true);
+  assert.equal(isQaCall(undefined, false), false);
+});
+
+test('callSideEffects disables all side effects for QA and enables all for normal calls (A3)', () => {
+  assert.deepEqual(callSideEffects(true), {
+    saveMistakes: false,
+    applyMistakeOutcomes: false,
+    advanceLesson: false,
+    recordLearningUsage: false,
+  });
+  assert.deepEqual(callSideEffects(false), {
+    saveMistakes: true,
+    applyMistakeOutcomes: true,
+    advanceLesson: true,
+    recordLearningUsage: true,
+  });
 });
