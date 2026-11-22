@@ -307,6 +307,10 @@ export interface SessionReviewData {
   overallEvaluation: string;
   estimatedLevel: "IM2" | "IH" | "AL" | "Native" | "-";
   mistakes: ReviewMistakeItem[];
+  extraMistakes?: ReviewMistakeItem[];
+  extraMistakesStatus?: "ok" | "skipped" | "failed";
+  extraMistakesError?: string;
+  extraMistakesAttemptedAt?: string;
   keyExpressions: Array<{
     expression: string;
     situation: string;
@@ -354,7 +358,7 @@ export type MistakeStatus = "reviewing" | "graduated" | "deferred" | "on_hold";
 export interface MistakeData {
   id?: string;
   createdAt: string;
-  source: "call" | "keep_import" | "qa";
+  source: "call" | "keep_import" | "qa" | "transcript_analysis";
   sessionId?: string;
   goalId?: string;
   lessonIndex?: number;
@@ -1424,13 +1428,32 @@ export async function deleteCallMistakesForSession(userId: string, sessionId: st
   const batch = writeBatch(db);
   let n = 0;
   for (const d of snap.docs) {
-    if ((d.data() as MistakeData).source === "call" || (d.data() as MistakeData).source === "qa") {
+    const src = (d.data() as MistakeData).source;
+    if (src === "call" || src === "qa" || src === "transcript_analysis") {
       batch.delete(d.ref);
       n++;
     }
   }
   if (n > 0) await batch.commit();
   return n;
+}
+
+/**
+ * Persist supplemental transcript-analysis mistakes onto an already-reviewed session.
+ */
+export async function updateSessionExtraMistakes(
+  userId: string,
+  sessionId: string,
+  extraMistakes: ReviewMistakeItem[],
+  extraMistakesStatus: "ok" | "skipped" | "failed"
+): Promise<void> {
+  const sessionRef = doc(db, "users", userId, "sessions", sessionId);
+  await updateDoc(sessionRef, {
+    "review.extraMistakes": extraMistakes,
+    "review.extraMistakesStatus": extraMistakesStatus,
+    "review.extraMistakesAttemptedAt": new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
 }
 
 /**
@@ -1460,9 +1483,35 @@ export async function hideReportedMistake(
   const sessionRef = doc(db, "users", userId, "sessions", sessionId);
   const sSnap = await getDoc(sessionRef);
   const review = sSnap.exists() ? (sSnap.data() as SessionData).review : undefined;
-  if (review?.mistakes?.[index]) {
-    const mistakes = review.mistakes.map((m, i) => (i === index ? { ...m, hidden: true } : m));
-    await updateDoc(sessionRef, { "review.mistakes": mistakes, updatedAt: new Date().toISOString() });
+  if (!review) return;
+
+  const patch: Record<string, any> = {};
+  if (review.mistakes?.[index]) {
+    const target = review.mistakes[index];
+    const matchesTarget =
+      (mistakeId && target.id === mistakeId) || target.myPhrase === myPhrase || !myPhrase;
+    if (matchesTarget) {
+      patch["review.mistakes"] = review.mistakes.map((m, i) => (i === index ? { ...m, hidden: true } : m));
+    }
+  }
+  if (Array.isArray(review.extraMistakes)) {
+    let extraChanged = false;
+    const nextExtras = review.extraMistakes.map((m) => {
+      const matchById = Boolean(mistakeId && m.id && m.id === mistakeId);
+      const matchByPhrase = Boolean(myPhrase && m.myPhrase === myPhrase);
+      if (matchById || matchByPhrase) {
+        extraChanged = true;
+        return { ...m, hidden: true };
+      }
+      return m;
+    });
+    if (extraChanged) {
+      patch["review.extraMistakes"] = nextExtras;
+    }
+  }
+  if (Object.keys(patch).length > 0) {
+    patch.updatedAt = new Date().toISOString();
+    await updateDoc(sessionRef, patch);
   }
 }
 

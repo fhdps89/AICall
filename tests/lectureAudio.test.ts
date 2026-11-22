@@ -6,6 +6,7 @@ import type { GoogleGenAI } from '@google/genai';
 import {
   DATA_DIR,
   LECTURE_AUDIO_SCRIPT_MISSING,
+  MAX_LECTURE_SCRIPT_ITEMS,
   lectureAudioPath,
   lectureHasLocalScript,
   lectureRebuildInFlight,
@@ -111,7 +112,10 @@ test('lectureAudioPath is null when the json is ready but the wav is missing', (
 
 test('sanitizeLectureScriptPayload rejects empty and oversized scripts', () => {
   assert.equal(sanitizeLectureScriptPayload({ script: [] }).ok, false);
-  const tooMany = Array.from({ length: 10 }, (_, i) => sampleScript()[0] && { ...sampleScript()[0], mistakeId: `m${i}` });
+  const tooMany = Array.from(
+    { length: MAX_LECTURE_SCRIPT_ITEMS + 1 },
+    (_, i) => sampleScript()[0] && { ...sampleScript()[0], mistakeId: `m${i}` }
+  );
   const res = sanitizeLectureScriptPayload({ script: tooMany });
   assert.equal(res.ok, false);
   const ok = sanitizeLectureScriptPayload({ script: sampleScript(), title: '아침' });

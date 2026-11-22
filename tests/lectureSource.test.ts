@@ -3,12 +3,21 @@ import assert from 'node:assert/strict';
 import {
   normalizeUtterance,
   buildUserCorpus,
+  preferredUserTranscript,
+  isUsableSupplementPhrase,
+  phrasesAreDuplicate,
+  mergeSupplementItems,
   verifyAgainstTranscript,
   isEligibleLectureSession,
+  needsSupplementalPass,
+  SUPPLEMENT_RETRY_FAILED_MS,
   extractReviewLectureItems,
   planBackfill,
+  planBackfillExtras,
   collectNewLectureItems,
   backfillDocId,
+  supplementBackfillDocId,
+  MAX_NEW_FROM_SESSIONS,
   type SessionSourceLike,
 } from '../src/services/lecture/lectureSource.ts';
 import { SHORT_SESSION_SEC } from '../src/services/lecture/lecturePick.ts';
@@ -123,7 +132,7 @@ test('planBackfill creates missing docs, links the already-saved phrase, and ski
   assert.equal(withHidden.toCreate.length, 0);
 });
 
-test('collectNewLectureItems uses only eligible session reviews, caps at 6, and does not pad', () => {
+test('collectNewLectureItems uses only eligible session reviews, includes extras, caps at 20, and does not pad', () => {
   const qaShort: SessionSourceLike = {
     id: 'call-qa',
     startedAt: '2026-11-21T13:30:43Z',
@@ -143,4 +152,153 @@ test('collectNewLectureItems uses only eligible session reviews, caps at 6, and 
     (OWNER.review?.mistakes || []).map((m) => m.myPhrase)
   );
   assert.equal(collectNewLectureItems([], CUTOFF).length, 0);
+  assert.equal(MAX_NEW_FROM_SESSIONS, 20);
+});
+
+const SAMPLE_EXTRAS = [
+  { myPhrase: 'The hotel name is what?', naturalPhrase: 'What is the name of the hotel?', reason: '어순' },
+  { myPhrase: 'Element Hotel in Philadelphia downtown.', naturalPhrase: 'Element Hotel in downtown Philadelphia.', reason: '어순' },
+  { myPhrase: 'This is my reservation ticket.', naturalPhrase: 'Here is my reservation confirmation.', reason: '표현' },
+  { myPhrase: 'the head of finance team.', naturalPhrase: 'the head of the finance team.', reason: '관사' },
+  { myPhrase: "I'm carrying the notebook and some clothes.", naturalPhrase: "I'm carrying my laptop and some clothes.", reason: '어휘' },
+  { myPhrase: 'I have just $200.', naturalPhrase: 'I only have $200.', reason: '부사 위치' },
+  { myPhrase: 'I have been in uh Los Angeles uh when I was 17 years old.', naturalPhrase: 'I went to Los Angeles when I was 17 years old.', reason: '시제' },
+];
+
+test('preferredUserTranscript prefers substantial sttFinal and falls back to liveTranscript user turns', () => {
+  assert.equal(preferredUserTranscript(OWNER), OWNER.sttFinal!.transcript);
+  const fallbackSession: SessionSourceLike = {
+    sttFinal: { transcript: 'uh' },
+    liveTranscript: [
+      { role: 'model', text: 'How can I help?' },
+      { role: 'user', text: 'I am here for my business trip.' },
+      { role: 'user', text: 'I will stay for five days.' },
+    ],
+  };
+  assert.equal(preferredUserTranscript(fallbackSession), 'I am here for my business trip.\nI will stay for five days.');
+});
+
+test('isUsableSupplementPhrase drops fillers, names-only, non-English, and keeps real utterances', () => {
+  assert.equal(isUsableSupplementPhrase('uh'), false);
+  assert.equal(isUsableSupplementPhrase('David Kim'), false);
+  assert.equal(isUsableSupplementPhrase('野菜'), false);
+  assert.equal(isUsableSupplementPhrase('Oh'), false);
+  assert.equal(isUsableSupplementPhrase('[laughter] (silence)'), false);
+  assert.equal(isUsableSupplementPhrase('The hotel name is what?'), true);
+  for (const ex of SAMPLE_EXTRAS) {
+    assert.equal(isUsableSupplementPhrase(ex.myPhrase), true, `expected usable: ${ex.myPhrase}`);
+  }
+});
+
+test('phrasesAreDuplicate and mergeSupplementItems dedupe STT variants, reject invented/hidden, and cap at 8', () => {
+  assert.equal(
+    phrasesAreDuplicate('On Friday, I will I will come to my country', 'On Friday I will come to my country'),
+    true
+  );
+  const corpus = buildUserCorpus(OWNER);
+  const known = [
+    ...(OWNER.review?.mistakes || []),
+    { myPhrase: 'This is my passport.', hidden: true },
+  ];
+  const raw = [
+    { myPhrase: 'On Friday I will come to my country', naturalPhrase: 'dup', reason: 'dup' },
+    { myPhrase: 'This is my passport.', naturalPhrase: 'hidden', reason: 'hidden' },
+    { myPhrase: 'I go to the office', naturalPhrase: 'I went to the office', reason: 'invented' },
+    { myPhrase: 'David Kim', naturalPhrase: 'David Kim', reason: 'name' },
+    ...SAMPLE_EXTRAS,
+  ];
+  const merged = mergeSupplementItems(known, raw, corpus);
+  assert.equal(merged.length, 7);
+  assert.deepEqual(
+    merged.map((m) => m.myPhrase),
+    SAMPLE_EXTRAS.map((m) => m.myPhrase)
+  );
+  assert.equal(merged.some((m) => m.myPhrase === 'I go to the office'), false);
+  assert.equal(merged.some((m) => m.myPhrase === 'This is my passport.'), false);
+});
+
+test('collectNewLectureItems includes primary + verified extras up to 20 and drops hidden extras', () => {
+  const withExtras: SessionSourceLike = {
+    ...OWNER,
+    review: {
+      mistakes: OWNER.review?.mistakes,
+      extraMistakes: [
+        ...SAMPLE_EXTRAS,
+        { myPhrase: 'This is my passport.', naturalPhrase: 'Here is my passport.', reason: 'hidden', hidden: true },
+      ],
+    },
+  };
+  const items = collectNewLectureItems([withExtras], CUTOFF);
+  assert.equal(items.length, 13);
+  assert.equal(items.slice(0, 6).every((it) => it.source === 'call'), true);
+  assert.equal(items.slice(6).every((it) => it.source === 'transcript_analysis'), true);
+  assert.equal(items[6].id, supplementBackfillDocId('call-1795270951478', 0));
+  assert.equal(items.some((it) => it.myPhrase === 'This is my passport.'), false);
+
+  const extraOnly: SessionSourceLike = {
+    ...OWNER,
+    review: {
+      mistakes: [],
+      extraMistakes: [SAMPLE_EXTRAS[0]],
+    },
+  };
+  assert.equal(isEligibleLectureSession(extraOnly, CUTOFF), true);
+});
+
+test('needsSupplementalPass runs for reviewed sessions without extras, retries failed after 30m, and skips ok/skipped', () => {
+  const now = Date.parse('2026-11-22T06:00:00.000Z');
+  const base: SessionSourceLike = { ...OWNER, review: { mistakes: OWNER.review?.mistakes || [] } };
+  assert.equal(needsSupplementalPass(base, CUTOFF, now), true);
+
+  const noPrimary: SessionSourceLike = { ...OWNER, review: { mistakes: [] } };
+  assert.equal(needsSupplementalPass(noPrimary, CUTOFF, now), true);
+
+  const alreadyOk: SessionSourceLike = {
+    ...OWNER,
+    review: { mistakes: OWNER.review?.mistakes || [], extraMistakes: [], extraMistakesStatus: 'ok' },
+  };
+  assert.equal(needsSupplementalPass(alreadyOk, CUTOFF, now), false);
+
+  const skipped: SessionSourceLike = {
+    ...OWNER,
+    review: { mistakes: OWNER.review?.mistakes || [], extraMistakes: [], extraMistakesStatus: 'skipped' },
+  };
+  assert.equal(needsSupplementalPass(skipped, CUTOFF, now), false);
+
+  const recentFail: SessionSourceLike = {
+    ...OWNER,
+    review: {
+      mistakes: OWNER.review?.mistakes || [],
+      extraMistakesStatus: 'failed',
+      extraMistakesAttemptedAt: new Date(now - 5 * 60 * 1000).toISOString(),
+    },
+  };
+  assert.equal(needsSupplementalPass(recentFail, CUTOFF, now), false);
+
+  const staleFail: SessionSourceLike = {
+    ...OWNER,
+    review: {
+      mistakes: OWNER.review?.mistakes || [],
+      extraMistakesStatus: 'failed',
+      extraMistakesAttemptedAt: new Date(now - SUPPLEMENT_RETRY_FAILED_MS - 1000).toISOString(),
+    },
+  };
+  assert.equal(needsSupplementalPass(staleFail, CUTOFF, now), true);
+
+  const qa: SessionSourceLike = { ...OWNER, source: 'qa', review: { mistakes: OWNER.review?.mistakes || [] } };
+  assert.equal(needsSupplementalPass(qa, CUTOFF, now), false);
+});
+
+test('planBackfill does not let transcript_analysis docs suppress call docs, and planBackfillExtras uses ta_ ids', () => {
+  const existing = [
+    { id: 'ta_s1_0', sessionId: 's1', source: 'transcript_analysis', myPhrase: 'I go home yesterday' },
+  ];
+  const primaryPlan = planBackfill('s1', [{ myPhrase: 'I go home yesterday', naturalPhrase: 'I went home yesterday' }], existing);
+  assert.equal(primaryPlan.toCreate.length, 1);
+  assert.equal(primaryPlan.toCreate[0].id, backfillDocId('s1', 0));
+
+  const extraPlan = planBackfillExtras('s1', SAMPLE_EXTRAS.slice(0, 2), existing);
+  assert.equal(extraPlan.toCreate.length, 2);
+  assert.equal(extraPlan.toCreate[0].id, supplementBackfillDocId('s1', 0));
+  assert.equal(extraPlan.toCreate[1].id, supplementBackfillDocId('s1', 1));
 });

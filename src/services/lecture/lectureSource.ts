@@ -5,9 +5,14 @@
  */
 import { sessionCallSeconds, SHORT_SESSION_SEC, isQaMistake } from "./lecturePick";
 import type { SessionTiming } from "./lecturePick";
+import { FILLER_WORDS } from "../review/speechCheck";
 
-export const MAX_NEW_FROM_SESSIONS = 6;
+export const MAX_NEW_FROM_SESSIONS = 20;
+export const SUPPLEMENT_MAX_ITEMS = 8;
 export const VERIFY_MIN_SCORE = 0.75;
+
+const SOUND_TAG_RE = /\[[^\]]*\]|\([^)]*\)|<[^>]*>/g;
+const TITLE_WORD_RE = /^[A-Z][a-z]+$/;
 
 export interface ReviewMistakeLike {
   id?: string;
@@ -30,6 +35,10 @@ export interface SessionSourceLike extends SessionTiming {
   liveTranscript?: Array<{ role?: string; text?: string }>;
   review?: {
     mistakes?: ReviewMistakeLike[];
+    extraMistakes?: ReviewMistakeLike[];
+    extraMistakesStatus?: "ok" | "skipped" | "failed";
+    extraMistakesError?: string;
+    extraMistakesAttemptedAt?: string;
     mistakesSaved?: boolean;
     lessonTitle?: string;
   };
@@ -132,6 +141,119 @@ export function verifyAgainstTranscript(
   return { ok: false, score: best };
 }
 
+export function preferredUserTranscript(session: SessionSourceLike): string {
+  const finalText = String(session?.sttFinal?.transcript || "").trim();
+  if (finalText) {
+    const norm = normalizeUtterance(finalText);
+    const nonFillers = tokens(finalText).filter((t) => !FILLER_WORDS.has(t));
+    if (norm.length >= 24 || (norm.length >= 6 && nonFillers.length >= 3)) {
+      return finalText;
+    }
+  }
+  const liveTurns = (session?.liveTranscript || [])
+    .filter((t) => t?.role === "user" && t.text)
+    .map((t) => String(t.text).trim())
+    .filter(Boolean);
+  if (liveTurns.length > 0) return liveTurns.join("\n");
+  return finalText;
+}
+
+export function isUsableSupplementPhrase(phrase: string): boolean {
+  if (typeof phrase !== "string") return false;
+  const stripped = phrase.replace(SOUND_TAG_RE, " ").trim();
+  if (!stripped) return false;
+
+  const norm = normalizeUtterance(stripped);
+  if (norm.length < 6) return false;
+
+  const toks = tokens(stripped);
+  if (toks.length < 3) return false;
+
+  const nonFillers = toks.filter((t) => !FILLER_WORDS.has(t));
+  if (nonFillers.length < 2) return false;
+
+  const nonSpace = stripped.replace(/\s+/g, "");
+  if (!nonSpace) return false;
+  const asciiLetters = (stripped.match(/[a-zA-Z]/g) || []).length;
+  const allLetters = (stripped.match(/\p{L}/gu) || []).length;
+  if (asciiLetters === 0 || allLetters === 0) return false;
+  if (asciiLetters / allLetters < 0.5) return false;
+  if (allLetters / nonSpace.length < 0.4) return false;
+
+  // Drop person-name-only fragments (e.g., "David Kim" or "Mr. David Kim" without a clause).
+  const rawWords = stripped
+    .split(/\s+/)
+    .map((w) => w.replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, ""))
+    .filter(Boolean)
+    .filter((w) => !FILLER_WORDS.has(w.toLowerCase()));
+  if (
+    rawWords.length > 0 &&
+    rawWords.length <= 3 &&
+    rawWords.every((w) => TITLE_WORD_RE.test(w) || /^(mr|mrs|ms|dr)$/i.test(w))
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+export function phrasesAreDuplicate(a: string, b: string): boolean {
+  const na = normalizeUtterance(a);
+  const nb = normalizeUtterance(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  const ab = verifyAgainstTranscript(a, b);
+  if (ab.ok && ab.score >= 0.9) return true;
+  const ba = verifyAgainstTranscript(b, a);
+  if (ba.ok && ba.score >= 0.9) return true;
+  return false;
+}
+
+export interface MergedSupplementItem {
+  myPhrase: string;
+  naturalPhrase: string;
+  reason: string;
+  sourceStt?: string;
+}
+
+export function mergeSupplementItems(
+  known: Array<{ myPhrase?: string; hidden?: boolean }>,
+  raw: unknown,
+  corpus: string
+): MergedSupplementItem[] {
+  if (!Array.isArray(raw)) return [];
+  const knownPhrases = (known || [])
+    .map((k) => String(k?.myPhrase || "").trim())
+    .filter(Boolean);
+  const kept: MergedSupplementItem[] = [];
+
+  for (const row of raw) {
+    if (!row || typeof row !== "object") continue;
+    const obj = row as Record<string, unknown>;
+    const myPhrase = String(obj.myPhrase || "").trim();
+    const naturalPhrase = String(obj.naturalPhrase || "").trim();
+    const reason = String(obj.reason || "").trim();
+    if (!myPhrase || !naturalPhrase) continue;
+    if (!isUsableSupplementPhrase(myPhrase)) continue;
+    if (!verifyAgainstTranscript(myPhrase, corpus).ok) continue;
+    if (knownPhrases.some((k) => phrasesAreDuplicate(myPhrase, k))) continue;
+    if (kept.some((k) => phrasesAreDuplicate(myPhrase, k.myPhrase))) continue;
+
+    const sourceStt =
+      typeof obj.sourceStt === "string" && obj.sourceStt.trim()
+        ? obj.sourceStt.trim()
+        : undefined;
+    kept.push({
+      myPhrase,
+      naturalPhrase,
+      reason,
+      ...(sourceStt ? { sourceStt } : {}),
+    });
+    if (kept.length >= SUPPLEMENT_MAX_ITEMS) break;
+  }
+  return kept;
+}
+
 export function isEligibleLectureSession(
   session: SessionSourceLike,
   cutoffMs: number | undefined
@@ -145,11 +267,48 @@ export function isEligibleLectureSession(
   if (!Number.isFinite(t)) return false;
   if (cutoffMs != null && Number.isFinite(cutoffMs) && t <= cutoffMs) return false;
   const mistakes = session.review?.mistakes;
-  return Array.isArray(mistakes) && mistakes.length > 0;
+  const extras = session.review?.extraMistakes;
+  return (Array.isArray(mistakes) && mistakes.length > 0) || (Array.isArray(extras) && extras.length > 0);
+}
+
+/** Retry a failed supplemental pass after this wait, so home/feed sync does not hammer the model. */
+export const SUPPLEMENT_RETRY_FAILED_MS = 30 * 60 * 1000;
+
+/**
+ * True when a reviewed session should run (or retry) the supplemental transcript pass.
+ * Unlike isEligibleLectureSession, a session with zero primary mistakes can still qualify.
+ * Failed passes are retried after SUPPLEMENT_RETRY_FAILED_MS; ok/skipped are not retried.
+ */
+export function needsSupplementalPass(
+  session: SessionSourceLike,
+  cutoffMs: number | undefined,
+  nowMs = Date.now()
+): boolean {
+  if (!session?.id || !session.review) return false;
+  const status = session.review.extraMistakesStatus;
+  if (status === "ok" || status === "skipped") return false;
+  if (status === "failed") {
+    const attempted = Date.parse(String(session.review.extraMistakesAttemptedAt || ""));
+    if (Number.isFinite(attempted) && nowMs - attempted < SUPPLEMENT_RETRY_FAILED_MS) return false;
+  } else if (session.review.extraMistakes !== undefined) {
+    return false;
+  }
+  if (isQaMistake(session)) return false;
+  const sec = sessionCallSeconds(session);
+  if (sec != null && sec < SHORT_SESSION_SEC) return false;
+  const end = session.endedAt || session.lastTranscriptAt || session.lastChunkAt || session.startedAt;
+  const t = Date.parse(end || "");
+  if (!Number.isFinite(t)) return false;
+  if (cutoffMs != null && Number.isFinite(cutoffMs) && t <= cutoffMs) return false;
+  return Boolean(preferredUserTranscript(session).trim() || buildUserCorpus(session).trim());
 }
 
 export function backfillDocId(sessionId: string, index: number): string {
   return `call_${sessionId}_${index}`;
+}
+
+export function supplementBackfillDocId(sessionId: string, index: number): string {
+  return `ta_${sessionId}_${index}`;
 }
 
 export function extractReviewLectureItems(
@@ -162,32 +321,43 @@ export function extractReviewLectureItems(
   const lessonTitle = session.review?.lessonTitle || session.lessonTitle;
   const createdAt = session.endedAt || session.startedAt;
   const items: LectureSourceItem[] = [];
-  (session.review?.mistakes || []).forEach((m, index) => {
-    if (!m || m.hidden) return;
-    const myPhrase = String(m.myPhrase || "").trim();
-    const naturalPhrase = String(m.naturalPhrase || "").trim();
-    if (!myPhrase || !naturalPhrase) return;
-    const verified = verifyAgainstTranscript(myPhrase, corpus);
-    if (requireVerify && !verified.ok) return;
-    items.push({
-      id: m.id || backfillDocId(sessionId, index),
-      sessionId,
-      myPhrase,
-      naturalPhrase,
-      reason: m.reason ? String(m.reason) : undefined,
-      lessonTitle,
-      createdAt,
-      source: "call",
-      sourceStt: m.sourceStt,
-      matchScore: verified.score,
+
+  const pushList = (
+    list: ReviewMistakeLike[] | undefined,
+    source: "call" | "transcript_analysis",
+    idForIndex: (index: number) => string
+  ) => {
+    (list || []).forEach((m, index) => {
+      if (!m || m.hidden) return;
+      const myPhrase = String(m.myPhrase || "").trim();
+      const naturalPhrase = String(m.naturalPhrase || "").trim();
+      if (!myPhrase || !naturalPhrase) return;
+      const verified = verifyAgainstTranscript(myPhrase, corpus);
+      if (requireVerify && !verified.ok) return;
+      items.push({
+        id: m.id || idForIndex(index),
+        sessionId,
+        myPhrase,
+        naturalPhrase,
+        reason: m.reason ? String(m.reason) : undefined,
+        lessonTitle,
+        createdAt,
+        source,
+        sourceStt: m.sourceStt,
+        matchScore: verified.score,
+      });
     });
-  });
+  };
+
+  pushList(session.review?.mistakes, "call", (i) => backfillDocId(sessionId, i));
+  pushList(session.review?.extraMistakes, "transcript_analysis", (i) => supplementBackfillDocId(sessionId, i));
   return items;
 }
 
 export interface ExistingMistakeLike {
   id?: string;
   sessionId?: string;
+  source?: string;
   myPhrase?: string;
   naturalPhrase?: string;
 }
@@ -195,9 +365,16 @@ export interface ExistingMistakeLike {
 export function planBackfill(
   sessionId: string,
   reviewMistakes: ReviewMistakeLike[],
-  existing: ExistingMistakeLike[]
+  existing: ExistingMistakeLike[],
+  opts: { source?: "call" | "transcript_analysis" } = {}
 ): { toCreate: Array<{ index: number; id: string; item: ReviewMistakeLike }>; idPatches: Array<{ index: number; id: string }> } {
+  const source = opts.source === "transcript_analysis" ? "transcript_analysis" : "call";
   const existingForSession = (existing || []).filter((m) => m.sessionId === sessionId);
+  // Supplemental transcript_analysis docs must not replace or suppress primary call docs.
+  const matchPool =
+    source === "transcript_analysis"
+      ? existingForSession
+      : existingForSession.filter((m) => m.source !== "transcript_analysis");
   const usedIds = new Set(existingForSession.map((m) => m.id).filter(Boolean) as string[]);
   const toCreate: Array<{ index: number; id: string; item: ReviewMistakeLike }> = [];
   const idPatches: Array<{ index: number; id: string }> = [];
@@ -206,24 +383,37 @@ export function planBackfill(
     if (!item || item.hidden) return;
     const phrase = normalizeUtterance(String(item.myPhrase || ""));
     if (!phrase) return;
-    const match = existingForSession.find(
+    const match = matchPool.find(
       (m) => normalizeUtterance(String(m.myPhrase || "")) === phrase
     );
     if (match?.id) {
-      if (item.id !== match.id) idPatches.push({ index, id: match.id });
+      const canPatchId = source === "call" || match.source === "transcript_analysis" || !match.source;
+      if (canPatchId && item.id !== match.id) idPatches.push({ index, id: match.id });
       return;
     }
     if (item.id && usedIds.has(item.id)) {
       idPatches.push({ index, id: item.id });
       return;
     }
-    const id = item.id || backfillDocId(sessionId, index);
+    const id =
+      item.id ||
+      (source === "transcript_analysis"
+        ? supplementBackfillDocId(sessionId, index)
+        : backfillDocId(sessionId, index));
     toCreate.push({ index, id, item });
     idPatches.push({ index, id });
     usedIds.add(id);
   });
 
   return { toCreate, idPatches };
+}
+
+export function planBackfillExtras(
+  sessionId: string,
+  extraMistakes: ReviewMistakeLike[],
+  existing: ExistingMistakeLike[]
+) {
+  return planBackfill(sessionId, extraMistakes, existing, { source: "transcript_analysis" });
 }
 
 export function collectNewLectureItems(

@@ -6,7 +6,7 @@ import { kstDateOfIso, addDaysKst, formatLectureDuration } from '../src/services
 export { formatLectureDuration };
 import { stripSpeechDirections } from './speechText.ts';
 
-export const MAX_NEW = 6;
+export const MAX_NEW = 20;
 export const MAX_REVIEW = 3;
 export const LECTURE_MAX_SEC = 10 * 60;
 /** Mixed Korean/English TTS pace used for the budget (chars / second). */

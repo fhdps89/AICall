@@ -15,6 +15,8 @@ import type { LectureState } from './server/lecture.ts';
 import { sanitizeLectureInputs } from './server/lectureMaterial.ts';
 import { mimeForAudioFile } from './server/lectureAudioEncode.ts';
 import { computeMistakeClusters, validateClusterRequestBody } from './server/mistakeClusters.ts';
+import { runLectureSupplement } from './server/lectureSupplement.ts';
+import { preferredUserTranscript, buildUserCorpus } from './src/services/lecture/lectureSource.ts';
 import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive } from './server/sttBench.ts';
 import { LIVE_MODEL, TEXT_MODEL, GEMINI_STT_MODEL, GEMINI_TTS_LITE_MODEL } from './src/config/models.ts';
 import { LIVE_LANGUAGE_CODE, normalizeVoiceName } from './src/config/voices.ts';
@@ -646,10 +648,14 @@ app.post('/api/review', requireAuth, geminiLimit, async (req: Request, res: Resp
     lessonTitle,
     sttFinal, // Verbatim recording transcript (기록용 받아쓰기)
     sourceStt = 'sttFinal',
+    sttPartial = [],
     liveTranscript = [],
     todayLessonPrompt = '',
     reviewingMistakes = [], // Existing reviewing mistakes for detecting usedCorrectly
     graduatedMistakes = [], // Existing graduated mistakes for detecting repeatedMistakes
+    callDurationSec,
+    qa,
+    skipSupplement,
   } = req.body || {};
 
   const ai = createGenAI();
@@ -772,20 +778,56 @@ STRICT ANALYSIS RULES (Part B-4):
     });
 
     const parsed = JSON.parse(response.text?.trim() || '{}');
+    const sttFinalText =
+      typeof sttFinal === 'string'
+        ? sttFinal
+        : sttFinal && typeof sttFinal === 'object' && typeof sttFinal.transcript === 'string'
+          ? sttFinal.transcript
+          : '';
+    const corpus = preferredUserTranscript({
+      sttFinal: { transcript: sttFinalText },
+      liveTranscript: Array.isArray(liveTranscript) ? liveTranscript : [],
+    });
+    const validationCorpus = buildUserCorpus({
+      sttFinal: { transcript: sttFinalText },
+      sttPartial: Array.isArray(sttPartial) ? sttPartial : [],
+      liveTranscript: Array.isArray(liveTranscript) ? liveTranscript : [],
+    });
+    const supp = skipSupplement
+      ? { items: [], status: 'skipped' as const }
+      : await runLectureSupplement(ai, {
+          corpus,
+          validationCorpus,
+          knownPhrases: Array.isArray(parsed.mistakes) ? parsed.mistakes : [],
+          lessonTitle,
+          durationSec: typeof callDurationSec === 'number' ? callDurationSec : undefined,
+          qa: qa === true,
+          sourceStt,
+        });
+
+    const mainInput = response.usageMetadata?.promptTokenCount || 0;
+    const mainOutput = response.usageMetadata?.candidatesTokenCount || 0;
+    const suppInput = supp.usage?.inputTokens || 0;
+    const suppOutput = supp.usage?.outputTokens || 0;
     const elapsed = Math.round(performance.now() - start);
 
     res.json({
       ok: true,
       review: {
         ...parsed,
+        extraMistakes: supp.items,
+        extraMistakesStatus: supp.status,
+        ...(supp.error ? { extraMistakesError: supp.error } : {}),
         trackId: trackId || goalId || 'opic',
         lessonNum: lessonNum || 1,
         lessonTitle: lessonTitle || '',
         generatedAt: new Date().toISOString(),
       },
       usage: {
-        inputTokens: response.usageMetadata?.promptTokenCount || 0,
-        outputTokens: response.usageMetadata?.candidatesTokenCount || 0,
+        inputTokens: mainInput + suppInput,
+        outputTokens: mainOutput + suppOutput,
+        supplementInputTokens: suppInput,
+        supplementOutputTokens: suppOutput,
       },
       elapsedMs: elapsed,
     });
@@ -793,6 +835,64 @@ STRICT ANALYSIS RULES (Part B-4):
     console.error('Review generation error:', err);
     apiError(res, 500, 'REVIEW_FAILED', '복기 리포트를 만들지 못했어요. 잠시 후 다시 만들어 주세요.');
   }
+});
+
+// Phase 2 backfill: supplemental transcript analysis for already-reviewed sessions
+app.post('/api/review/supplement', requireAuth, geminiLimit, async (req: Request, res: Response) => {
+  const start = performance.now();
+  const {
+    sessionId,
+    sttFinal,
+    sttPartial = [],
+    liveTranscript = [],
+    knownMistakes = [],
+    lessonTitle,
+    callDurationSec,
+    qa,
+    sourceStt = 'sttFinal',
+  } = req.body || {};
+
+  const ai = createGenAI();
+  if (!ai) {
+    noKey(res);
+    return;
+  }
+
+  const sttFinalText =
+    typeof sttFinal === 'string'
+      ? sttFinal
+      : sttFinal && typeof sttFinal === 'object' && typeof sttFinal.transcript === 'string'
+        ? sttFinal.transcript
+        : '';
+  const corpus = preferredUserTranscript({
+    sttFinal: { transcript: sttFinalText },
+    liveTranscript: Array.isArray(liveTranscript) ? liveTranscript : [],
+  });
+  const validationCorpus = buildUserCorpus({
+    sttFinal: { transcript: sttFinalText },
+    sttPartial: Array.isArray(sttPartial) ? sttPartial : [],
+    liveTranscript: Array.isArray(liveTranscript) ? liveTranscript : [],
+  });
+  const supp = await runLectureSupplement(ai, {
+    corpus,
+    validationCorpus,
+    knownPhrases: Array.isArray(knownMistakes) ? knownMistakes : [],
+    lessonTitle,
+    durationSec: typeof callDurationSec === 'number' ? callDurationSec : undefined,
+    qa: qa === true,
+    sourceStt: typeof sourceStt === 'string' ? sourceStt : 'sttFinal',
+  });
+
+  res.json({
+    ok: true,
+    ...(typeof sessionId === 'string' && sessionId ? { sessionId } : {}),
+    extraMistakes: supp.items,
+    status: supp.status,
+    ...(supp.reason ? { reason: supp.reason } : {}),
+    ...(supp.error ? { error: supp.error } : {}),
+    usage: supp.usage || { inputTokens: 0, outputTokens: 0 },
+    elapsedMs: Math.round(performance.now() - start),
+  });
 });
 
 // B-6 Requirement 3: Quiz Grading endpoint (TEXT_MODEL = gemini-3.8-flash)

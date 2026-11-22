@@ -13,8 +13,10 @@ import {
   getSessionById,
   listRecentSessions,
   saveCallMistakes,
+  updateSessionExtraMistakes,
   advanceMistakeAfterLesson,
   type MistakeData,
+  type ReviewMistakeItem,
   type SessionData,
 } from "../firebase/db";
 import { authFetch, authJson } from "../api/authFetch";
@@ -39,7 +41,12 @@ import {
   type LectureCandidate,
   type SessionTiming,
 } from "./lecturePick";
-import { collectNewLectureItems, planBackfill } from "./lectureSource";
+import {
+  collectNewLectureItems,
+  needsSupplementalPass,
+  planBackfill,
+  planBackfillExtras,
+} from "./lectureSource";
 
 export type LectureStatus = "generating" | "ready" | "failed";
 
@@ -135,41 +142,114 @@ async function loadPreviousLectureCutoff(uid: string, today: string): Promise<st
   return undefined;
 }
 
+async function backfillList(
+  uid: string,
+  s: SessionData,
+  list: ReviewMistakeItem[],
+  source: "call" | "transcript_analysis",
+  known: MistakeData[]
+): Promise<ReviewMistakeItem[] | undefined> {
+  if (!s.id || !list.length) return undefined;
+  const plan =
+    source === "transcript_analysis"
+      ? planBackfillExtras(s.id, list, known)
+      : planBackfill(s.id, list, known);
+  if (plan.toCreate.length === 0) return undefined;
+  const docs: MistakeData[] = plan.toCreate.map(({ id, item }) => ({
+    id,
+    myPhrase: String(item.myPhrase || ""),
+    naturalPhrase: String(item.naturalPhrase || ""),
+    reason: String(item.reason || ""),
+    sourceStt: item.sourceStt || "sttFinal",
+    stage: 1,
+    status: "reviewing",
+    source,
+    sessionId: s.id,
+    goalId: s.goalId,
+    lessonIndex: s.lessonIndex,
+    lessonTitle: s.review?.lessonTitle,
+    createdAt: s.endedAt || s.startedAt || new Date().toISOString(),
+  }));
+  try {
+    const ids = await saveCallMistakes(uid, docs);
+    const idByIndex = new Map<number, string>();
+    plan.toCreate.forEach((entry, i) => {
+      const mid = ids[i] || entry.id;
+      known.push({ ...docs[i], id: mid });
+      idByIndex.set(entry.index, mid);
+    });
+    return list.map((m, idx) => (idByIndex.has(idx) ? { ...m, id: idByIndex.get(idx) } : m));
+  } catch (err) {
+    console.warn(`[lectureSource] backfill (${source}) failed for session`, s.id, err);
+    return undefined;
+  }
+}
+
+async function ensureSessionSupplementalMistakes(
+  uid: string,
+  sessions: SessionData[],
+  cutoffMs: number | undefined
+): Promise<void> {
+  for (const s of sessions) {
+    if (!s.id || !s.review) continue;
+    if (!needsSupplementalPass(s, cutoffMs)) continue;
+    try {
+      const res = await authJson<{
+        ok: boolean;
+        extraMistakes?: ReviewMistakeItem[];
+        status?: "ok" | "skipped" | "failed";
+        usage?: { inputTokens?: number; outputTokens?: number };
+      }>("/api/review/supplement", {
+        sessionId: s.id,
+        sttFinal: s.sttFinal?.transcript || "",
+        sttPartial: s.sttPartial,
+        liveTranscript: s.liveTranscript,
+        knownMistakes: s.review.mistakes || [],
+        lessonTitle: s.review.lessonTitle,
+        callDurationSec: sessionCallSeconds(s) ?? undefined,
+        qa: isQaMistake(s),
+      });
+      if (res.usage && ((res.usage.inputTokens || 0) + (res.usage.outputTokens || 0) > 0)) {
+        recordUsage(uid, {
+          textInputTokens: res.usage.inputTokens || 0,
+          textOutputTokens: res.usage.outputTokens || 0,
+        });
+      }
+      if (!res.ok) continue;
+      const status = res.status === "skipped" ? "skipped" : res.status === "failed" ? "failed" : "ok";
+      const extras = Array.isArray(res.extraMistakes) ? res.extraMistakes : [];
+      s.review.extraMistakes = status === "failed" ? s.review.extraMistakes : extras;
+      s.review.extraMistakesStatus = status;
+      s.review.extraMistakesAttemptedAt = new Date().toISOString();
+      await updateSessionExtraMistakes(uid, s.id, extras, status);
+    } catch (err) {
+      console.warn("[lectureSource] supplemental pass failed for session", s.id, err);
+    }
+  }
+}
+
 async function backfillReviewMistakes(uid: string, sessions: SessionData[], existing: MistakeData[]): Promise<void> {
   const known = [...existing];
   for (const s of sessions) {
-    if (!s.id || !s.review?.mistakes?.length) continue;
-    const plan = planBackfill(s.id, s.review.mistakes, known);
-    if (plan.toCreate.length === 0) continue;
-    const docs: MistakeData[] = plan.toCreate.map(({ id, item }) => ({
-      id,
-      myPhrase: String(item.myPhrase || ""),
-      naturalPhrase: String(item.naturalPhrase || ""),
-      reason: String(item.reason || ""),
-      sourceStt: item.sourceStt || "sttFinal",
-      stage: 1,
-      status: "reviewing",
-      source: "call",
-      sessionId: s.id,
-      goalId: s.goalId,
-      lessonIndex: s.lessonIndex,
-      lessonTitle: s.review?.lessonTitle,
-      createdAt: s.endedAt || s.startedAt,
-    }));
-    try {
-      const ids = await saveCallMistakes(uid, docs);
-      ids.forEach((mid, i) => {
-        known.push({ ...docs[i], id: mid });
-      });
-    } catch (err) {
-      console.warn("[lectureSource] backfill failed for session", s.id, err);
+    if (!s.id || isQaMistake(s)) continue;
+    if (s.review?.mistakes?.length) {
+      await backfillList(uid, s, s.review.mistakes, "call", known);
+    }
+    if (s.review?.extraMistakes?.length) {
+      const patched = await backfillList(uid, s, s.review.extraMistakes, "transcript_analysis", known);
+      if (patched) {
+        s.review.extraMistakes = patched;
+        await updateSessionExtraMistakes(uid, s.id, patched, s.review.extraMistakesStatus || "ok").catch((err) => {
+          console.warn("[lectureSource] failed to update extraMistakes ids for session", s.id, err);
+        });
+      }
     }
   }
 }
 
 /**
  * New lecture items come from each qualifying session's post-call review (full-transcript
- * analysis), not from scanning the mistakes collection. Due reviews still come from the list.
+ * analysis + supplemental pass), not from scanning the mistakes collection. Due reviews still come from the list.
  */
 export async function pickLectureMistakes(uid: string, today = getKSTToday(), nowIso = new Date().toISOString()) {
   const [all, due, recent, previousLectureCreatedAt] = await Promise.all([
@@ -179,6 +259,7 @@ export async function pickLectureMistakes(uid: string, today = getKSTToday(), no
     loadPreviousLectureCutoff(uid, today),
   ]);
   const cutoffMs = newCandidateCutoffMs({ nowIso, previousLectureCreatedAt });
+  await ensureSessionSupplementalMistakes(uid, recent, cutoffMs);
   await backfillReviewMistakes(uid, recent, all);
 
   const newItems = collectNewLectureItems(recent, cutoffMs);

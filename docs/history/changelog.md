@@ -4,6 +4,19 @@
 
 ---
 
+### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 2단계: 통화 후 보완 전사 분석 패스로 놓친 실수 보강 (브랜치 `englead/lecture-source-20261122`)
+- **배경**: 1단계에서 세션 복기(`review.mistakes`)를 재사용·백필하도록 고쳤으나, 1차 복기가 통화 중 놓친 나머지 비자연스러운/틀린 사용자 발화를 추가로 잡아내야 한다(기본 켜짐).
+- **원인**: 1차 `/api/review` 한 번의 응답에 요약·핵심표현·복습판정·실수가 함께 담기면서 긴 통화 전사의 나머지 오류들이 빠질 수 있었다.
+- **수정**:
+  - **순수 보완 규칙 (`src/services/lecture/lectureSource.ts`)**: `preferredUserTranscript`, `isUsableSupplementPhrase`(추임새·단독 인명·비영어·사운드 태그 제외), `phrasesAreDuplicate`(0.9 이상 STT 변형 중복 제거), `mergeSupplementItems`(전사 검증, hidden 포함 기존 항목 재등장 금지, 최대 8개) 추가. `extractReviewLectureItems`는 `review.mistakes` 뒤에 `review.extraMistakes`(`source: 'transcript_analysis'`, 백필 ID `ta_{sessionId}_{index}`)를 붙이고 `isEligibleLectureSession`·`planBackfill`/`planBackfillExtras`도 이를 반영함.
+  - **서버 보완 패스 (`server/lectureSupplement.ts`, `server.ts`)**: `runLectureSupplement` (`TEXT_MODEL`, 90초 타임아웃 `LECTURE_STEP_TIMEOUT_MS`, 8000자 코퍼스 상한, QA/3분 미만/빈 발화 비용 가드, 실패 시 1단계 폴백) 구현. `POST /api/review`에서 기본 실행해 `extraMistakes`·`extraMistakesStatus`·합산 사용량을 반환하고, 기존 복기 세션 백필용 `POST /api/review/supplement` 추가.
+  - **클라이언트 파이프라인 & 동기화 (`src/services/review/reviewPipeline.ts`, `src/services/lecture/lectureService.ts`, `src/services/firebase/db.ts`)**: `callDurationSec`·`qa` 전달, `extraMistakes`를 같은 배치(`source: 'transcript_analysis'`)로 저장. 강의 동기화 시 `extraMistakes`가 아직 없거나 보완 패스가 실패한 세션은 `/api/review/supplement`를 호출한 뒤 `updateSessionExtraMistakes`·백필 저장한다. 실패하면 해당 강의는 1단계 항목만 쓰고, 30분 뒤에 다시 시도한다. `deleteCallMistakesForSession`·`hideReportedMistake`도 `transcript_analysis`·`extraMistakes` 처리.
+  - **상한 조정 (`server/lectureMaterial.ts`, `src/services/lecture/lectureSource.ts`)**: `MAX_NEW`·`MAX_NEW_FROM_SESSIONS`를 6 → 20으로 상향해 10분 오디오 상한(`trimItemsToBudget`가 복습, 이어서 보완/뒤쪽 새 항목 순으로 통째 제외)이 먼저 작동하도록 함.
+- **방어 조치 (Safeguards)**: `tests/lectureSource.test.ts`·`tests/lectureSupplement.test.ts`에서 실통화 7개 보완 문구 검증, 추임새/인명/비영어/지어낸 문장/숨김 항목/중복 변형 차단, QA·47초·빈 코퍼스 스킵, 타임아웃·오류 폴백, 13항목 수집·20상한을 단위 테스트로 확인(라이브 호출 없음).
+- **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build`.
+
+---
+
 ### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 강의 재료를 통화 후 전체 전사 복기에서 가져온다 (브랜치 `englead/lecture-source-20261122`)
 - **배경**: 찬식님이 「뽑아 놓은 항목 중에서 고르는 게 아니라, 어제 전화 스크립트 전체를 분석해서 틀린 문장으로 복습 강의를 만들어야 한다」고 하셨다. 본인 통화 `call-1795270951478`(여행 1과, 6분 9초)의 복기(`review.mistakes`)에는 6개 오류가 있었는데, 실수 컬렉션에는 그 중 1개만 있어 강의에도 1개만 들어갔다.
 - **원인**:
