@@ -4,6 +4,50 @@
 
 ---
 
+### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 2단계: 통화 후 보완 전사 분석 패스로 놓친 실수 보강 (브랜치 `englead/lecture-source-20261122`)
+- **배경**: 1단계에서 세션 복기(`review.mistakes`)를 재사용·백필하도록 고쳤으나, 1차 복기가 통화 중 놓친 나머지 비자연스러운/틀린 사용자 발화를 추가로 잡아내야 한다(기본 켜짐).
+- **원인**: 1차 `/api/review` 한 번의 응답에 요약·핵심표현·복습판정·실수가 함께 담기면서 긴 통화 전사의 나머지 오류들이 빠질 수 있었다.
+- **수정**:
+  - **순수 보완 규칙 (`src/services/lecture/lectureSource.ts`)**: `preferredUserTranscript`, `isUsableSupplementPhrase`(추임새·단독 인명·비영어·사운드 태그 제외), `phrasesAreDuplicate`(0.9 이상 STT 변형 중복 제거), `mergeSupplementItems`(전사 검증, hidden 포함 기존 항목 재등장 금지, 최대 8개) 추가. `extractReviewLectureItems`는 `review.mistakes` 뒤에 `review.extraMistakes`(`source: 'transcript_analysis'`, 백필 ID `ta_{sessionId}_{index}`)를 붙이고 `isEligibleLectureSession`·`planBackfill`/`planBackfillExtras`도 이를 반영함.
+  - **서버 보완 패스 (`server/lectureSupplement.ts`, `server.ts`)**: `runLectureSupplement` (`TEXT_MODEL`, 90초 타임아웃 `LECTURE_STEP_TIMEOUT_MS`, 8000자 코퍼스 상한, QA/3분 미만/빈 발화 비용 가드, 실패 시 1단계 폴백) 구현. `POST /api/review`에서 기본 실행해 `extraMistakes`·`extraMistakesStatus`·합산 사용량을 반환하고, 기존 복기 세션 백필용 `POST /api/review/supplement` 추가.
+  - **클라이언트 파이프라인 & 동기화 (`src/services/review/reviewPipeline.ts`, `src/services/lecture/lectureService.ts`, `src/services/firebase/db.ts`)**: `callDurationSec`·`qa` 전달, `extraMistakes`를 같은 배치(`source: 'transcript_analysis'`)로 저장. 강의 동기화 시 `extraMistakes`가 아직 없거나 보완 패스가 실패한 세션은 `/api/review/supplement`를 호출한 뒤 `updateSessionExtraMistakes`·백필 저장한다. 실패하면 해당 강의는 1단계 항목만 쓰고, 30분 뒤에 다시 시도한다. `deleteCallMistakesForSession`·`hideReportedMistake`도 `transcript_analysis`·`extraMistakes` 처리.
+  - **상한 조정 (`server/lectureMaterial.ts`, `src/services/lecture/lectureSource.ts`)**: `MAX_NEW`·`MAX_NEW_FROM_SESSIONS`를 6 → 20으로 상향해 10분 오디오 상한(`trimItemsToBudget`가 복습, 이어서 보완/뒤쪽 새 항목 순으로 통째 제외)이 먼저 작동하도록 함.
+- **방어 조치 (Safeguards)**: `tests/lectureSource.test.ts`·`tests/lectureSupplement.test.ts`에서 실통화 7개 보완 문구 검증, 추임새/인명/비영어/지어낸 문장/숨김 항목/중복 변형 차단, QA·47초·빈 코퍼스 스킵, 타임아웃·오류 폴백, 13항목 수집·20상한을 단위 테스트로 확인(라이브 호출 없음).
+- **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build`.
+
+---
+
+### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 강의 재료를 통화 후 전체 전사 복기에서 가져온다 (브랜치 `englead/lecture-source-20261122`)
+- **배경**: 찬식님이 「뽑아 놓은 항목 중에서 고르는 게 아니라, 어제 전화 스크립트 전체를 분석해서 틀린 문장으로 복습 강의를 만들어야 한다」고 하셨다. 본인 통화 `call-1795270951478`(여행 1과, 6분 9초)의 복기(`review.mistakes`)에는 6개 오류가 있었는데, 실수 컬렉션에는 그 중 1개만 있어 강의에도 1개만 들어갔다.
+- **원인**:
+  - 강의 후보는 `users/{uid}/mistakes`만 본다. 통화 후 복기는 이미 sttFinal·liveTranscript 전체로 mistakes[]를 만들지만, `saveCallMistakes`가 순차 `setDoc`이라 중간에 실패하면 일부만 컬렉션에 남고, 세션 문서의 `review.mistakes`는 그대로 저장된다. 「이건 내가 한 말이 아니에요」는 컬렉션 문서를 지우고 세션에 `hidden`을 남긴다. 이 세션의 `mistakesSaved`·항목별 `id`/`hidden`은 덤프가 아직 복기 섹션을 포함하지 않아 부분 저장 실패와 숨김 중 어느 쪽인지는 미확인.
+  - 전사는 Firestore 세션 문서에만 있다(turns 서브컬렉션 없음). 서버는 로그인 없이 세션을 읽지 못하며, 기존 `/api/feed/sync`는 실수 후보만 받았다.
+- **수정**:
+  - 새 강의 항목은 이전 강의 이후의 실제 연습 통화(3분 이상, QA 제외)의 `review.mistakes`에서 고른다. `hidden`은 제외하고, `myPhrase`는 그 세션 사용자 전사와 대조한다. 컬렉션에 없는 항목은 `source: 'call'`로 백필. `saveCallMistakes`는 배치 원자 쓰기. 복습(due) 후보는 기존 규칙 유지. 복기가 놓친 오류를 위한 보완 Gemini 패스는 후속.
+- **방어 조치 (Safeguards)**: `tests/lectureSource.test.ts`에서 본인 통화 6개 문구 대조·지어낸 문장 거절·hidden 제외·짧은/QA 세션 제외·백필 계획·1개여도 채우지 않음을 확인.
+- **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build`.
+- **모델**: 설계 Claude CLI Opus 5.5 high(`/workspace/collab/onecall_lecture_source_20261122/claude_design_transcript_review.md`). 구현은 그 1단계(복기 재사용·백필·저장 공백 수정)를 따름. 2단계 보완 패스는 기본 꺼짐으로 후속.
+
+---
+
+### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 강의 재료 검증·소개 문구, QA 제외, 10/22 템플릿 (브랜치 `englead/lecture-source-20261122`)
+- **배경**: 오늘 강의(12:25 KST, 「일요일 주간 총정리 핵심 영어」)가 9개 표현을 모두 「어젯밤 하신 말」로 소개했다. 1번 「yesterday I go to the office and check the safety gear」는 QA봇이 11:06에 찬식님 계정으로 넣은 테스트 입력이었다. 찬식님은 「내가 한 말이 아닌데?」라고 하셨고, 이어서 10/22 템플릿의 예문·인트로를 적용하고(TG 3963) 분량 상한을 10분으로 바꿨다(TG 3965). 머지·배포는 하지 않음.
+- **원인**:
+  - 후보 실수는 Firestore `users/{uid}/mistakes`에서 어제 이후 새 항목(최대 6)과 오늘 복습(최대 3)을 골라 `/api/feed/sync`로 서버에 보낸 뒤 강의로 들어간다. 최종 `myPhrase`는 입력 값으로 덮어쓰므로 모델이 문구를 지어내지는 못한다. 다만 소개 문장 「어젯밤 하신 말」이 날짜·복습 여부와 관계없이 서버 음성 템플릿과 프롬프트에 하드코딩되어 있었다.
+  - 새 후보 창이 KST 달력 기준 「어제 0시 이후」라, 전날 낮의 짧은 QA 테스트 통화까지 「어젯밤」 재료로 들어갔다. 찬식님이 확인하신 오늘 9개 중 본인 항목은 8번 「On Friday, I will I will come to my country」(세션 `call-1795270951478`, 11/21 23:22–23:28 KST, 6분 9초, 여행 1과)뿐이었고, 나머지는 47초–2분 32초짜리 QA 통화였다.
+  - 실수 문서의 `source`는 `call`/`keep_import`뿐이라 QA 통화와 본인 연습을 구분할 수 없었다. 일요일 주간 총정리는 제목·코치 한마디 톤만 바꾸고 후보 풀을 넓히지는 않았다. 묶음(clusters)은 강의 재료가 아니다.
+  - 10/22 템플릿에 있던 「비슷한 예로」 예문과 「찬식님, 좋은 아침이에요… 화이팅이에요, 찬식님!」 인트로·마무리가 생성기에 없었고, 수업 주제도 전달되지 않았다. 홈 카드는 `durationSec`를 분으로만 반올림해 7분 42초 오디오가 다른 분 수로 보일 수 있었다.
+- **수정**:
+  - 모델 출력을 입력 ID·문구·kind에 맞춰 검증하고, 소개 문구는 항목의 실제 날짜를 따른다. 후보가 없으면 `NOTHING_TO_TEACH`.
+  - QA 모드(`?qa=1` / `oc_qa_mode`): 그 브라우저에서 시작한 통화의 실수를 `source: 'qa'`로 저장하고 강의·피드 후보에서 뺀다. 과거 문서는 소급하지 않음.
+  - 새 후보는 이전 ready 강의의 `createdAt` 이후(없으면 최근 24시간)만 고르고, 통화 시간 3분 미만 세션은 새·복습 후보에서 모두 제외한다. 세션 길이는 `startedAt`–`endedAt`(없으면 마지막 전사/청크 시각). 세션 문서가 없으면 남기고 로그(fail open). 실제 항목이 하나여도 그 항목만 쓰고 가짜 재료를 채우지 않는다.
+  - 항목마다 「비슷한 예로」 예문 1개, 실제 재료로 채운 인트로와 연습 마무리, 난도별 해설 1~5문장, 수업 주제(`lessonTitle`)를 대화에 반영. 오디오 상한 10분. 예문·해설은 줄이지 않고, 넘칠 때만 복습부터 항목을 통째로 제외. 카드 길이는 「7분 42초」처럼 표시.
+- **방어 조치 (Safeguards)**: `tests/lecturePick.test.ts`, `tests/lectureMaterial.test.ts`, `tests/qaMode.test.ts`에서 후보 선정·QA 제외·이전 강의 시각 컷오프·3분 미만 세션 제외(오늘 9개 재현 시 본인 항목만 남음), 대본 검증, 소개 문구(항목 1개여도 어젯밤 표현이 그 항목에만), 10분 예산(항목 제거·예문 유지), `NOTHING_TO_TEACH`를 결정론적으로 확인.
+- **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build`.
+- **모델**: 설계 Claude CLI Opus 5.5 high(`/workspace/collab/onecall_lecture_source_20261122/claude_design_out.md`). 구현은 그 명세와 TG 3965(10분 상한·예문/해설 유지)를 따라 작성. 샘플 대본은 `/workspace/collab/oncall_lecture_template_check_20261122/`.
+
+---
+
 ### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 통합 브랜치 `englead/integrate-20261122` (#37+#36+#33+#34)
 - **배경**: 열린 Draft PR #37(재시작 시 강의 유지)·#36(TTS 지시문 낭독)·#33(QA 6차)·#34(트랙·말소리·목소리)를 main(`3450071`, #35 포함) 위에 한 브랜치로 합침. 이 PR이 네 건을 대체한다. 기존 PR은 닫지 않았고, 머지·배포는 하지 않음.
 - **합친 내용**:

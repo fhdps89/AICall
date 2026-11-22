@@ -43,6 +43,7 @@ import {
 import { PromptPlaceholders } from "../../data/promptCustomizer";
 import { buildTodayLessonSystemPrompt } from "../../data/lessonPromptBuilder";
 import { mergeChunksToWav, groupChunks } from "../recording/audioMerge";
+import { isQaMode, resolveMistakeSource } from "../../data/qaMode";
 import { keepKnownIds, mergeMinuteTranscripts, MinutePartial } from "./reviewRules";
 import { decideSttSource } from "./speechCheck";
 import { createStepTimer, ReviewTiming } from "./reviewTiming";
@@ -366,6 +367,15 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
     // Step 4 & 5: Build today lesson directive prompt and call /api/review
     let currentLessonTitle = "";
     let review!: SessionReviewData;
+    const sess = await getSessionById(userId, sessionId).catch(() => null);
+    const qaNow = sess?.source === "qa" || isQaMode();
+    const startMs = sess?.startedAt ? Date.parse(sess.startedAt) : Number.NaN;
+    const endMs = sess?.endedAt ? Date.parse(sess.endedAt) : Date.now();
+    const callDurationSec =
+      Number.isFinite(startMs) && Number.isFinite(endMs) && endMs >= startMs
+        ? Math.round((endMs - startMs) / 1000)
+        : undefined;
+
     timer.start("review");
     try {
       const todayLessonPrompt = buildTodayLessonSystemPrompt(goal, lessonIndex, placeholders, []);
@@ -380,8 +390,11 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
           lessonTitle: currentLessonTitle,
           sttFinal: sttFinalText,
           sourceStt,
+          sttPartial: sess?.sttPartial,
           liveTranscript,
           todayLessonPrompt,
+          callDurationSec,
+          qa: qaNow,
           // Only what the prompt uses, and a bounded number, so the request does not grow with
           // every call the user has ever made.
           reviewingMistakes: reviewingMistakes.map(slimMistake),
@@ -395,6 +408,15 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
       }
 
       review = reviewJson.review;
+      if (review.extraMistakesStatus === "failed") {
+        // Leave extras unset so lecture-sync can retry; keep the primary review (phase 1).
+        review.extraMistakes = undefined;
+      } else if (!Array.isArray(review.extraMistakes)) {
+        review.extraMistakes = [];
+      }
+      if (review.extraMistakesStatus) {
+        review.extraMistakesAttemptedAt = new Date().toISOString();
+      }
       if (reviewJson.usage) {
         recordUsage(userId, {
           textInputTokens: reviewJson.usage.inputTokens || 0,
@@ -413,7 +435,12 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
     try {
       // Step 6: Save mistakes to mistakes collection (stage 1, status reviewing, nextReviewAt=내일)
       const tomorrow = getKSTTomorrow();
-      mistakeDocs = (review.mistakes || []).map((m) => ({
+      const mistakeSource = resolveMistakeSource(sess, isQaMode());
+      const nowIso = new Date().toISOString();
+      const toDoc = (
+        m: { myPhrase: string; naturalPhrase: string; reason: string; sourceStt?: string },
+        source: MistakeData["source"]
+      ): MistakeData => ({
         myPhrase: m.myPhrase,
         naturalPhrase: m.naturalPhrase,
         reason: m.reason,
@@ -422,13 +449,20 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
         status: "reviewing",
         nextReviewAt: tomorrow,
         nextReviewDate: tomorrow,
-        source: "call",
+        source,
         sessionId,
         goalId: goal.id,
         lessonIndex,
         lessonTitle: currentLessonTitle,
-        createdAt: new Date().toISOString(),
-      }));
+        createdAt: nowIso,
+      });
+      const primaryDocs: MistakeData[] = (review.mistakes || []).map((m) => toDoc(m, mistakeSource));
+      const extras = Array.isArray(review.extraMistakes) ? review.extraMistakes : [];
+      const extraDocs: MistakeData[] =
+        mistakeSource === "qa"
+          ? []
+          : extras.map((m) => toDoc(m, "transcript_analysis"));
+      mistakeDocs = [...primaryDocs, ...extraDocs];
 
       try {
         // Re-running the review for the same call (after an earlier failure) replaces what that run
@@ -439,6 +473,11 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
           const ids = await saveCallMistakes(userId, mistakeDocs);
           // Keep each mistake's id in the saved review, so 「이건 내가 한 말이 아니에요」 can remove it.
           review.mistakes = (review.mistakes || []).map((m, i) => (ids[i] ? { ...m, id: ids[i] } : m));
+          if (extraDocs.length > 0) {
+            review.extraMistakes = extras.map((m, i) =>
+              ids[primaryDocs.length + i] ? { ...m, id: ids[primaryDocs.length + i] } : m
+            );
+          }
           console.log(`[ReviewPipeline] Saved ${mistakeDocs.length} new mistakes to mistakes collection.`);
         }
         review.mistakesSaved = true;

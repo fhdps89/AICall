@@ -4,6 +4,7 @@ import { User } from "firebase/auth";
 import { Headphones, Loader2, Play, RefreshCw, AlertTriangle } from "lucide-react";
 import { getKSTToday } from "../../services/firebase/db";
 import { LectureDoc, getLecture, startLecture, syncLectureStatus, copyLectureAudio } from "../../services/lecture/lectureService";
+import { formatLectureDuration } from "../../services/lecture/lecturePick";
 import { shouldCopyLectureAudio, shouldShowLectureImmediately, readUploadFailAt } from "../../services/lecture/lectureSyncPolicy";
 import { LectureModal } from "./LectureModal";
 
@@ -152,7 +153,7 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
             </div>
             {status === "ready" && (
               <div className="text-[11px] text-slate-400">
-                {lecture?.itemCount}개 표현 · {Math.round((lecture?.durationSec || 0) / 60)}분{lecture?.listenedAt ? " · 들음" : ""}
+                {lecture?.itemCount}개 표현 · {formatLectureDuration(lecture?.durationSec || 0)}{lecture?.listenedAt ? " · 들음" : ""}
               </div>
             )}
             {status === "failed" && lecture?.error && (
