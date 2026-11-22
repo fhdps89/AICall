@@ -67,6 +67,25 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): 
   });
 }
 
+/** Wall-clock age from job start. Process timers may be frozen while the host throttles CPU. */
+export function lectureJobAgeMs(
+  state: { createdAt?: string; updatedAt?: string },
+  now = Date.now()
+): number | null {
+  const t = Date.parse(state.createdAt || state.updatedAt || '');
+  return Number.isFinite(t) ? now - t : null;
+}
+
+/** True when the job has been generating longer than the wall-clock cap, even if `running` is still set. */
+export function isLectureJobWallClockTimedOut(
+  state: { createdAt?: string; updatedAt?: string },
+  now = Date.now(),
+  limitMs = LECTURE_JOB_TIMEOUT_MS
+): boolean {
+  const age = lectureJobAgeMs(state, now);
+  return age != null && age > limitMs;
+}
+
 export interface LectureState {
   uid: string;
   date: string;
@@ -116,10 +135,17 @@ export function readLectureState(uid: string, date: string): LectureState | null
   } catch {
     return null;
   }
-  // "generating" but no job is running (the server restarted mid-job): report it as failed so
-  // the app offers 「다시 만들기」 and the feed retries, instead of waiting forever.
-  if (state.status === 'generating' && !running.has(`${uid}:${date}`)) {
-    return { ...state, status: 'failed', error: 'INTERRUPTED' };
+  // "generating" with no in-memory job (server restarted mid-job): INTERRUPTED, even
+  // if the wall-clock cap has also passed — the home card should say the server restarted.
+  // "generating" past the wall-clock cap while `running` is still set (CPU-throttled
+  // timers never fired): TIMED_OUT. The feed retries both immediately.
+  if (state.status === 'generating') {
+    if (!running.has(`${uid}:${date}`)) {
+      return { ...state, status: 'failed', error: 'INTERRUPTED' };
+    }
+    if (isLectureJobWallClockTimedOut(state)) {
+      return { ...state, status: 'failed', error: 'TIMED_OUT' };
+    }
   }
   if (state.status === 'ready' && state.audioStatus === 'rebuilding' && !running.has(`${uid}:${date}`)) {
     return { ...state, audioStatus: 'missing', error: 'INTERRUPTED' };
@@ -464,7 +490,9 @@ export function restoreReadyLecture(
 
 /**
  * Start (or return existing) lecture job. Never regenerates a ready lecture unless force=true.
- * A job that is still in memory is reused, even with force=true, until it finishes or hits the timeout.
+ * A job that is still in memory is reused, even with force=true, until it finishes or hits
+ * the in-process or wall-clock timeout. A TIMED_OUT / INTERRUPTED overlay starts a new job
+ * even if `running` still holds the stale key (epoch bump discards late writes).
  */
 export function startLectureJob(
   ai: GoogleGenAI,
@@ -477,7 +505,10 @@ export function startLectureJob(
   safeDate(date);
   const key = `${uid}:${date}`;
   const existing = readLectureState(uid, date);
-  if (existing && (running.has(key) || (existing.status === 'ready' && !opts.force))) {
+  if (existing && running.has(key) && existing.status !== 'failed') {
+    return existing;
+  }
+  if (existing?.status === 'ready' && !opts.force) {
     return existing;
   }
   const { newList, reviewList } = sanitizeLectureInputs(newMistakes, reviewMistakes);
