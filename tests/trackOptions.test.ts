@@ -1,7 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { GoalData } from "../src/services/firebase/db.ts";
-import { buildTrackOptions } from "../src/ui/home/trackOptions.ts";
+import {
+  buildTrackOptions,
+  nextPlayableLesson,
+  resolveTrackPick,
+  trackPickerSubtitle,
+} from "../src/ui/home/trackOptions.ts";
 
 function makeGoal(overrides: Partial<GoalData> & { id: string; title: string }): GoalData {
   return {
@@ -171,4 +176,153 @@ test("goals가 비어 있어도 빈 options와 올바른 reviewDaySelected를 �
     isPlanReviewDay: true,
   });
   assert.deepEqual(review, { options: [], reviewDaySelected: true });
+});
+
+function makeTravelGoal(overrides: Partial<GoalData> = {}): GoalData {
+  return makeGoal({
+    id: "travel",
+    title: "미국·호주 여행",
+    priority: 3,
+    lessons: [
+      { index: 1, title: "1과 수업" },
+      { index: 2, title: "2과 수업" },
+      { index: 3, title: "3과 수업" },
+      { index: 4, title: "4과 수업" },
+    ],
+    nextLessonIndex: 3,
+    ...overrides,
+  });
+}
+
+test("B1: startCall 모드에서 진행 가능한 여행 트랙을 고르면 startCall과 lessonIndex 3을 반환한다", () => {
+  const goals = [
+    makeTravelGoal(),
+    makeGoal({ id: "philly", title: "Philly", priority: 2, nextLessonIndex: 1 }),
+  ];
+
+  const action = resolveTrackPick({
+    mode: "startCall",
+    pickedGoalId: "travel",
+    goals,
+  });
+
+  assert.deepEqual(action, { type: "startCall", goalId: "travel", lessonIndex: 3 });
+});
+
+test("B2: startCall 모드에서 주간 복기(null)를 고르면 통화를 시작하지 않고 selectTrack(null)을 반환한다", () => {
+  const goals = [makeTravelGoal()];
+
+  const action = resolveTrackPick({
+    mode: "startCall",
+    pickedGoalId: null,
+    goals,
+  });
+
+  assert.deepEqual(action, { type: "selectTrack", goalId: null });
+});
+
+test("B3: switchTrack 모드에서 평일 트랙 칩으로 트랙을 고르면 selectTrack을 반환한다", () => {
+  const goals = [
+    makeTravelGoal(),
+    makeGoal({ id: "philly", title: "Philly", priority: 2, nextLessonIndex: 1 }),
+  ];
+
+  const action = resolveTrackPick({
+    mode: "switchTrack",
+    pickedGoalId: "philly",
+    goals,
+  });
+
+  assert.deepEqual(action, { type: "selectTrack", goalId: "philly" });
+  assert.notEqual(action.type, "startCall");
+});
+
+test("B4: switchTrack 모드에서 오늘 루틴(null)을 고르면 selectTrack(null)을 반환한다", () => {
+  const goals = [makeTravelGoal()];
+
+  const action = resolveTrackPick({
+    mode: "switchTrack",
+    pickedGoalId: null,
+    goals,
+  });
+
+  assert.deepEqual(action, { type: "selectTrack", goalId: null });
+});
+
+test("B5: startCall 모드에서 status done 트랙이나 다음 과가 없는 트랙은 none을 반환한다", () => {
+  const goals = [
+    makeTravelGoal({ id: "done-travel", status: "done" }),
+    makeTravelGoal({ id: "missing-lesson-travel", nextLessonIndex: 9 }),
+  ];
+
+  assert.deepEqual(
+    resolveTrackPick({ mode: "startCall", pickedGoalId: "done-travel", goals }),
+    { type: "none" }
+  );
+  assert.deepEqual(
+    resolveTrackPick({ mode: "startCall", pickedGoalId: "missing-lesson-travel", goals }),
+    { type: "none" }
+  );
+});
+
+test("B6: switchTrack 모드에서도 비활성 트랙은 none을 반환한다", () => {
+  const goals = [
+    makeTravelGoal({ id: "done-travel", status: "done" }),
+    makeTravelGoal({ id: "missing-lesson-travel", nextLessonIndex: 9 }),
+  ];
+
+  assert.deepEqual(
+    resolveTrackPick({ mode: "switchTrack", pickedGoalId: "done-travel", goals }),
+    { type: "none" }
+  );
+  assert.deepEqual(
+    resolveTrackPick({ mode: "switchTrack", pickedGoalId: "missing-lesson-travel", goals }),
+    { type: "none" }
+  );
+});
+
+test("B7: startCall 모드에서 목록에 없는 id를 고르면 none을 반환한다", () => {
+  const goals = [makeTravelGoal()];
+
+  const action = resolveTrackPick({
+    mode: "startCall",
+    pickedGoalId: "unknown-track",
+    goals,
+  });
+
+  assert.deepEqual(action, { type: "none" });
+});
+
+test("B8: startCall 모드에서 nextLessonIndex가 undefined이면 기본 1과를 반환한다", () => {
+  const goalWithoutNext = makeTravelGoal({
+    nextLessonIndex: undefined as unknown as number,
+  });
+
+  assert.deepEqual(nextPlayableLesson(goalWithoutNext), {
+    index: 1,
+    title: "1과 수업",
+  });
+  assert.deepEqual(
+    resolveTrackPick({
+      mode: "startCall",
+      pickedGoalId: "travel",
+      goals: [goalWithoutNext],
+    }),
+    { type: "startCall", goalId: "travel", lessonIndex: 1 }
+  );
+});
+
+test("B10: trackPickerSubtitle은 모드별로 다른 부제를 반환하고 switchTrack은 기존 문구를 유지한다", () => {
+  assert.equal(
+    trackPickerSubtitle("switchTrack"),
+    "오늘 통화할 수업 트랙을 골라보세요"
+  );
+  assert.equal(
+    trackPickerSubtitle("startCall"),
+    "트랙을 고르면 바로 통화 준비로 넘어가요"
+  );
+  assert.notEqual(
+    trackPickerSubtitle("startCall"),
+    trackPickerSubtitle("switchTrack")
+  );
 });

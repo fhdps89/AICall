@@ -4,6 +4,20 @@
 
 ---
 
+### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 주간 복기일 「트랙 골라 통화」 피커에서 진행 가능한 트랙 선택 시 바로 통화 준비 시작 (브랜치 `englead/weekly-review-start-call-20261122`)
+- **배경**: 일요일(주간 복기일) 오늘 수업 카드의 「트랙 골라 통화」 버튼으로 트랙 피커를 열어 트랙을 눌러도 통화 준비 화면으로 이어지지 않아, 주간 복기일에 바로 트랙 통화를 시작할 수 있도록 수정함. 머지·배포는 하지 않음.
+- **원인**: P0-3이 주간 복기 카드에 「트랙 골라 통화」를 넣었으나, `d201b80` 이후 피커(`TrackPickerSheet`)가 트랙만 고르고 닫혀 이미 선택된 주간 복기를 누르면 통화를 시작하지 못함.
+- **수정**:
+  - `src/ui/home/trackOptions.ts`: `TrackPickerMode` (`"switchTrack" | "startCall"`), `TrackPickAction`, `nextPlayableLesson`, `resolveTrackPick`, `trackPickerSubtitle` 추가. `buildTrackOptions`의 `isFinished` 판정을 `nextPlayableLesson`으로 통일.
+  - `src/ui/home/TrackPickerSheet.tsx`: `mode: TrackPickerMode` prop 추가 및 부제를 `trackPickerSubtitle(mode)`로 교체(선택 로직 및 닫기 `aria-label` 유지).
+  - `src/ui/home/HomeScreen.tsx`: `showTrackPicker: boolean`을 `trackPickerMode: TrackPickerMode | null`로 교체하고 「트랙 골라 통화」는 `"startCall"`, 「트랙: …」 칩은 `"switchTrack"`으로 열도록 분리. `handleTrackPick`에서 `resolveTrackPick` 결과에 따라 `chooseOverrideGoal` 후 `"startCall"`이면 `onStartCall(g, action.lessonIndex)` 호출(`trackPickerMode`가 `null`이면 안전하게 `"switchTrack"`으로 처리). 주간 복기 카드에 새 통화 버튼은 추가하지 않음.
+  - `PROJECT_CONTEXT.md`: 「트랙 골라 통화」와 평일/복기일 「트랙: …」 칩의 동작 구분 반영.
+- **방어 조치 (Safeguards)**: `tests/trackOptions.test.ts`에 `B1`~`B10` 케이스 추가 — `startCall` 모드 진행 가능 트랙 선택(`startCall`), 「주간 복기」(`null`) 선택 시 통화 미시작(`selectTrack(null)`), `switchTrack` 모드 칩·루틴 선택 시 통화 미시작, `done`·과 없음·미등록 id의 `none` 처리, `nextLessonIndex` 미지정 시 1과 폴백, 기존 `buildTrackOptions` 회귀 확인, 모드별 부제 구분 검증.
+- **검증**: `npm test`(373/373 통과), `npm run lint`(`tsc --noEmit`), `npx tsc -p tsconfig.server.json --noEmit`, `npm run build`, 로컬 `node server.ts` 기동 확인.
+- **모델**: 설계 리뷰 Claude CLI Opus 5.5 high, 구현 agy Gemini 4 Hydrogen high.
+
+---
+
 ### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — QA 통화(?qa=1)가 진도·복습 목록·졸업/재오픈·학습일을 바꾸지 않도록 격리 (브랜치 `englead/qa-mode-no-progress-20261122`)
 - **배경**: QA 9차 테스트(`?qa=1`) 통화 뒤 복기 화면에 「다음 수업으로 넘어갔어요」와 「복습 목록에 자동으로 저장됐어요」가 뜨고, 실제로 트랙 진도가 3과 → 4과로 올라가며 실수 저장·졸업/재오픈·학습일 사용량까지 사용자 기록에 반영되었다. 머지·배포는 하지 않음.
 - **원인**: `reviewPipeline.ts`의 QA 판정(`qaNow`)이 `/api/review` 요청 본문에만 쓰이고, 저장 단계(진도 증가 `advanceGoalAfterCompletedCall`, 실수 삭제·저장 `deleteCallMistakesForSession`·`saveCallMistakes`, 졸업/재오픈 `applyCallMistakeUpdates`, `review.lessonAdvanced = true`)는 QA 여부와 관계없이 그대로 실행되었다. 또한 `NewCallScreen.tsx`와 `recoveredUsage.ts`가 QA 통화도 `liveMinutes`·`calls`로 기록해 학습일로 집계되었다.
