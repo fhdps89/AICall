@@ -39,6 +39,8 @@ curl -s -o /dev/null -w "%{http_code}\n" "https://storage.googleapis.com/storage
 Firebase 콘솔 → Storage → **규칙(Rules)** 탭에 아래 규칙을 참고하여 적용한다. (`firestore.rules`와 동일하게 단일 허용 계정 `episode.kim@gmail.com` 및 이메일 인증 완료 상태만 `users/{uid}/recordings/**` 읽기·쓰기를 허용하고 나머지는 거부한다.)
 
 > 참고: 아래 예시는 문서 내 코드블록이며, 저장소 루트에 `storage.rules` 파일을 별도로 생성하지 않는다.
+>
+> AI Studio Republish(코드 Pull + 게시)는 앱 서버 컨테이너만 새로 올린다. Storage 규칙은 이 저장소에 규칙 파일(`storage.rules`·`firebase.json`)이 없으므로 게시로 바뀌지 않고, Firebase 콘솔 → Storage → 규칙 탭에서 직접 게시해야 한다. Firestore 규칙도 v2.8.1 기록상 「AI Studio에서 규칙 배포가 필요함」이라 별도 단계다.
 
 ```
 rules_version = '2';
@@ -53,6 +55,14 @@ service firebase.storage {
 
     match /users/{uid}/recordings/{allPaths=**} {
       allow read, write: if isSingleAllowedUser(uid);
+    }
+
+    match /users/{uid}/lectures/{file} {
+      allow read: if isSingleAllowedUser(uid);
+      allow write: if isSingleAllowedUser(uid)
+        && file.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}[.]wav')
+        && request.resource.size < 60 * 1024 * 1024
+        && request.resource.contentType == 'audio/wav';
     }
 
     match /{allPaths=**} {
