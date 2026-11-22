@@ -63,6 +63,31 @@ test('buildClusterRequest: caps to 120, truncates fields, drops missing phrases 
   assert.equal(req.items[0].reason.length, 300);
 });
 
+test('buildClusterRequest: drops source="qa", keeps call/keep_import/transcript_analysis/omitted, updates shouldRequest', () => {
+  const mixed = buildClusterRequest([
+    { id: 'qa1', myPhrase: 'I go yesterday', naturalPhrase: 'I went yesterday', reason: 'tense', status: 'reviewing', source: 'qa' },
+    { id: 'c1', myPhrase: 'a', naturalPhrase: 'b', reason: 'r', status: 'reviewing', source: 'call' },
+    { id: 'k1', myPhrase: 'c', naturalPhrase: 'd', reason: 'r', status: 'reviewing', source: 'keep_import' },
+    { id: 't1', myPhrase: 'e', naturalPhrase: 'f', reason: 'r', status: 'reviewing', source: 'transcript_analysis' },
+    { id: 'u1', myPhrase: 'g', naturalPhrase: 'h', reason: 'r', status: 'reviewing' },
+  ]);
+  assert.deepEqual(
+    mixed.items.map((item) => item.id),
+    ['c1', 'k1', 't1', 'u1']
+  );
+  assert.equal(mixed.shouldRequest, true);
+
+  const qaAndOne = buildClusterRequest([
+    { id: 'qa1', myPhrase: 'I go yesterday', naturalPhrase: 'I went yesterday', reason: 'tense', status: 'reviewing', source: 'qa' },
+    { id: 'c1', myPhrase: 'a', naturalPhrase: 'b', reason: 'r', status: 'reviewing', source: 'call' },
+  ]);
+  assert.deepEqual(
+    qaAndOne.items.map((item) => item.id),
+    ['c1']
+  );
+  assert.equal(qaAndOne.shouldRequest, false);
+});
+
 test('pickDisplayClusters: handles null/disabled/empty, filters size < 2, caps top 3', () => {
   assert.deepEqual(pickDisplayClusters(null), []);
   assert.deepEqual(

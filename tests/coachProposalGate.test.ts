@@ -3,7 +3,11 @@ import assert from "node:assert/strict";
 import {
   QUICK_APPROVE_MAX_AGE_MS,
   FUTURE_SKEW_MS,
+  QA_PREVIEW_APPLY_REPLY,
+  QA_PREVIEW_APPROVE_REPLY,
+  QA_PREVIEW_REJECT_REPLY,
   canApplyPendingProposal,
+  resolveQaProgressQuickReply,
   selectQuickReplyTarget,
   type GateChange,
 } from "../src/data/coachProposalGate.ts";
@@ -160,5 +164,130 @@ test("30. selectQuickReplyTarget selects only valid in-session pending proposals
       sessionChangeIds: new Set(["s1"]),
     }),
     { kind: "one", change: s1 }
+  );
+});
+
+test("31. canApplyPendingProposal blocks qaPreview in-session fresh docs for both quickReply true/false; not_pending wins first", () => {
+  const preview: GateChange = { ...makeChange("qp1", 60_000), qaPreview: true };
+  for (const viaQuickReply of [true, false]) {
+    const res = canApplyPendingProposal(preview, {
+      nowMs: BASE_NOW,
+      sessionChangeIds: new Set(["qp1"]),
+      viaQuickReply,
+    });
+    assert.deepEqual(res, {
+      ok: false,
+      reason: "qa_preview",
+      reply: QA_PREVIEW_APPLY_REPLY,
+    });
+  }
+
+  for (const status of ["approved", "rejected"]) {
+    const res = canApplyPendingProposal(
+      { ...makeChange("qp-done", 60_000, status), qaPreview: true },
+      {
+        nowMs: BASE_NOW,
+        sessionChangeIds: new Set(["qp-done"]),
+        viaQuickReply: false,
+      }
+    );
+    assert.equal(res.ok, false);
+    if (!res.ok) assert.equal(res.reason, "not_pending");
+  }
+});
+
+test("32. selectQuickReplyTarget excludes qaPreview docs so real pending proposals still resolve cleanly", () => {
+  const qp: GateChange = { ...makeChange("qp1", 1000), qaPreview: true };
+  const real = makeChange("real1", 1000);
+
+  assert.deepEqual(
+    selectQuickReplyTarget([qp], {
+      nowMs: BASE_NOW,
+      sessionChangeIds: new Set(["qp1"]),
+    }),
+    { kind: "none" }
+  );
+
+  assert.deepEqual(
+    selectQuickReplyTarget([qp, real], {
+      nowMs: BASE_NOW,
+      sessionChangeIds: new Set(["qp1", "real1"]),
+    }),
+    { kind: "one", change: real }
+  );
+});
+
+test("33. resolveQaProgressQuickReply handles approve/reject/closed/expired/real-pending/out-of-session/other intents", () => {
+  const openPreview: GateChange = { ...makeChange("qp1", 60_000), qaPreview: true };
+  const closedPreview: GateChange = { ...makeChange("qp2", 60_000, "rejected"), qaPreview: true };
+  const expiredPreview: GateChange = {
+    ...makeChange("qpExp", QUICK_APPROVE_MAX_AGE_MS + 60_000),
+    qaPreview: true,
+  };
+  const realPending = makeChange("real1", 1000);
+
+  // (a) approve + open preview -> reply(APPROVE), closeChangeIds=[id]
+  assert.deepEqual(
+    resolveQaProgressQuickReply("approve", [openPreview], {
+      nowMs: BASE_NOW,
+      sessionChangeIds: new Set(["qp1"]),
+    }),
+    { kind: "reply", text: QA_PREVIEW_APPROVE_REPLY, closeChangeIds: ["qp1"] }
+  );
+
+  // (b) closed preview -> reply, []
+  assert.deepEqual(
+    resolveQaProgressQuickReply("approve", [closedPreview], {
+      nowMs: BASE_NOW,
+      sessionChangeIds: new Set(["qp2"]),
+    }),
+    { kind: "reply", text: QA_PREVIEW_APPROVE_REPLY, closeChangeIds: [] }
+  );
+
+  // (c) reject -> REJECT text
+  assert.deepEqual(
+    resolveQaProgressQuickReply("reject", [openPreview], {
+      nowMs: BASE_NOW,
+      sessionChangeIds: new Set(["qp1"]),
+    }),
+    { kind: "reply", text: QA_PREVIEW_REJECT_REPLY, closeChangeIds: ["qp1"] }
+  );
+
+  // (d) real pending proposal also present -> pass
+  assert.deepEqual(
+    resolveQaProgressQuickReply("approve", [openPreview, realPending], {
+      nowMs: BASE_NOW,
+      sessionChangeIds: new Set(["qp1", "real1"]),
+    }),
+    { kind: "pass" }
+  );
+
+  // (e) out-of-session preview -> pass
+  assert.deepEqual(
+    resolveQaProgressQuickReply("approve", [openPreview], {
+      nowMs: BASE_NOW,
+      sessionChangeIds: new Set(),
+    }),
+    { kind: "pass" }
+  );
+
+  // (f) null / undo -> pass
+  for (const q of [null, "undo"] as const) {
+    assert.deepEqual(
+      resolveQaProgressQuickReply(q, [openPreview], {
+        nowMs: BASE_NOW,
+        sessionChangeIds: new Set(["qp1"]),
+      }),
+      { kind: "pass" }
+    );
+  }
+
+  // (g) expired preview -> still intercepts with reply
+  assert.deepEqual(
+    resolveQaProgressQuickReply("approve", [expiredPreview], {
+      nowMs: BASE_NOW,
+      sessionChangeIds: new Set(["qpExp"]),
+    }),
+    { kind: "reply", text: QA_PREVIEW_APPROVE_REPLY, closeChangeIds: ["qpExp"] }
   );
 });

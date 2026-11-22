@@ -4,6 +4,23 @@
 
 ---
 
+### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — QA 10차 37·43–48행 수정 (`qaPreview` 영속화·미루기 정보 카드·QA 빠른 답장 가로채기·홈 코치 링크·트랙 부제·클러스터 QA 필터) (브랜치 `englead/qa10-fixes-20261122`)
+- **배경**: QA 10차 검증에서 ① 주간 복기 「트랙 골라 통화」 피커 부제 문구(37행), ② 미루기 응답에 카드가 없어 보이는 문제(43행), ③ QA 모드에서 진도 제안을 받고 「응」을 보내면 같은 제안 카드가 반복되고 새로고침 시 카드가 사라지며(44·45행), 본문에는 `[승인]`/`'응'` 안내가 남고 카드에는 「QA 모드에서는 실제 진도를 바꾸지 않습니다」가 나오는 모순(46행), ④ 홈 오늘 수업 카드에서 바로 코치로 가는 작은 링크 필요(47행), ⑤ QA 통화 뒤 「반복되는 실수」 설명 문구 변경(48행)이 보고되었다. 머지·배포는 하지 않음.
+- **원인**:
+  - `CoachModal.tsx`가 `!shouldPersistProposedChange`일 때 Firestore `planChanges`에 저장하지 않고 임시 `qa-preview-*` id만 만들어 새로고침 시 카드가 사라졌고, `selectQuickReplyTarget`이 `planChanges`에서 `none`을 반환해 「응」이 `/api/coach/chat`으로 넘어가 같은 제안이 반복되었으며, 본문 문구와 카드 안내가 어긋났다.
+  - `buildPostponeResult`가 `noop` 텍스트만 반환했고, `HomeScreen.tsx` 오늘 수업 카드에는 코치 링크가 없었으며, `buildClusterRequest`는 `source === "qa"` 문서를 거르지 않았다.
+- **수정**:
+  - **37행 (`src/ui/home/trackOptions.ts`, `TrackPickerSheet.tsx`)**: `trackPickerSubtitle("startCall")`을 `"수업 트랙을 고르면 바로 통화 준비로 넘어가요"`로 변경하고 `reviewDayRowSubtitle(mode)`를 추가해 `startCall` 모드 주간 복기 행 부제를 `"선택하면 복기 카드에 머물러요"`로 분리(`resolveTrackPick` 불변).
+  - **43행 (`src/data/progressAdjust.ts`, `server.ts`, `src/services/firebase/db.ts`, `CoachModal.tsx`)**: `ProgressResult`에 `{ type: "info"; reply: string; info: PostponeInfo }`를 추가하고 `buildPostponeResult`의 3갈래(일요일 되묻기 `reviewDay: true`/today_override/일반)가 `info`를 반환(기존 `reply` 유지). `buildPostponeInfoCard`(일요일 「오늘은 주간 복기」/평일 「오늘 건너뜀」, 마지막 줄 `"구글 캘린더는 바뀌지 않습니다"`), `sanitizeCoachInfoCard` 추가, `finalizeCoachProgressResponse`·`CoachProgressChatOut['progress']`·`server.ts` 타입 확장, `CoachMessageData.infoCard` 저장 및 버튼 없는 정보 카드 렌더링 구현.
+  - **44+45+46행 (`src/data/progressAdjust.ts`, `src/data/coachProposalGate.ts`, `src/services/firebase/db.ts`, `CoachModal.tsx`)**: `shouldPersistProposedChange`와 `qa-preview-`·`persistChangeId`를 삭제하고 `proposalQaPreview`·`APPROVE_HINT`·`QA_PREVIEW_HINT`·`progressReplyForDisplay`를 도입. QA 진도 제안도 `planChanges`에 `qaPreview: true`로 저장하되 3중 차단(`canApplyPendingProposal`의 `qa_preview` 사유, `selectQuickReplyTarget` 선제외, `db.applyPlanChange` 거부)으로 QA 해제 후에도 적용 불가. `resolveQaProgressQuickReply`가 현 세션 `qaPreview` 대상 「응」/「아니」를 가로채 로컬 한 줄 응답(「QA 모드라 실제 진도에는 반영하지 않았어요」/「미리보기를 닫았어요. 실제 진도는 그대로예요.」)으로 닫고 LLM 호출·카드 반복을 막음. 채팅/이력 탭에서 `qaPreview` 배지(「QA 미리보기」/「미리보기 닫힘」)와 비-미리보기 만료 카드 「만료」 배지를 표시.
+  - **47행 (`src/ui/home/HomeScreen.tsx`)**: 주간 복기·평일 오늘 수업 카드 액션 아래에 `data-testid="today-card-coach-link"`(「코치와 대화하기」, 44px 터치 높이) 추가(더 보기 코치 카드 유지), `alreadyProposed`에서 `c.qaPreview` 제외.
+  - **48행 (`src/services/mistakes/clusterRequest.ts`)**: `ClusterInputMistake.source?` 추가 및 `buildClusterRequest`에서 `m.source === "qa"`를 제외해 #41 이전 과거 QA 실수 문서 유입을 차단. **참고**: 48행의 실제 증상(동일 개수에서 설명 문구만 바뀐 현상)은 QA 누출이 아니라 서버 인스턴스 로컬 파일(`.data/mistake-clusters/`) 이름 캐시 휘발성 때문으로 추정되며, 증상 자체는 이번 PR에서 수정하지 않음.
+  - **문서 (`PROJECT_CONTEXT.md`, `firebase-blueprint.json`, `docs/history/changelog.md`)**: `PlanChange.qaPreview`, `CoachMessage.infoCard`, 자연어 진도 조정·홈 카드·클러스터 필터·QA 10차 내역 갱신.
+- **방어 조치 (Safeguards)**: `tests/trackOptions.test.ts`(B10·B11), `tests/progressAdjust.test.ts`(10·20·21·25·34 및 `APPROVE_HINT`/`progressReplyForDisplay`/`sanitizeCoachInfoCard`), `tests/coachProposalGate.test.ts`(`qa_preview`·`selectQuickReplyTarget`·`resolveQaProgressQuickReply`), `tests/coachQaPreviewWiring.test.ts`(신규), `tests/homeCoachLink.test.ts`(신규), `tests/clientUtils.test.ts`(`source: "qa"` 필터)로 검증.
+- **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit` 통과. 머지·배포 미실행.
+
+---
+
 ### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 코치 자연어 진도 조정 (`propose_progress_adjust`, 확인 후 반영, QA/stale/moved 가드·페이스(`lessonsPerCall`)·오늘 트랙·응 만료·QA 진도 가드) (브랜치 `englead/coach-progress-adjust-20261122`)
 - **배경**: 원콜 「코치와 대화하기」에서 "하루 미뤄줘", "시험 때문에 이틀치 땡겨줘", "OPIc 매 통화 2과씩 나가줘", "여행 5과부터 할래", "방금 거 되돌려줘" 같은 자연어 진도 조정 요청을 받고, 사용자 확인 후에만 기존 `planChanges` → `goals.nextLessonIndex`·`goals.lessonsPerCall` 경로로 안전하게 반영할 수 있어야 한다. 또한 오늘 고른 트랙 반영, 오래된 제안 빠른 답장 방지, QA 통화의 진도 증가 차단이 필요하다. 머지·배포는 하지 않음.
 - **원인**: 기존 코치 도구(`propose_plan_change`)는 자유 형식 `goalPatches`에 의존해 `nextLessonIndex` 경계·요일 패턴 계산·되돌리기·QA 가드가 일관되지 않았고, 미루기(`postpone`), 매 통화 반복 속도(`set_pace`), 오늘 트랙(`todayGoalId`) 우선 해석, 제안 10분 만료·세션 소속 검사, QA 통화 시 `advanceGoalAfterCompletedCall` 차단이 없었다.

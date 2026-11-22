@@ -78,8 +78,17 @@ export function resolveTrackPick(input: {
  */
 export function trackPickerSubtitle(mode: TrackPickerMode): string {
   return mode === "startCall"
-    ? "트랙을 고르면 바로 통화 준비로 넘어가요"
+    ? "수업 트랙을 고르면 바로 통화 준비로 넘어가요"
     : "오늘 통화할 수업 트랙을 골라보세요";
+}
+
+/**
+ * 주간 복기 행의 부제를 피커 모드에 따라 반환한다.
+ */
+export function reviewDayRowSubtitle(mode: TrackPickerMode): string {
+  return mode === "startCall"
+    ? "선택하면 복기 카드에 머물러요"
+    : "실수 복습 · 오늘 강의 · 퀴즈";
 }
 
 /**

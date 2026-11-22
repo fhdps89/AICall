@@ -69,7 +69,8 @@
         "after": { "type": "object" },
         "status": { "type": "string", "enum": ["proposed", "approved", "rejected", "reverted"] },
         "at": { "type": "string" },
-        "appliedAt": { "type": "string" }
+        "appliedAt": { "type": "string" },
+        "qaPreview": { "type": "boolean" }
       },
       "required": ["requestedText", "summary", "before", "after", "status", "at"]
     },
@@ -93,7 +94,8 @@
         "role": { "type": "string", "enum": ["user", "coach", "system"] },
         "text": { "type": "string" },
         "at": { "type": "string" },
-        "planChangeId": { "type": "string" }
+        "planChangeId": { "type": "string" },
+        "infoCard": { "type": "object" }
       },
       "required": ["role", "text", "at"]
     },
