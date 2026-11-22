@@ -13,7 +13,7 @@
   - **#34** (`englead/feedback-1122-track-voice-audio`): 홈 카드에서 트랙 바로 바꾸기(오늘만 저장), 말소리 선행 버퍼 120–400ms, 설정에서 AI 목소리 선택(기본 Kore).
 - **충돌 해결** (`lecture.ts` 등): #36의 지시문 제거·#37의 작업 epoch/백업과 #33의 병렬 TTS·인코딩·`lectureStatusPayload`를 한 `renderAndSaveAudio`에 모음. 홈 카드는 #37의 메타데이터 동기화+백그라운드 복사를 유지하고, 복사는 #33처럼 mime/확장자를 따름. 피드 오디오 URL은 실제 확장자(wav/m4a/mp3)를 쓰고, 오늘 날짜면 #37의 백업 복원 검사를 함. changelog·PROJECT_CONTEXT는 네 PR 내용을 모두 담아 정리함.
 - **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build`(통합 브랜치에서 실행).
-- **배포 시 주의**: 첫 배포 때는 days 백업이 없어 서버 재시작 시 오늘 강의가 한 번 더 바뀔 수 있음. Firestore `days` 규칙과 Storage lectures 규칙은 AI Studio Republish만으로 바뀌지 않으며 콘솔에서 따로 게시해야 함. 붙여넣기용 최종 텍스트: `/workspace/collab/onecall_rules_20261122/firestore.rules.txt`, `storage.rules.txt`.
+- **배포 시 주의**: 첫 배포 때는 days 백업이 없어 서버 재시작 시 오늘 강의가 한 번 더 바뀔 수 있음. Firestore `days` 규칙과 Storage lectures 규칙은 AI Studio Republish만으로 바뀌지 않으며 콘솔에서 따로 게시해야 함. 콘솔에 붙여 넣을 Firestore·Storage 규칙 최종 텍스트는 배포 전 점검 폴더에 준비해 두었음.
 
 ---
 
