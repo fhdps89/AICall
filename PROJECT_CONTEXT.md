@@ -130,6 +130,7 @@
      - 퀴즈·강의 우선순위 재정렬(`prioritizeByClusters`)은 이번 범위에서 제외한 후속 과제.
 10. **B-7 아침 강의 · B-8 그록봇 피드 (`server/lecture.ts`, `server/feed.ts`, `src/ui/lecture/`)**:
    - 새 실수 최대 6개 + 복습 실수 최대 3개로 `gemini-3.8-flash` 대본 → `gemini-3.8-flash-tts` 2인 음성, 답 전 3초 무음, WAV 1개. 앱에서 재생·오프라인 보관.
+   - **TTS 입력 규칙 (`server/speechText.ts`, `server/lecture.ts`)**: 1인·2인 모두 `style`(`TTS_STYLE`)은 `speechMetadata`로만 보내고 `text`에는 말할 말만 넣는다. 대본 저장(`generateScript`)과 오디오 렌더(`renderAndSaveAudio`) 전에 괄호·대괄호·해설자·말투 지시·마크다운을 제거한다(`myPhrase` 원문은 제외).
    - 그록봇은 `/feed/{비밀키}/today(.json)`만 열면 됨. 앱이 홈 화면을 열 때마다 비밀키·후보 실수를 서버에 다시 보냄(`syncFeed`). 강의가 없으면 피드 요청 때 생성 시작, 실패한 강의는 30분에 한 번만 다시 시도.
    - **한계(일부 해소, 2026-11-22)**: 피드 설정은 Firestore `feeds/{id}`에 암호화 백업되어 재시작 뒤에도 복원됨(v2.8.1). ready 강의의 대본·상태도 `feeds/{id}/days/{date}`에 같은 방식으로 백업되며, 재시작 뒤에는 같은 대본으로 TTS만 다시 만든다(새 강의 생성 아님). WAV 원본은 서버 `.data/`에만 있어 재시작 직후 1–3분 동안 피드가 제목과 함께 `generating`을 보여줄 수 있음. 예비 녹음은 여전히 `.data/`에만 있다.
    - **피드 audioUrl 스킴** (2026-11-22): `today.json`의 절대 URL은 프록시 뒤에서도 https로 만든다(`X-Forwarded-Proto` / `Forwarded`, `trust proxy`). 공개 호스트는 컨테이너가 http로 보여도 https를 쓴다. localhost는 http를 유지한다.
