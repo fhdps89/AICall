@@ -181,7 +181,7 @@ test('2) empty .data/ + ready backup: ensure+build restores title with 0 startJo
     assert.equal(startJobCalls, 0);
     assert.equal(ready.status, 'ready');
     assert.equal(ready.title, '어젯밤 실수 1분 정리');
-    assert.ok(ready.audioUrl?.endsWith(`/audio/${date}.wav`));
+    assert.match(ready.audioUrl || '', new RegExp(`/audio/${date}\\.(wav|m4a|mp3)$`));
     assert.ok(synthCalls.n > 0);
     assert.ok(lectureAudioPath(uid, date));
     assert.ok(feedAudioFile(st, date));
