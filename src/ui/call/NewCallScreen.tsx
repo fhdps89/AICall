@@ -1,5 +1,5 @@
 import { recordUsage } from "../../services/usage/usageService";
-import { callsForDuration } from "../../services/usage/learningLog";
+import { callUsageDelta } from "../../services/usage/learningLog";
 import React, { useState, useEffect, useRef } from "react";
 import { useDevMode } from "../../data/devMode";
 import { isQaMode } from "../../data/qaMode";
@@ -105,6 +105,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
   }); // displayStatus는 표시 전용
   const sessionCreatedRef = useRef<boolean>(false);
   const sessionCreatePromiseRef = useRef<Promise<void> | null>(null);
+  const qaCallRef = useRef<boolean>(false);
   const hasMicRecordingRef = useRef<boolean>(false);
   // Guards 통화 종료 against a double tap (it would finalize and review the call twice).
   const hangingUpRef = useRef<boolean>(false);
@@ -114,11 +115,13 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
     if (!userId) return Promise.resolve();
     if (!sessionCreatedRef.current) {
       sessionCreatedRef.current = true;
+      const isQa = isQaMode();
+      qaCallRef.current = isQa;
       sessionCreatePromiseRef.current = createCallSession(userId, sessionIdRef.current, {
         goalId: goal.id,
         lessonIndex,
         connectionPath: "direct",
-        ...(isQaMode() ? { source: "qa" as const } : {}),
+        ...(isQa ? { source: "qa" as const } : {}),
       }).catch((err) => console.warn("[NewCallScreen] createCallSession error:", err));
     }
     return sessionCreatePromiseRef.current || Promise.resolve();
@@ -388,8 +391,8 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
         connectionPath: stats.connectionPath,
         directFailCount: stats.directFailCount,
       }).catch((err) => console.warn("[NewCallScreen] finalizeCallSession error:", err));
-      // B-10 usage: call minutes & completed calls (>= 10s)
-      recordUsage(userId, { liveMinutes: callDuration / 60, calls: callsForDuration(callDuration) });
+      // B-10 usage: call minutes & completed calls (>= 10s), skipping learning counts for QA calls
+      recordUsage(userId, callUsageDelta(callDuration, qaCallRef.current));
     }
 
     await providerRef.current.disconnect().catch(() => {});
