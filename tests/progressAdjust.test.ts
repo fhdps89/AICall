@@ -3,16 +3,22 @@ import assert from "node:assert/strict";
 import {
   DEFAULT_WEEKLY_PATTERN,
   addDaysKst,
+  buildProgressCardView,
   buildProgressProposal,
   clampDays,
   classifyQuickReply,
   describeProgressChange,
+  describeUndoOffer,
+  formatAppliedProgressReply,
   formatKstDay,
   isProgressChange,
   isStaleProgressChange,
   nextLessonDate,
+  parseDayCount,
   pickUndoTarget,
   qaBlocksPlanChange,
+  reconcileProgressIntent,
+  sanitizeTodayGoalId,
   shouldPersistProposedChange,
   finalizeCoachProgressResponse,
   type ProgressContext,
@@ -45,7 +51,7 @@ function makeCtx(overrides: Partial<ProgressContext> = {}): ProgressContext {
 }
 
 // 1. pull_forward opic 2
-test("1. pull_forward opic 2: 6->8, reply has 6·7과, 11/23(월), 구글 캘린더, 매 통화마다", () => {
+test("1. pull_forward opic 2: 6->8, reply has 6·7과, 11/23(월), 구글 캘린더, 이번 한 번만 2과 앞당깁니다, 1과씩 올라갑니다", () => {
   const res = buildProgressProposal({ intent: "pull_forward", goalId: "opic", days: 2 }, makeCtx());
   assert.equal(res.type, "proposal");
   assert.deepEqual(res.before, { goals: { opic: { nextLessonIndex: 6 } } });
@@ -53,9 +59,10 @@ test("1. pull_forward opic 2: 6->8, reply has 6·7과, 11/23(월), 구글 캘린
   assert.match(res.reply, /6·7과/);
   assert.match(res.reply, /11\/23\(월\)/);
   assert.match(res.reply, /구글 캘린더/);
-  assert.match(res.reply, /매 통화마다/);
-  assert.match(res.reply, /이번에는 한 번에 2과 앞당깁니다\. 매 통화마다 2과씩 나가기는 아직 없습니다/);
-  assert.match(res.summary, /이번에는 한 번에 2과 앞당깁니다\. 매 통화마다 2과씩 나가기는 아직 없습니다/);
+  assert.match(res.reply, /이번 한 번만 2과 앞당깁니다/);
+  assert.match(res.reply, /1과씩 올라갑니다/);
+  assert.match(res.summary, /이번 한 번만 2과 앞당깁니다/);
+  assert.match(res.summary, /1과씩 올라갑니다/);
 
   const lines = describeProgressChange(res.before, res.after, makeCtx());
   assert.ok(lines.some((l) => l.includes("OPIc 6과 → 8과")));
@@ -74,21 +81,23 @@ test("2. pull_forward without goalId on Sunday with '이틀치 땡겨줘' return
   assert.match(res.reply, /OPIc\(6과\)/);
 });
 
-// 3. keyword '시험' picks opic when goalId omitted, explicit philly overrides keyword
-test("3. '시험' keyword picks opic when goalId omitted; explicit philly overrides keyword", () => {
+// 3. ambiguous '이틀치 땡겨줘' with resolved target returns clarify
+test("3. ambiguous '이틀치 땡겨줘' returns clarify with both 한 번만/매 통화 and target name", () => {
   const resAuto = buildProgressProposal(
     { intent: "pull_forward", days: 2 },
     makeCtx({ userText: "시험이 얼마 안 남아서 이틀치 땡겨줘" })
   );
-  assert.equal(resAuto.type, "proposal");
-  assert.deepEqual(resAuto.after, { goals: { opic: { nextLessonIndex: 8 } } });
+  assert.equal(resAuto.type, "clarify");
+  assert.match(resAuto.reply, /한 번만/);
+  assert.match(resAuto.reply, /매 통화/);
+  assert.match(resAuto.reply, /OPIc/);
 
   const resExplicit = buildProgressProposal(
     { intent: "pull_forward", goalId: "philly", days: 2 },
     makeCtx({ userText: "시험 때문에 Philly 이틀치 땡겨줘" })
   );
-  assert.equal(resExplicit.type, "proposal");
-  assert.deepEqual(resExplicit.after, { goals: { philly: { nextLessonIndex: 6 } } });
+  assert.equal(resExplicit.type, "clarify");
+  assert.match(resExplicit.reply, /Philly/);
 });
 
 // 4. Tuesday today + goalId="today" -> philly 4->6
@@ -438,4 +447,340 @@ test("21. finalizeCoachProgressResponse: proposal reply overwrites LLM text, emp
   assert.equal(undo.progress?.type, "undo_request");
   assert.equal(undo.proposal, null);
   assert.match(undo.reply, /되돌릴/);
+});
+
+// 22. set_pace basic
+test("22. set_pace basic: '시험이 얼마 안 남아서 이틀치씩 땡겨줘' proposes lessonsPerCall 1->2 without nextLessonIndex or plan", () => {
+  const ctx = makeCtx({ userText: "시험이 얼마 안 남아서 이틀치씩 땡겨줘" });
+  const res = buildProgressProposal({ intent: "set_pace", days: 2 }, ctx);
+  assert.equal(res.type, "proposal");
+  assert.deepEqual(res.before, { goals: { opic: { lessonsPerCall: 1 } } });
+  assert.deepEqual(res.after, { goals: { opic: { lessonsPerCall: 2 } } });
+  assert.equal((res.after.goals.opic as { nextLessonIndex?: number }).nextLessonIndex, undefined);
+  assert.equal((res.after as { plan?: unknown }).plan, undefined);
+  assert.match(res.reply, /매 통화마다 OPIc은 2과씩/);
+  assert.match(res.reply, /지금은 6과 그대로/);
+  assert.match(res.reply, /6과를 마치면 다음은 8과/);
+  assert.match(res.reply, /7과는/);
+  assert.match(res.reply, /14과는 건너뛰지/);
+  assert.match(res.reply, /구글 캘린더/);
+  assert.deepEqual(sanitizePlanChangeAfter(res.after, ctx.goals), res.after);
+});
+
+// 23. '씩' overrides LLM pull_forward -> set_pace
+test("23. '씩' in userText overrides LLM pull_forward into set_pace 2", () => {
+  const res = buildProgressProposal(
+    { intent: "pull_forward", goalId: "opic", days: 2 },
+    makeCtx({ userText: "이틀치씩 땡겨줘" })
+  );
+  assert.equal(res.type, "proposal");
+  assert.deepEqual(res.after, { goals: { opic: { lessonsPerCall: 2 } } });
+});
+
+// 24. '한 번만' / '점프' overrides LLM set_pace -> pull_forward
+test("24. '한 번만' and '점프' override LLM set_pace into pull_forward", () => {
+  const once = buildProgressProposal(
+    { intent: "set_pace", goalId: "opic", days: 2 },
+    makeCtx({ userText: "한 번만 이틀치 땡겨줘" })
+  );
+  assert.equal(once.type, "proposal");
+  assert.deepEqual(once.after, { goals: { opic: { nextLessonIndex: 8 } } });
+
+  const jump = buildProgressProposal(
+    { intent: "set_pace", goalId: "opic", days: 2 },
+    makeCtx({ userText: "OPIc 2과 점프" })
+  );
+  assert.equal(jump.type, "proposal");
+  assert.deepEqual(jump.after, { goals: { opic: { nextLessonIndex: 8 } } });
+});
+
+// 25. postpone protection against '하루씩 미뤄줘'
+test("25. postpone protection: '오늘은 진도를 못 나갈 것 같으니 하루씩 미뤄줘' stays noop without writes", () => {
+  const rPostpone = buildProgressProposal(
+    { intent: "postpone" },
+    makeCtx({ userText: "오늘은 진도를 못 나갈 것 같으니 하루씩 미뤄줘" })
+  );
+  assert.equal(rPostpone.type, "noop");
+  assert.equal("after" in rPostpone, false);
+
+  const rPull = buildProgressProposal(
+    { intent: "pull_forward", days: 1 },
+    makeCtx({ userText: "오늘은 진도를 못 나갈 것 같으니 하루씩 미뤄줘" })
+  );
+  assert.equal(rPull.type, "noop");
+  assert.equal("after" in rPull, false);
+});
+
+// 26. reset pace ('원래 속도로', '하루씩으로 돌려줘')
+test("26. reset pace: '원래 속도로' and '하루씩으로 돌려줘' reset pace to 1 or noop if already 1", () => {
+  const rReset = buildProgressProposal(
+    { intent: "set_pace", goalId: "opic" },
+    makeCtx({
+      goals: makeGoals({ opic: { lessonsPerCall: 2 } }),
+      userText: "원래 속도로",
+    })
+  );
+  assert.equal(rReset.type, "proposal");
+  assert.deepEqual(rReset.after, { goals: { opic: { lessonsPerCall: 1 } } });
+  assert.match(rReset.reply, /1과씩/);
+
+  const rDaily = buildProgressProposal(
+    { intent: "set_pace", goalId: "opic" },
+    makeCtx({
+      goals: makeGoals({ opic: { lessonsPerCall: 2 } }),
+      userText: "하루씩으로 돌려줘",
+    })
+  );
+  assert.equal(rDaily.type, "proposal");
+  assert.deepEqual(rDaily.after, { goals: { opic: { lessonsPerCall: 1 } } });
+
+  const rAlready = buildProgressProposal(
+    { intent: "set_pace", goalId: "opic" },
+    makeCtx({ userText: "원래 속도로" })
+  );
+  assert.equal(rAlready.type, "noop");
+  assert.match(rAlready.reply, /이미 매 통화 1과씩/);
+});
+
+// 27. set_pace noop when already same pace
+test("27. set_pace returns noop when goal already has the requested pace", () => {
+  const res = buildProgressProposal(
+    { intent: "set_pace", goalId: "opic", days: 2 },
+    makeCtx({
+      goals: makeGoals({ opic: { lessonsPerCall: 2 } }),
+      userText: "이틀치씩",
+    })
+  );
+  assert.equal(res.type, "noop");
+  assert.match(res.reply, /이미 매 통화 2과씩/);
+});
+
+// 28. set_pace clamping and missing days
+test("28. set_pace clamps >3 to 3, <=0 to 1, and clarifies when days is missing", () => {
+  const over = buildProgressProposal(
+    { intent: "set_pace", goalId: "opic", days: 5 },
+    makeCtx({ userText: "5과씩" })
+  );
+  assert.equal(over.type, "proposal");
+  assert.deepEqual(over.after, { goals: { opic: { lessonsPerCall: 3 } } });
+  assert.match(over.reply, /최대 3과/);
+
+  const zero = buildProgressProposal(
+    { intent: "set_pace", goalId: "opic", days: 0 },
+    makeCtx()
+  );
+  assert.equal(zero.type, "noop");
+
+  const missing = buildProgressProposal(
+    { intent: "set_pace", goalId: "opic" },
+    makeCtx({ userText: "앞으로 매 통화 빠르게" })
+  );
+  assert.equal(missing.type, "clarify");
+  assert.match(missing.reply, /1~3과/);
+});
+
+// 29. goalId='all' set_pace 2 skips paused
+test("29. goalId='all' set_pace 2 updates all 4 active goals and excludes paused", () => {
+  const rAll = buildProgressProposal(
+    { intent: "set_pace", goalId: "all", days: 2 },
+    makeCtx({ goals: makeGoals({ bluey: { status: "paused" } }) })
+  );
+  assert.equal(rAll.type, "proposal");
+  assert.deepEqual(rAll.after, {
+    goals: {
+      opic: { lessonsPerCall: 2 },
+      philly: { lessonsPerCall: 2 },
+      travel: { lessonsPerCall: 2 },
+    },
+  });
+
+  const rAll4 = buildProgressProposal({ intent: "set_pace", goalId: "all", days: 2 }, makeCtx());
+  assert.equal(rAll4.type, "proposal");
+  assert.equal(Object.keys(rAll4.after.goals).length, 4);
+});
+
+// 30. set_pace near last lesson
+test("30. set_pace near last lesson: opic 13 with pace 2 mentions '13과를 마치면 다음은 14과'", () => {
+  const res = buildProgressProposal(
+    { intent: "set_pace", goalId: "opic", days: 2 },
+    makeCtx({ goals: makeGoals({ opic: { nextLessonIndex: 13 } }) })
+  );
+  assert.equal(res.type, "proposal");
+  assert.match(res.reply, /13과를 마치면 다음은 14과/);
+});
+
+// 31. pull_forward reflects existing pace > 1
+test("31. pull_forward on opic with pace 2 mentions '2과씩 올라갑니다'", () => {
+  const res = buildProgressProposal(
+    { intent: "pull_forward", goalId: "opic", days: 1 },
+    makeCtx({ goals: makeGoals({ opic: { lessonsPerCall: 2 } }) })
+  );
+  assert.equal(res.type, "proposal");
+  assert.match(res.reply, /2과씩 올라갑니다/);
+});
+
+// 32. reconcileProgressIntent table
+test("32. reconcileProgressIntent matches every table rule and keeps non-pace/postpone/set_lesson/undo/empty", () => {
+  assert.deepEqual(reconcileProgressIntent("pull_forward", undefined), { intent: "pull_forward" });
+  assert.deepEqual(reconcileProgressIntent("postpone", "하루씩 미뤄줘"), { intent: "postpone" });
+  assert.deepEqual(reconcileProgressIntent("set_lesson", "2과씩"), { intent: "set_lesson" });
+  assert.deepEqual(reconcileProgressIntent("undo", "원래대로"), { intent: "undo" });
+  assert.deepEqual(reconcileProgressIntent("pull_forward", "원래대로"), { intent: "pull_forward" });
+  assert.deepEqual(reconcileProgressIntent("pull_forward", "오늘 미뤄줘"), { intent: "postpone" });
+  assert.deepEqual(reconcileProgressIntent("pull_forward", "원래 속도로"), {
+    intent: "set_pace",
+    forceDays: 1,
+  });
+  assert.deepEqual(reconcileProgressIntent("set_pace", "이번만 2과"), { intent: "pull_forward" });
+  assert.deepEqual(reconcileProgressIntent("pull_forward", "매 통화 2과"), { intent: "set_pace" });
+  assert.deepEqual(reconcileProgressIntent("pull_forward", "2일치 땡겨줘"), {
+    intent: "pull_forward",
+    ambiguousPace: true,
+  });
+});
+
+// 33. parseDayCount
+test("33. parseDayCount extracts Korean and numeric counts or returns null", () => {
+  assert.equal(parseDayCount("하루"), 1);
+  assert.equal(parseDayCount("이틀"), 2);
+  assert.equal(parseDayCount("사흘"), 3);
+  assert.equal(parseDayCount("나흘"), 4);
+  assert.equal(parseDayCount("2과씩"), 2);
+  assert.equal(parseDayCount("3일치"), 3);
+  assert.equal(parseDayCount("없음"), null);
+  assert.equal(parseDayCount("앞으로 매 통화 빠르게"), null);
+});
+
+// 34. todayGoalId on Sunday postpone
+test("34. Sunday + todayGoalId='opic' + postpone answers for selected track without '정해진 진도 수업이 없어요'", () => {
+  const res = buildProgressProposal(
+    { intent: "postpone" },
+    makeCtx({ todayKst: "2026-11-22", todayGoalId: "opic" })
+  );
+  assert.equal(res.type, "noop");
+  assert.match(res.reply, /OPIc 6과 그대로/);
+  assert.match(res.reply, /11\/23\(월\)/);
+  assert.match(res.reply, /구글 캘린더/);
+  assert.doesNotMatch(res.reply, /정해진 진도 수업이 없어요/);
+});
+
+// 35. todayGoalId resolution priority
+test("35. target resolution priority: explicit > text > todayGoalId > pattern", () => {
+  const sunOverride = buildProgressProposal(
+    { intent: "pull_forward", days: 2 },
+    makeCtx({ todayKst: "2026-11-22", todayGoalId: "opic", userText: "한 번만 2과 점프" })
+  );
+  assert.equal(sunOverride.type, "proposal");
+  assert.deepEqual(sunOverride.after, { goals: { opic: { nextLessonIndex: 8 } } });
+
+  const tueOverride = buildProgressProposal(
+    { intent: "pull_forward", goalId: "today", days: 2 },
+    makeCtx({ todayKst: "2026-11-24", todayGoalId: "opic" })
+  );
+  assert.equal(tueOverride.type, "proposal");
+  assert.deepEqual(tueOverride.after, { goals: { opic: { nextLessonIndex: 8 } } });
+
+  const textWins = buildProgressProposal(
+    { intent: "pull_forward", days: 2 },
+    makeCtx({ todayGoalId: "philly", userText: "시험 때문에 한 번만 2과 점프" })
+  );
+  assert.equal(textWins.type, "proposal");
+  assert.deepEqual(textWins.after, { goals: { opic: { nextLessonIndex: 8 } } });
+
+  const explicitWins = buildProgressProposal(
+    { intent: "pull_forward", goalId: "travel", days: 2 },
+    makeCtx({ todayGoalId: "opic" })
+  );
+  assert.equal(explicitWins.type, "proposal");
+  assert.deepEqual(explicitWins.after, { goals: { travel: { nextLessonIndex: 4 } } });
+});
+
+// 36. sanitizeTodayGoalId
+test("36. sanitizeTodayGoalId filters unknown/invalid ids and falls back to Sunday clarify", () => {
+  const ids = ["opic", "philly", "bluey", "travel"];
+  assert.equal(sanitizeTodayGoalId("opic", ids), "opic");
+  assert.equal(sanitizeTodayGoalId("toeic", ids), undefined);
+  assert.equal(sanitizeTodayGoalId(123, ids), undefined);
+  assert.equal(sanitizeTodayGoalId("", ids), undefined);
+  assert.equal(sanitizeTodayGoalId("a".repeat(65), ids), undefined);
+
+  const sundayInvalid = buildProgressProposal(
+    { intent: "pull_forward", days: 2 },
+    makeCtx({ todayKst: "2026-11-22", todayGoalId: "toeic" })
+  );
+  assert.equal(sundayInvalid.type, "clarify");
+});
+
+// 37. isProgressChange / qaBlocksPlanChange / isStaleProgressChange for lessonsPerCall
+test("37. isProgressChange, qaBlocksPlanChange, and isStaleProgressChange cover lessonsPerCall", () => {
+  const paceAfter = { goals: { opic: { lessonsPerCall: 2 } } };
+  assert.equal(isProgressChange(paceAfter), true);
+  assert.equal(qaBlocksPlanChange(paceAfter, true), true);
+
+  const change = {
+    before: { goals: { opic: { lessonsPerCall: 1 } } },
+    after: paceAfter,
+  };
+  assert.equal(
+    isStaleProgressChange(change, makeGoals({ opic: { lessonsPerCall: 2 } })),
+    true
+  );
+  assert.equal(isStaleProgressChange(change, makeGoals()), false);
+});
+
+// 38. pickUndoTarget for lessonsPerCall
+test("38. pickUndoTarget restores paceFrom/paceTo and detects moved pace", () => {
+  const changes: UndoCandidateChange[] = [
+    {
+      id: "pace-change",
+      status: "approved",
+      at: "2026-11-22T10:00:00Z",
+      appliedAt: "2026-11-22T10:01:00Z",
+      before: { goals: { opic: { lessonsPerCall: 1 } } },
+      after: { goals: { opic: { lessonsPerCall: 2 } } },
+    },
+  ];
+  const ok = pickUndoTarget(changes, makeGoals({ opic: { lessonsPerCall: 2 } }));
+  assert.deepEqual(ok, {
+    ok: true,
+    changeId: "pace-change",
+    restore: { opic: { paceFrom: 2, paceTo: 1 } },
+  });
+
+  const moved = pickUndoTarget(changes, makeGoals({ opic: { lessonsPerCall: 3 } }));
+  assert.equal(moved.ok, false);
+  if (!moved.ok) assert.equal(moved.reason, "moved");
+});
+
+// 39. buildProgressCardView, formatAppliedProgressReply, describeUndoOffer
+test("39. buildProgressCardView, formatAppliedProgressReply, describeUndoOffer format pace and lesson cards", () => {
+  const ctx = makeCtx();
+  const paceView = buildProgressCardView(
+    {
+      before: { goals: { opic: { lessonsPerCall: 1 } } },
+      after: { goals: { opic: { lessonsPerCall: 2 } } },
+    },
+    ctx
+  );
+  assert.deepEqual(paceView.beforeLines, ["OPIc 매 통화 1과씩"]);
+  assert.deepEqual(paceView.afterLines, ["OPIc 매 통화 2과씩"]);
+  assert.equal(paceView.approveLabel, "승인 (OPIc 매 통화 2과씩)");
+
+  const lessonView = buildProgressCardView(
+    {
+      before: { goals: { opic: { nextLessonIndex: 6 } } },
+      after: { goals: { opic: { nextLessonIndex: 8 } } },
+    },
+    ctx
+  );
+  assert.equal(lessonView.approveLabel, "승인 (OPIc 6과 → 8과)");
+
+  const appliedPace = formatAppliedProgressReply(
+    { after: { goals: { opic: { lessonsPerCall: 2 } } } },
+    ctx
+  );
+  assert.match(appliedPace, /OPIc은 앞으로 매 통화 2과씩 올라가요/);
+
+  const undoMsg = describeUndoOffer({ opic: { paceFrom: 2, paceTo: 1 } }, ctx.goals);
+  assert.match(undoMsg, /OPIc 매 통화 2과씩 → 1과씩/);
 });

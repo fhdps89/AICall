@@ -40,20 +40,22 @@ import {
   getDueMistakes,
 } from "../../services/firebase/db";
 import { authFetch } from "../../services/api/authFetch";
-import { sanitizePlanChangeAfter, isEmptyPlanChange } from "../../data/planValidation";
+import { sanitizePlanChangeAfter, isEmptyPlanChange, normalizeLessonsPerCall } from "../../data/planValidation";
 import { isQaMode } from "../../data/qaMode";
+import { canApplyPendingProposal, selectQuickReplyTarget } from "../../data/coachProposalGate";
+import { loadDailyOverride } from "../home/dailyTrackOverride";
 import {
+  buildProgressCardView,
   classifyQuickReply,
-  describeProgressChange,
-  formatKstDay,
-  goalShortName,
+  describeUndoOffer,
+  formatAppliedProgressReply,
   isProgressChange,
   isStaleProgressChange,
   kstTodayStr,
-  nextLessonDate,
   pickUndoTarget,
   qaBlocksPlanChange,
   shouldPersistProposedChange,
+  type UndoRestoreEntry,
 } from "../../data/progressAdjust";
 
 const DAY_LABELS: Record<string, string> = {
@@ -97,15 +99,17 @@ export const CoachModal: React.FC<CoachModalProps> = ({
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [undoOffer, setUndoOffer] = useState<{
     changeId: string;
-    restore: Record<string, { from: number; to: number }>;
+    restore: Record<string, UndoRestoreEntry>;
   } | null>(null);
   const [undoLoading, setUndoLoading] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const sessionChangeIdsRef = useRef<Set<string>>(new Set());
 
   const loadData = async () => {
     if (!userId) return;
     setUndoOffer(null);
+    sessionChangeIdsRef.current.clear();
     try {
       const [p, changes, mem, msgs] = await Promise.all([
         getUserPlan(userId),
@@ -124,7 +128,7 @@ export const CoachModal: React.FC<CoachModalProps> = ({
           role: "coach",
           text:
             "안녕하세요 찬식님! 전담 영어 학습 코치입니다. 출장, 시험 일정, 바쁜 요일 등 학습 패턴 변경이나 목표 조정이 필요하시면 언제든 말씀해 주세요." +
-            "\n\n진도도 말로 바꿀 수 있어요. 예: 「시험이 얼마 안 남아서 OPIc 이틀치 땡겨줘」, 「여행은 5과부터 할래」, 「방금 거 되돌려줘」",
+            "\n\n진도도 말로 바꿀 수 있어요. 예: 「시험이 얼마 안 남아서 OPIc 이틀치씩 땡겨줘」, 「OPIc 한 번만 2과 건너뛰어 줘」, 「원래 속도로」, 「여행은 5과부터 할래」, 「방금 거 되돌려줘」",
           at: new Date().toISOString(),
         };
         setMessages([initialMsg]);
@@ -184,21 +188,12 @@ export const CoachModal: React.FC<CoachModalProps> = ({
     return fallbackText || "방금 바꾼 진도를 되돌릴까요? 아래 카드에서 확인해 주세요.";
   };
 
-  const formatAppliedProgressReply = (change: PlanChangeData): string => {
-    if (!isProgressChange(change.after)) {
-      return "요청하신 계획 변경을 적용했어요.";
-    }
-    const todayKst = kstTodayStr();
-    const parts = Object.entries(change.after?.goals || {})
-      .filter(([, g]) => typeof g?.nextLessonIndex === "number")
-      .map(([gid, g]) => {
-        const name = goalShortName(gid, goals);
-        const nextDate = nextLessonDate(plan?.weeklyPattern, gid, todayKst, true);
-        const dateStr = nextDate ? `${formatKstDay(nextDate)}부터 ` : "다음 수업부터 ";
-        return `${name}은 ${dateStr}${g.nextLessonIndex}과예요`;
-      });
-    return `적용했어요. ${parts.join(", ")}. 구글 캘린더는 바뀌지 않습니다.`;
-  };
+  const formatAppliedReply = (change: PlanChangeData): string =>
+    formatAppliedProgressReply(change, {
+      goals,
+      weeklyPattern: plan?.weeklyPattern,
+      todayKst: kstTodayStr(),
+    });
 
   const handleSendMessage = async (customPrompt?: string) => {
     const textToSend = (customPrompt || inputText).trim();
@@ -224,20 +219,27 @@ export const CoachModal: React.FC<CoachModalProps> = ({
       }).catch(() => {});
 
       // 1-a. Quick reply check before calling LLM
-      const pendingChanges = planChanges.filter((c) => c.status === "proposed");
-      const quick = classifyQuickReply(textToSend, { hasPending: pendingChanges.length > 0 });
+      const quickTarget = selectQuickReplyTarget(planChanges, {
+        nowMs: Date.now(),
+        sessionChangeIds: sessionChangeIdsRef.current,
+      });
+      const quick = classifyQuickReply(textToSend, { hasPending: quickTarget.kind !== "none" });
 
       if (quick === "approve" || quick === "reject") {
-        if (pendingChanges.length >= 2) {
+        if (quickTarget.kind === "expired") {
+          await appendAndSaveCoachMessage("이 제안은 10분이 지나 만료됐어요. 코치에게 다시 요청해 주세요.");
+          return;
+        }
+        if (quickTarget.kind === "many") {
           await appendAndSaveCoachMessage("대기 중인 제안이 여러 개 있어요. 카드의 버튼으로 골라 주세요.");
           return;
         }
-        if (pendingChanges.length === 1) {
-          const target = pendingChanges[0];
+        if (quickTarget.kind === "one") {
+          const target = quickTarget.change;
           if (quick === "approve") {
-            const resApply = await handleApplyChange(target.id);
+            const resApply = await handleApplyChange(target.id, { viaQuickReply: true });
             if (resApply.ok) {
-              await appendAndSaveCoachMessage(formatAppliedProgressReply(target));
+              await appendAndSaveCoachMessage(formatAppliedReply(target));
             } else if (resApply.reason) {
               await appendAndSaveCoachMessage(resApply.reason);
             }
@@ -268,6 +270,19 @@ export const CoachModal: React.FC<CoachModalProps> = ({
       };
 
       // 3. Call server /api/coach/chat
+      let todayGoalId: string | undefined;
+      try {
+        todayGoalId =
+          loadDailyOverride(
+            window.localStorage,
+            userId,
+            Date.now(),
+            goals.map((g) => g.id)
+          ) ?? undefined;
+      } catch {
+        todayGoalId = undefined;
+      }
+
       const res = await authFetch("/api/coach/chat", {
         method: "POST",
         body: JSON.stringify({
@@ -277,6 +292,7 @@ export const CoachModal: React.FC<CoachModalProps> = ({
           mistakeStats,
           memory,
           history: messages.slice(-6).map((m) => ({ role: m.role, text: m.text })),
+          todayGoalId,
         }),
       });
 
@@ -303,6 +319,7 @@ export const CoachModal: React.FC<CoachModalProps> = ({
 
         if (!shouldPersistProposedChange(safeAfter, isQaMode())) {
           planChangeId = `qa-preview-${Date.now()}`;
+          sessionChangeIdsRef.current.add(planChangeId);
           createdChange = {
             ...changePayload,
             id: planChangeId,
@@ -310,6 +327,7 @@ export const CoachModal: React.FC<CoachModalProps> = ({
           persistChangeId = false;
         } else {
           planChangeId = await createPlanChange(userId, changePayload);
+          sessionChangeIdsRef.current.add(planChangeId);
           createdChange = {
             ...changePayload,
             id: planChangeId,
@@ -368,12 +386,27 @@ export const CoachModal: React.FC<CoachModalProps> = ({
     );
   };
 
-  const handleApplyChange = async (changeId: string): Promise<{ ok: boolean; reason?: string }> => {
+  const handleApplyChange = async (
+    changeId: string,
+    opts?: { viaQuickReply?: boolean }
+  ): Promise<{ ok: boolean; reason?: string }> => {
     const targetChange = findChangeById(changeId);
     if (targetChange && qaBlocksPlanChange(targetChange.after, isQaMode())) {
       const msg = "QA 모드에서는 실제 진도를 바꾸지 않습니다.";
       alert(msg);
       return { ok: false, reason: msg };
+    }
+
+    if (targetChange) {
+      const gate = canApplyPendingProposal(targetChange, {
+        nowMs: Date.now(),
+        sessionChangeIds: sessionChangeIdsRef.current,
+        viaQuickReply: opts?.viaQuickReply ?? false,
+      });
+      if (!gate.ok) {
+        alert(gate.reply);
+        return { ok: false, reason: gate.reply };
+      }
     }
 
     setActionLoadingId(changeId);
@@ -382,15 +415,16 @@ export const CoachModal: React.FC<CoachModalProps> = ({
         const liveGoals = await getUserGoals(userId);
         if (isStaleProgressChange(targetChange, liveGoals)) {
           const changedGoalId = Object.entries(targetChange.after?.goals || {}).find(
-            ([, patch]) => typeof patch?.nextLessonIndex === "number"
+            ([, patch]) =>
+              typeof patch?.nextLessonIndex === "number" ||
+              typeof patch?.lessonsPerCall === "number"
           )?.[0];
-          const liveIdx = changedGoalId
-            ? liveGoals.find((g) => g.id === changedGoalId)?.nextLessonIndex
-            : undefined;
+          const changedPatch = changedGoalId ? targetChange.after?.goals?.[changedGoalId] : undefined;
+          const liveGoal = changedGoalId ? liveGoals.find((g) => g.id === changedGoalId) : undefined;
           const msg =
-            typeof liveIdx === "number"
-              ? `그 사이 진도가 ${liveIdx}과로 바뀌었어요. 다시 요청해 주세요.`
-              : "그 사이 진도가 바뀌었어요. 다시 요청해 주세요.";
+            typeof changedPatch?.nextLessonIndex === "number" && typeof liveGoal?.nextLessonIndex === "number"
+              ? `그 사이 진도가 ${liveGoal.nextLessonIndex}과로 바뀌었어요. 다시 요청해 주세요.`
+              : "그 사이 진도 설정이 바뀌었어요. 다시 요청해 주세요.";
           alert(msg);
           return { ok: false, reason: msg };
         }
@@ -456,11 +490,18 @@ export const CoachModal: React.FC<CoachModalProps> = ({
       }
       const liveGoals = await getUserGoals(userId);
       for (const [gid, patch] of Object.entries(targetChange.after?.goals || {})) {
-        if (typeof patch?.nextLessonIndex !== "number") continue;
         const live = liveGoals.find((g) => g.id === gid);
-        if (!live || live.nextLessonIndex !== patch.nextLessonIndex) {
-          alert("그 뒤로 수업을 하셔서 되돌리면 진도가 뒤로 가요. 진도 바꾸기로 직접 지정해 주세요.");
-          return;
+        if (typeof patch?.nextLessonIndex === "number") {
+          if (!live || live.nextLessonIndex !== patch.nextLessonIndex) {
+            alert("그 뒤로 수업을 하셔서 되돌리면 진도가 뒤로 가요. 진도 바꾸기로 직접 지정해 주세요.");
+            return;
+          }
+        }
+        if (typeof patch?.lessonsPerCall === "number") {
+          if (!live || normalizeLessonsPerCall(live.lessonsPerCall) !== patch.lessonsPerCall) {
+            alert("그 뒤로 설정이 바뀌어 되돌릴 수 없어요. 코치에게 다시 요청해 주세요.");
+            return;
+          }
         }
       }
     }
@@ -646,33 +687,24 @@ export const CoachModal: React.FC<CoachModalProps> = ({
                     {/* Linked Plan Change Card */}
                     {linkedChange && (() => {
                       const progressCard = isProgressChange(linkedChange.after);
-                      const touchedProgressEntries = progressCard
-                        ? Object.entries(linkedChange.after?.goals || {}).filter(
-                            ([, g]: [string, any]) => typeof g?.nextLessonIndex === "number"
-                          )
-                        : [];
-                      const progressLines = progressCard
-                        ? describeProgressChange(linkedChange.before, linkedChange.after, {
+                      const cardView = progressCard
+                        ? buildProgressCardView(linkedChange, {
                             goals,
                             weeklyPattern: plan?.weeklyPattern,
                             todayKst: kstTodayStr(),
                           })
-                        : [];
+                        : null;
                       const qaBlocked = qaBlocksPlanChange(linkedChange.after, isQaMode());
-                      const approveLabel = (() => {
-                        if (!progressCard) return "승인 (적용하기)";
-                        if (touchedProgressEntries.length === 1) {
-                          const [gid, g]: [string, any] = touchedProgressEntries[0];
-                          const beforeIdx =
-                            linkedChange.before?.goals?.[gid]?.nextLessonIndex ??
-                            goals.find((goal) => goal.id === gid)?.nextLessonIndex;
-                          const name = goalShortName(gid, goals);
-                          return typeof beforeIdx === "number"
-                            ? `승인 (${name} ${beforeIdx}과 → ${g.nextLessonIndex}과)`
-                            : `승인 (${name} ${g.nextLessonIndex}과)`;
-                        }
-                        return "승인 (진도 변경 적용)";
-                      })();
+                      const gateState =
+                        linkedChange.status === "proposed"
+                          ? canApplyPendingProposal(linkedChange, {
+                              nowMs: Date.now(),
+                              sessionChangeIds: sessionChangeIdsRef.current,
+                              viaQuickReply: false,
+                            })
+                          : null;
+                      const isExpired = Boolean(gateState && !gateState.ok && gateState.reason === "expired");
+                      const approveLabel = cardView ? cardView.approveLabel : "승인 (적용하기)";
 
                       return (
                       <div className="w-full max-w-[92%] mt-2.5 p-4 rounded-2xl bg-[#131A26] border border-amber-500/40 shadow-xl space-y-3">
@@ -680,7 +712,7 @@ export const CoachModal: React.FC<CoachModalProps> = ({
                           <div className="flex items-center gap-1.5">
                             <Sparkles className="w-4 h-4 text-amber-400" />
                             <span className="text-xs font-bold text-amber-300">
-                              {progressCard ? "📋 진도 조정 제안" : "📋 계획 변경 제안"}
+                              {cardView ? cardView.title : "📋 계획 변경 제안"}
                             </span>
                           </div>
                           <span
@@ -715,18 +747,12 @@ export const CoachModal: React.FC<CoachModalProps> = ({
                               [현재 상태]
                             </span>
                             <div className="space-y-0.5 text-slate-300">
-                              {progressCard ? (
-                                touchedProgressEntries.map(([gid]) => {
-                                  const beforeIdx =
-                                    linkedChange.before?.goals?.[gid]?.nextLessonIndex ??
-                                    goals.find((goal) => goal.id === gid)?.nextLessonIndex ??
-                                    1;
-                                  return (
-                                    <p key={gid} className="truncate">
-                                      {goalShortName(gid, goals)} {beforeIdx}과
-                                    </p>
-                                  );
-                                })
+                              {cardView ? (
+                                cardView.beforeLines.map((line, i) => (
+                                  <p key={i} className="truncate">
+                                    {line}
+                                  </p>
+                                ))
                               ) : (
                                 <>
                                   {linkedChange.before?.plan?.weeklyPattern && (
@@ -753,10 +779,10 @@ export const CoachModal: React.FC<CoachModalProps> = ({
                               [제안 변경안]
                             </span>
                             <div className="space-y-0.5 text-amber-200">
-                              {progressCard ? (
-                                touchedProgressEntries.map(([gid, g]: [string, any]) => (
-                                  <p key={gid} className="truncate font-medium">
-                                    {goalShortName(gid, goals)} {g.nextLessonIndex}과
+                              {cardView ? (
+                                cardView.afterLines.map((line, i) => (
+                                  <p key={i} className="truncate font-medium">
+                                    {line}
                                   </p>
                                 ))
                               ) : (
@@ -781,9 +807,9 @@ export const CoachModal: React.FC<CoachModalProps> = ({
                           </div>
                         </div>
 
-                        {progressCard && progressLines.length > 0 && (
+                        {cardView && cardView.detailLines.length > 0 && (
                           <ul className="space-y-1 text-[11px] text-slate-300 bg-slate-900/40 rounded-xl px-3 py-2 border border-slate-800/80">
-                            {progressLines.map((line, i) => (
+                            {cardView.detailLines.map((line, i) => (
                               <li key={i}>• {line}</li>
                             ))}
                           </ul>
@@ -795,10 +821,23 @@ export const CoachModal: React.FC<CoachModalProps> = ({
                             <p className="text-[11px] font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-xl px-3 py-2">
                               QA 모드에서는 실제 진도를 바꾸지 않습니다
                             </p>
+                          ) : isExpired ? (
+                            <div className="flex items-center justify-between gap-2 pt-1">
+                              <span className="text-[11px] font-semibold text-slate-400">
+                                만료된 제안이에요 · 다시 요청해 주세요
+                              </span>
+                              <button
+                                onClick={() => handleRejectChange(linkedChange.id)}
+                                disabled={actionLoadingId === linkedChange.id}
+                                className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 font-medium text-xs transition cursor-pointer shrink-0"
+                              >
+                                <span>거절</span>
+                              </button>
+                            </div>
                           ) : (
                             <div className="flex gap-2 pt-1">
                               <button
-                                onClick={() => handleApplyChange(linkedChange.id)}
+                                onClick={() => handleApplyChange(linkedChange.id, { viaQuickReply: false })}
                                 disabled={actionLoadingId === linkedChange.id}
                                 className="flex-1 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer shadow-lg shadow-emerald-600/20 active:scale-95"
                               >
@@ -834,10 +873,7 @@ export const CoachModal: React.FC<CoachModalProps> = ({
                     <span className="text-xs font-bold text-purple-300">진도 되돌리기 확인</span>
                   </div>
                   <p className="text-xs text-slate-200">
-                    {Object.entries(undoOffer.restore)
-                      .map(([gid, r]) => `${goalShortName(gid, goals)} ${r.from}과 → ${r.to}과`)
-                      .join(", ")}
-                    로 되돌릴까요? 구글 캘린더는 바뀌지 않습니다
+                    {describeUndoOffer(undoOffer.restore, goals)}
                   </p>
                   <div className="flex gap-2 pt-1">
                     <button
@@ -957,16 +993,28 @@ export const CoachModal: React.FC<CoachModalProps> = ({
                         </button>
 
                         <div className="flex gap-2">
-                          {change.status === "proposed" && (
-                            <button
-                              onClick={() => handleApplyChange(change.id)}
-                              disabled={actionLoadingId === change.id}
-                              className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1 transition cursor-pointer"
-                            >
-                              <CheckCircle2 size={12} />
-                              <span>승인</span>
-                            </button>
-                          )}
+                          {change.status === "proposed" && (() => {
+                            const histGate = canApplyPendingProposal(change, {
+                              nowMs: Date.now(),
+                              sessionChangeIds: sessionChangeIdsRef.current,
+                              viaQuickReply: false,
+                            });
+                            const histExpired = !histGate.ok && histGate.reason === "expired";
+                            return histExpired ? (
+                              <span className="px-3 py-1.5 rounded-lg bg-slate-800 text-slate-400 font-semibold text-xs border border-slate-700">
+                                만료
+                              </span>
+                            ) : (
+                              <button
+                                onClick={() => handleApplyChange(change.id, { viaQuickReply: false })}
+                                disabled={actionLoadingId === change.id}
+                                className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1 transition cursor-pointer"
+                              >
+                                <CheckCircle2 size={12} />
+                                <span>승인</span>
+                              </button>
+                            );
+                          })()}
 
                           {change.status === "approved" && (
                             <button
@@ -1127,10 +1175,10 @@ export const CoachModal: React.FC<CoachModalProps> = ({
               ⏱️ "하루 20분만"
             </button>
             <button
-              onClick={() => handleSendMessage("OPIc 이틀치 땡겨줘")}
+              onClick={() => handleSendMessage("OPIc 매 통화 2과씩 나가줘")}
               className="shrink-0 px-2.5 py-1 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700/60 transition cursor-pointer"
             >
-              ⏩ "OPIc 이틀치 땡겨줘"
+              ⏩ "OPIc 매 통화 2과씩 나가줘"
             </button>
           </div>
         )}

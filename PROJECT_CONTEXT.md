@@ -24,7 +24,7 @@
   - `goals/{goalId}.deadline`: OPIc 시험일 등 D-day 목표 기한 연동.
   - `settings.coachNudges`: `["weekly", "absence2d"]` 기본값.
 - **스케줄 불변 안전망**:
-  - **하루 빠짐 보존**: 통화 세션이 `status=done`이 아니면 다음 배정 요일에도 같은 `nextLessonIndex` 유지(건너뛰지 않음). 오직 통화 완료 및 복기 저장 시에만 `nextLessonIndex += 1`.
+  - **하루 빠짐 보존**: 통화 세션이 `status=done`이 아니면 다음 배정 요일에도 같은 `nextLessonIndex` 유지(건너뛰지 않음). 오직 통화 완료 및 복기 저장 시에만 `nextLessonIndex += lessonsPerCall`(기본 1, 1~3, 마지막 과는 건너뛰지 않음). QA 통화는 진도를 올리지 않음.
   - **OPIc 시험 1~2주 전 모의고사 자동 제안**: deadline 7~14일 전 구간에 실전 모의고사(14과)를 월·토 OPIc 슬롯에 배치하는 제안 카드 생성 (**승인 전 절대 반영 금지**).
   - **홈 「오늘 수업」**: `plan.weeklyPattern + goals.nextLessonIndex` 우선 계산.
 - **코치 UI 및 LLM 통제**:
@@ -32,7 +32,7 @@
   - `POST /api/coach/chat`: `gemini-3.8-flash` 기반 함수 호출(`propose_plan_change`, `get_progress`, `get_mistake_stats`). 적용하는 도구는 모델에게 아예 주지 않음(제안만 가능).
   - **제안 검사** (`src/data/planValidation.ts`, v2.8.0): 코치가 만든 변경은 카드로 보여 주기 전과 승인해 적용하기 전에 검사. 있는 목표·있는 과 번호·실제 날짜(YYYY-MM-DD)·요일별 목표 id 목록·하루 5~240분만 남기고 나머지는 버림. 남는 게 없으면 카드를 만들지 않음.
   - **승인·되돌리기** (v2.8.0): 승인하는 순간의 실제 값을 `before`로, 실제로 적용한 값을 `after`로 저장. 되돌리기는 그 변경이 바꾼 항목만 복원(그 사이 다른 트랙의 진도는 그대로). 변경 전에 시험일이 없었으면 시험일을 지움. 승인·되돌리기 뒤에는 홈의 목표 목록을 다시 불러옴.
-  - **자연어 진도 조정** (`src/data/progressAdjust.ts`, 2026-11-22): `POST /api/coach/chat`에 `propose_progress_adjust` 도구 추가(`postpone`, `pull_forward`, `set_lesson`, `undo` 구조화 인자만 LLM이 생성하고 `after.goals.*.nextLessonIndex`와 답변 문구는 서버 순수 함수가 계산). `postpone`(미루기)은 데이터 변경 없이 오늘을 제외한 다음 수업일만 안내(`noop`), `pull_forward`(땡기기)는 한 번에 1~7과 점프(매 통화 반복 속도 미지원, `after.plan` 미생성). 승인·되돌리기는 기존 `planChanges` 경로에서 확인 후에만 반영하며, 적용 전 `stale` 검사·되돌리기 전 `moved` 검사·`isQaMode()` 차단(미리보기만 표시)을 수행하고 구글 캘린더 일정은 변경하지 않음.
+  - **자연어 진도 조정** (`src/data/progressAdjust.ts`·`lessonPace.ts`·`coachProposalGate.ts`, 2026-11-22): `POST /api/coach/chat`에 `propose_progress_adjust` 도구 추가(`postpone`, `pull_forward`, `set_lesson`, `set_pace`, `undo` 구조화 인자만 LLM이 생성하고 서버 `reconcileProgressIntent`가 한국어 단서로 한 번 더 교정하며, `after.goals.*.{nextLessonIndex,lessonsPerCall}`와 답변 문구는 서버 순수 함수가 계산). `postpone`(미루기)은 데이터 변경 없이 오늘을 제외한 다음 수업일만 안내(`noop`), `pull_forward`(땡기기)는 한 번에 1~7과 점프(`after.plan` 미생성), `set_pace`는 트랙별 `lessonsPerCall`(1~3)을 저장하며 건너뛴 과는 `nextLessonIndex`만으로 완료처럼 보임(`lessons.completed`는 건드리지 않음). 대상 해석은 `todayGoalId`(오늘 고른 트랙)를 요일 패턴보다 우선하고, 승인·거절 빠른 답장은 현 세션 카드만 10분 이내에만 허용(`canApplyPendingProposal`/`selectQuickReplyTarget`, 만료 시 차단). 승인·되돌리기는 기존 `planChanges` 경로에서 확인 후에만 반영하며, 적용 전 `stale` 검사·되돌리기 전 `moved` 검사·`isQaMode()` 차단(미리보기만 표시)을 수행하고 구글 캘린더 일정은 변경하지 않음.
 - **먼저 말 걸기 (2일 결석 배너 & 일요일 주간 리뷰)**:
   - usage 일별 기록(KST) 기준, 오늘 포함 2일 이상 학습 기록 없음(오늘 학습 시 숨김, 최근 3개월(usage 문서 3개) 안에 학습 기록이 없으면 숨김(장기 휴식 사용자는 배너가 안 뜸)) 시 홈 상단에 "이틀째 쉬었어요. 오늘 수업만 해도 좋아요"(3일 이상은 "N일째 쉬었어요. 오늘 수업만 해도 좋아요") 배너 노출.
   - 일요일 아침 강의 coachNote를 주간 리뷰 톤으로 자동 편성.
@@ -180,7 +180,7 @@
 
 ## 5. 버전 히스토리
 - **v2.10.0 이후 수정(미배포) — 사용자 피드백 3건: 홈 트랙 바로 바꾸기·AI 말소리 끊김·목소리 고정/선택 (2026-11-22 KST, 브랜치 `englead/feedback-1122-track-voice-audio`, #33 위에 쌓음)**:
-  - **트랙 바꾸기**: 오늘 수업 카드의 「트랙: …」을 눌러 바텀시트(`TrackPickerSheet`, 항목 계산은 순수 `trackOptions.ts`)에서 바로 고름. 진행할 과가 없는 트랙은 비활성. 주간 복기일 「트랙 골라 통화」도 같은 시트를 엶. 고른 트랙은 **오늘(KST) 하루만** `localStorage`(`onecall_today_track_override:{uid}`, 순수 `dailyTrackOverride.ts`)에 저장되어 새로고침·통화 뒤 홈으로 돌아와도 유지되고 다음 날 자동으로 사라짐(기존엔 `useState`뿐이라 새로고침하면 주간 복기로 되돌아갔음). 요일별 주간 루틴(`plan.weeklyPattern`)을 설정에서 고치는 화면은 아직 없음.
+  - **트랙 바꾸기**: 오늘 수업 카드의 「트랙: …」을 눌러 바텀시트(`TrackPickerSheet`, 항목 계산은 순수 `trackOptions.ts`)에서 바로 고름. 진행할 과가 없는 트랙은 비활성. 주간 복기일 「트랙 골라 통화」도 같은 시트를 엶. 고른 트랙은 **오늘(KST) 하루만** `localStorage`(`onecall_today_track_override:{uid}`, 순수 `dailyTrackOverride.ts`)에 저장되어 새로고침·통화 뒤 홈으로 돌아와도 유지되고 다음 날 자동으로 사라지며, 코치도 오늘 고른 트랙을 읽음(기존엔 `useState`뿐이라 새로고침하면 주간 복기로 되돌아갔음). 요일별 주간 루틴(`plan.weeklyPattern`)을 설정에서 고치는 화면은 아직 없음.
   - **말소리 끊김**: `playAudioChunk`가 청크 도착마다 `max(now, nextPlaybackTime)`로 바로 예약해 지터 버퍼가 없었음. 순수 `audioPlaybackScheduler.ts`가 선행 시간(기본 120ms, 언더런마다 +60ms, 최대 400ms)을 두고 이어 붙임. 새 발화(1초 이상 무음 뒤)는 언더런으로 세지 않고, 학습한 선행 시간은 통화 동안 유지하며 50개 무문제 때마다 조금씩 줄임. interrupted 때만 커서 리셋. turnComplete마다 `[Live] stage=playback_stats underruns=… leadMs=… interrupts=…` 로그. 홀수 바이트 청크 예외 방지.
   - **목소리**: 코드상 voiceName은 이미 모든 연결 경로가 `Kore`로 보내고 있었음(미지정이 원인 아님). `gemini-3.8-live` 자체가 같은 voiceName에서도 응답·세션마다 음색이 흔들린다는 보고가 Google 포럼에 다수 있어 앱이 완전히 막을 수 없음. 앱 쪽 불일치만 정리: `src/config/voices.ts`(허용 목록 5종, 기본 Kore, `normalizeVoiceName`, `LIVE_LANGUAGE_CODE=null`)를 클라·서버가 공유하고, `server/liveConfig.ts`의 모든 시도와 직접 연결 setup이 같은 speechConfig(voiceName만, languageCode 없음)를 보냄(경로·시도마다 달랐던 languageCode 제거). 설정 「AI 목소리」 탭(`VoicePanel`)에서 선택·미리 듣기, `users/{uid}/settings/general.voiceName`에 저장(기본 Kore), 통화 시작 때 읽어 다음 통화부터 적용(통화 중 변경 불가). 아침 강의(코치 Kore+상대역 Puck)와 발음 듣기는 선택을 따르지 않음.
   - **검증**: `npm test` 284/284, lint, server tsc, build 통과. 모바일 스크린샷 `/workspace/collab/onecall_feedback_20261122/shots/`. 끊김·음색은 실기기 통화로만 확인 가능(배포 후 확인).

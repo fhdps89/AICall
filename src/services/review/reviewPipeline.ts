@@ -521,14 +521,20 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
         mode: "VERBATIM",
       };
 
-      review.lessonAdvanced = true;
+      if (mistakeSource !== "qa") {
+        review.lessonAdvanced = true;
+      } else {
+        delete review.lessonAdvanced;
+      }
       try {
         await saveSessionReview(userId, sessionId, review, sttFinalData);
         console.log(`[ReviewPipeline] Updated session ${sessionId} to status 'done' with review report.`);
-        // B-9 Requirement 2: 완료한 날만 nextLessonIndex += 1 (스케줄 규칙: 하루 빠진 날은 과를 건너뛰지 않음)
-        await advanceGoalAfterCompletedCall(userId, goal.id, lessonIndex).catch((advErr) => {
-          console.warn("[ReviewPipeline] advanceGoalAfterCompletedCall error:", advErr);
-        });
+        // QA 통화는 진도를 올리지 않음(세션 문서 source 우선, resolveMistakeSource)
+        if (mistakeSource !== "qa") {
+          await advanceGoalAfterCompletedCall(userId, goal.id, lessonIndex).catch((advErr) => {
+            console.warn("[ReviewPipeline] advanceGoalAfterCompletedCall error:", advErr);
+          });
+        }
       } catch (saveErr) {
         console.error("[ReviewPipeline] Failed to save session review:", saveErr);
       }

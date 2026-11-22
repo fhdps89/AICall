@@ -2,14 +2,21 @@
  * Pure progress-adjustment rules shared by server (/api/coach/chat) and CoachModal.
  * Kept free of Firebase and DOM so plain node can load it directly.
  */
-import type { DayKey } from "./planValidation.ts";
+import {
+  MIN_LESSONS_PER_CALL,
+  MAX_LESSONS_PER_CALL,
+  normalizeLessonsPerCall,
+  type DayKey,
+} from "./planValidation.ts";
+import { paceTarget, lastLessonIndex } from "./lessonPace.ts";
 
-export type ProgressIntent = "postpone" | "pull_forward" | "set_lesson" | "undo";
+export type ProgressIntent = "postpone" | "pull_forward" | "set_lesson" | "set_pace" | "undo";
 
 export interface ProgressGoal {
   id: string;
   title?: string;
   nextLessonIndex: number;
+  lessonsPerCall?: number;
   status?: "active" | "paused" | "done";
   lessons: { index: number }[];
 }
@@ -19,6 +26,7 @@ export interface ProgressContext {
   weeklyPattern?: Partial<Record<DayKey, string[]>>;
   todayKst: string; // YYYY-MM-DD
   userText?: string;
+  todayGoalId?: string;
 }
 
 export interface ProgressArgs {
@@ -28,7 +36,12 @@ export interface ProgressArgs {
   lessonIndex?: unknown;
 }
 
-export type GoalIdx = Record<string, { nextLessonIndex: number }>;
+export type GoalProgressPatch = {
+  nextLessonIndex?: number;
+  lessonsPerCall?: number;
+};
+
+export type GoalIdx = Record<string, GoalProgressPatch>;
 
 export type ProgressResult =
   | {
@@ -42,6 +55,13 @@ export type ProgressResult =
       type: "noop" | "clarify" | "invalid" | "undo_request";
       reply: string;
     };
+
+export type TargetResolutionVia =
+  | "explicit"
+  | "all"
+  | "text"
+  | "today_override"
+  | "pattern";
 
 export const DEFAULT_WEEKLY_PATTERN: Record<DayKey, string[]> = {
   mon: ["opic"],
@@ -73,6 +93,12 @@ const WEEKDAY_KO: Record<DayKey, string> = {
 };
 
 const CALENDAR_INVARIANT = "구글 캘린더 「영어 코치」 일정은 바뀌지 않습니다";
+
+const BACK_RE = /미뤄|미루|늦춰|연기/;
+const RESET_RE = /원래\s*(속도|페이스)|(하루|1과|한\s*과)씩으로/;
+const ONCE_RE = /한\s*번만|이번만|한\s*번에|점프|건너뛰/;
+const PACE_RE = /씩|매\s*(통화|번|수업)|앞으로\s*계속|속도|페이스/;
+const AMOUNT_RE = /(하루|이틀|사흘|나흘)\s*치|\d+\s*일\s*치/;
 
 export function goalShortName(
   goalId: string,
@@ -177,10 +203,59 @@ export function clampDays(v: unknown): number {
   return floored;
 }
 
+/** Accepts a client-provided todayGoalId only when it is a non-empty <=64-char known goal id. */
+export function sanitizeTodayGoalId(raw: unknown, goalIds: readonly string[]): string | undefined {
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > 64) return undefined;
+  return goalIds.includes(raw) ? raw : undefined;
+}
+
+/** Extracts a Korean or numeric lesson/day count from user text, or null if absent. */
+export function parseDayCount(text?: string): number | null {
+  if (typeof text !== "string" || !text.trim()) return null;
+  if (/나흘|네\s*(?:과|개|일)/.test(text)) return 4;
+  if (/사흘|세\s*(?:과|개|일)/.test(text)) return 3;
+  if (/이틀|두\s*(?:과|개|일)/.test(text)) return 2;
+  if (/하루|한\s*(?:과|개|일)/.test(text)) return 1;
+  const unitMatch = text.match(/(\d+)\s*(?:과|일\s*치|개|씩)/);
+  if (unitMatch) return Number(unitMatch[1]);
+  const dayMatch = text.match(/(?:^|[^월\d]\s*)(\d+)\s*일/);
+  if (dayMatch) return Number(dayMatch[1]);
+  return null;
+}
+
+/** Reconciles LLM-chosen pull_forward/set_pace intents against unambiguous Korean cues in userText. */
+export function reconcileProgressIntent(
+  intent: unknown,
+  userText?: string
+): { intent: unknown; ambiguousPace?: true; forceDays?: number } {
+  if (typeof userText !== "string" || !userText.trim()) {
+    return { intent };
+  }
+  if (intent !== "pull_forward" && intent !== "set_pace") {
+    return { intent };
+  }
+  if (BACK_RE.test(userText)) {
+    return { intent: "postpone" };
+  }
+  if (RESET_RE.test(userText)) {
+    return { intent: "set_pace", forceDays: 1 };
+  }
+  if (ONCE_RE.test(userText)) {
+    return { intent: "pull_forward" };
+  }
+  if (PACE_RE.test(userText)) {
+    return { intent: "set_pace" };
+  }
+  if (AMOUNT_RE.test(userText)) {
+    return { intent, ambiguousPace: true };
+  }
+  return { intent };
+}
+
 export function resolveTargetGoalIds(
   goalId: unknown,
   ctx: ProgressContext
-): { ids: string[] } | { clarify: true } | { invalid: string } {
+): { ids: string[]; via: TargetResolutionVia } | { clarify: true } | { invalid: string } {
   const goals = Array.isArray(ctx.goals) ? ctx.goals : [];
 
   if (goalId !== undefined && goalId !== null && goalId !== "" && goalId !== "today") {
@@ -194,19 +269,27 @@ export function resolveTargetGoalIds(
       if (activeIds.length === 0) {
         return { invalid: "진행 중인 목표가 없어요." };
       }
-      return { ids: activeIds };
+      return { ids: activeIds, via: "all" };
     }
     const found = goals.find((g) => g.id === goalId);
     if (!found) {
       return { invalid: `알 수 없는 목표(${goalId})예요.` };
     }
-    return { ids: [found.id] };
+    return { ids: [found.id], via: "explicit" };
   }
 
   // Omitted or "today"
   const text = (ctx.userText || "").trim();
   if (/시험|오픽|opic/i.test(text) && goals.some((g) => g.id === "opic")) {
-    return { ids: ["opic"] };
+    return { ids: ["opic"], via: "text" };
+  }
+
+  const validTodayId = sanitizeTodayGoalId(
+    ctx.todayGoalId,
+    goals.map((g) => g.id)
+  );
+  if (validTodayId) {
+    return { ids: [validTodayId], via: "today_override" };
   }
 
   const pattern = ctx.weeklyPattern ?? DEFAULT_WEEKLY_PATTERN;
@@ -214,7 +297,7 @@ export function resolveTargetGoalIds(
   const todayTracks = Array.isArray(pattern[todayKey]) ? pattern[todayKey]! : [];
   for (const trackId of todayTracks) {
     if (goals.some((g) => g.id === trackId)) {
-      return { ids: [trackId] };
+      return { ids: [trackId], via: "pattern" };
     }
   }
 
@@ -237,11 +320,48 @@ function formatSkippedList(from: number, to: number): string {
   return `${skipped.join("·")}과`;
 }
 
+function buildPaceSentences(opts: {
+  name: string;
+  cur?: number;
+  oldPace: number;
+  newPace: number;
+  last: number | null;
+}): string[] {
+  const lines: string[] = [];
+  if (opts.newPace > 1) {
+    lines.push(`앞으로 매 통화마다 ${opts.name}은 ${opts.newPace}과씩 올라갑니다`);
+    if (typeof opts.cur === "number") {
+      const nextAfter = paceTarget(opts.cur, opts.newPace, opts.last);
+      lines.push(`지금은 ${opts.cur}과 그대로이고, ${opts.cur}과를 마치면 다음은 ${nextAfter}과입니다`);
+      if (nextAfter > opts.cur + 1) {
+        lines.push(`건너뛰는 ${formatSkippedList(opts.cur + 1, nextAfter)}는 진도에서 완료로 봅니다`);
+      }
+    }
+    if (opts.last !== null) {
+      lines.push(`마지막 ${opts.last}과는 건너뛰지 않습니다`);
+    }
+  } else {
+    lines.push(
+      `앞으로는 통화를 마칠 때마다 ${opts.name}이 1과씩 올라갑니다(지금은 매 통화 ${opts.oldPace}과씩)`
+    );
+    if (typeof opts.cur === "number") {
+      lines.push(`지금은 ${opts.cur}과 그대로입니다`);
+    }
+  }
+  return lines;
+}
+
 export function describeProgressChange(
-  before: { goals?: Record<string, { nextLessonIndex?: number }> } | null | undefined,
-  after: { goals?: Record<string, { nextLessonIndex?: number }> } | null | undefined,
+  before: { goals?: Record<string, GoalProgressPatch | undefined> } | null | undefined,
+  after: { goals?: Record<string, GoalProgressPatch | undefined> } | null | undefined,
   ctx: {
-    goals: readonly { id: string; title?: string; nextLessonIndex?: number }[];
+    goals: readonly {
+      id: string;
+      title?: string;
+      nextLessonIndex?: number;
+      lessonsPerCall?: number;
+      lessons?: { index: number }[];
+    }[];
     weeklyPattern?: Partial<Record<DayKey, string[]>>;
     todayKst: string;
   }
@@ -250,37 +370,65 @@ export function describeProgressChange(
   if (!afterGoals || typeof afterGoals !== "object") return [];
 
   const lines: string[] = [];
-  let hasAny = false;
+  let hasNextChange = false;
+  let hasPaceChange = false;
+  const nextPaces = new Set<number>();
 
   for (const [goalId, patch] of Object.entries(afterGoals)) {
-    if (!patch || typeof patch.nextLessonIndex !== "number") continue;
-    hasAny = true;
-    const to = patch.nextLessonIndex;
-    const from =
-      before?.goals?.[goalId]?.nextLessonIndex ??
-      ctx.goals.find((g) => g.id === goalId)?.nextLessonIndex;
+    if (!patch || typeof patch !== "object") continue;
+    const goal = ctx.goals.find((g) => g.id === goalId);
     const name = goalShortName(goalId, ctx.goals);
 
-    lines.push(typeof from === "number" ? `${name} ${from}과 → ${to}과` : `${name} ${to}과`);
+    if (typeof patch.nextLessonIndex === "number") {
+      hasNextChange = true;
+      const to = patch.nextLessonIndex;
+      const from = before?.goals?.[goalId]?.nextLessonIndex ?? goal?.nextLessonIndex;
+      lines.push(typeof from === "number" ? `${name} ${from}과 → ${to}과` : `${name} ${to}과`);
 
-    if (typeof from === "number") {
-      if (to > from) {
-        lines.push(formatSkippedPhrase(from, to));
-      } else if (to < from) {
-        lines.push(`${to}과로 돌아갑니다`);
+      if (typeof from === "number") {
+        if (to > from) {
+          lines.push(formatSkippedPhrase(from, to));
+        } else if (to < from) {
+          lines.push(`${to}과로 돌아갑니다`);
+        }
       }
+
+      const nextDate = nextLessonDate(ctx.weeklyPattern, goalId, ctx.todayKst, true);
+      lines.push(
+        nextDate
+          ? `다음 ${name} 수업: ${formatKstDay(nextDate)} 23:00부터 ${to}과`
+          : `다음 ${name} 수업부터 ${to}과`
+      );
+      nextPaces.add(normalizeLessonsPerCall(goal?.lessonsPerCall));
     }
 
-    const nextDate = nextLessonDate(ctx.weeklyPattern, goalId, ctx.todayKst, true);
-    lines.push(
-      nextDate
-        ? `다음 ${name} 수업: ${formatKstDay(nextDate)} 23:00부터 ${to}과`
-        : `다음 ${name} 수업부터 ${to}과`
-    );
+    if (typeof patch.lessonsPerCall === "number") {
+      hasPaceChange = true;
+      const oldPace = normalizeLessonsPerCall(
+        before?.goals?.[goalId]?.lessonsPerCall ?? goal?.lessonsPerCall
+      );
+      const last = goal?.lessons ? lastLessonIndex(goal.lessons) : null;
+      lines.push(
+        ...buildPaceSentences({
+          name,
+          cur: goal?.nextLessonIndex,
+          oldPace,
+          newPace: patch.lessonsPerCall,
+          last,
+        })
+      );
+    }
   }
 
-  if (hasAny) {
-    lines.push("통화를 마치면 지금처럼 1과씩 올라갑니다");
+  if (hasNextChange) {
+    if (nextPaces.size === 1) {
+      const pace = [...nextPaces][0];
+      lines.push(`통화를 마치면 지금처럼 ${pace}과씩 올라갑니다`);
+    } else {
+      lines.push("통화를 마치면 지금처럼 각 트랙 속도대로 올라갑니다");
+    }
+  }
+  if (hasNextChange || hasPaceChange) {
     lines.push(CALENDAR_INVARIANT);
   }
 
@@ -304,12 +452,24 @@ function buildPostponeResult(args: ProgressArgs, ctx: ProgressContext): Progress
         );
       }
     }
-    const schedulePart =
-      upcoming.length > 0 ? ` 다음 수업: ${upcoming.join(", ")}.` : "";
+    const schedulePart = upcoming.length > 0 ? ` 다음 수업: ${upcoming.join(", ")}.` : "";
     return {
       type: "noop",
-      reply: `오늘(${formatKstDay(ctx.todayKst)})은 주간 복기 날이라 정해진 진도 수업이 없어요. 진도는 통화를 끝낼 때만 1과 올라가니 그대로 둘게요.${schedulePart} ${CALENDAR_INVARIANT}.`,
+      reply: `오늘(${formatKstDay(ctx.todayKst)})은 주간 복기 날이라 정해진 진도 수업이 없어요. 진도는 통화를 마칠 때만 올라가니 그대로 둘게요.${schedulePart} ${CALENDAR_INVARIANT}.`,
     };
+  }
+
+  if (resolved.via === "today_override" && resolved.ids.length === 1) {
+    const goal = ctx.goals.find((g) => g.id === resolved.ids[0]);
+    if (goal) {
+      const name = goalShortName(goal.id, ctx.goals);
+      const nextDate = nextLessonDate(ctx.weeklyPattern, goal.id, ctx.todayKst, false);
+      const nextStr = nextDate ? `${formatKstDay(nextDate)} 23:00` : "다음 배정 요일";
+      return {
+        type: "noop",
+        reply: `오늘 고르신 ${name} ${goal.nextLessonIndex}과 그대로 둘게요. 다음 ${name} 수업: ${nextStr}. 진도는 통화를 마칠 때만 올라가니 오늘 못 하셔도 다음 수업에서 그대로 이어집니다. ${CALENDAR_INVARIANT}.`,
+      };
+    }
   }
 
   const items: string[] = [];
@@ -324,7 +484,40 @@ function buildPostponeResult(args: ProgressArgs, ctx: ProgressContext): Progress
 
   return {
     type: "noop",
-    reply: `${items.join(", ")}으로 유지할게요. 진도는 통화를 끝낼 때만 1과 올라가니 오늘 못 하셔도 다음 수업에서 그대로 이어집니다. ${CALENDAR_INVARIANT}.`,
+    reply: `${items.join(", ")}으로 유지할게요. 진도는 통화를 마칠 때만 올라가니 오늘 못 하셔도 다음 수업에서 그대로 이어집니다. ${CALENDAR_INVARIANT}.`,
+  };
+}
+
+function buildTargetClarify(ctx: ProgressContext, actionVerb: string): ProgressResult {
+  const options = ctx.goals
+    .filter((g) => (g.status ?? "active") === "active")
+    .map((g) => `${goalShortName(g.id, ctx.goals)}(${g.nextLessonIndex}과)`)
+    .join("·");
+  return {
+    type: "clarify",
+    reply: `오늘은 복기 날이라 어떤 걸 ${actionVerb}지 골라 주세요: ${options}·전부`,
+  };
+}
+
+function buildAmbiguousPaceClarify(args: ProgressArgs, ctx: ProgressContext): ProgressResult {
+  const resolved = resolveTargetGoalIds(args.goalId, ctx);
+  if ("invalid" in resolved) {
+    return { type: "invalid", reply: resolved.invalid };
+  }
+  if ("clarify" in resolved) {
+    return buildTargetClarify(ctx, "앞당길");
+  }
+
+  const label = resolved.ids.length === 1 ? goalShortName(resolved.ids[0], ctx.goals) : "전부";
+  const parsedArgs = parseOptionalNumber(args.days);
+  const count =
+    Number.isInteger(parsedArgs) && parsedArgs > 0
+      ? parsedArgs
+      : (parseDayCount(ctx.userText) ?? 2);
+  const paceCount = Math.min(Math.max(count, MIN_LESSONS_PER_CALL), MAX_LESSONS_PER_CALL);
+  return {
+    type: "clarify",
+    reply: `「${label} 한 번만 ${count}과 점프」인지 「${label} 앞으로 매 통화 ${paceCount}과씩」인지 알려 주세요.`,
   };
 }
 
@@ -334,14 +527,7 @@ function buildPullForwardResult(args: ProgressArgs, ctx: ProgressContext): Progr
     return { type: "invalid", reply: resolved.invalid };
   }
   if ("clarify" in resolved) {
-    const options = ctx.goals
-      .filter((g) => (g.status ?? "active") === "active")
-      .map((g) => `${goalShortName(g.id, ctx.goals)}(${g.nextLessonIndex}과)`)
-      .join("·");
-    return {
-      type: "clarify",
-      reply: `오늘은 복기 날이라 어떤 걸 앞당길지 골라 주세요: ${options}·전부`,
-    };
+    return buildTargetClarify(ctx, "앞당길");
   }
 
   const rawDays = parseOptionalNumber(args.days);
@@ -380,7 +566,14 @@ function buildPullForwardResult(args: ProgressArgs, ctx: ProgressContext): Progr
     };
   }
 
-  const paceNote = `이번에는 한 번에 ${days}과 앞당깁니다. 매 통화마다 ${days}과씩 나가기는 아직 없습니다`;
+  const paces = Array.from(
+    new Set(changedGoals.map((c) => normalizeLessonsPerCall(c.goal.lessonsPerCall)))
+  );
+  const paceTail =
+    paces.length === 1
+      ? `그 뒤로는 지금처럼 통화를 마칠 때마다 ${paces[0]}과씩 올라갑니다`
+      : "그 뒤로는 지금처럼 통화를 마칠 때마다 트랙별 설정 속도대로 올라갑니다";
+  const paceNote = `이번 한 번만 ${days}과 앞당깁니다. ${paceTail}`;
   const clampNote = clampedOver7
     ? " (한 번에 최대 7과까지만 앞당길 수 있어 7과로 맞췄어요)"
     : "";
@@ -413,6 +606,113 @@ function buildPullForwardResult(args: ProgressArgs, ctx: ProgressContext): Progr
   const reply =
     `진행 중인 목표를 한 번에 앞당기는 안을 준비했어요(${parts.join(", ")}). ` +
     `${paceNote}.${clampNote} ${CALENDAR_INVARIANT}. 카드에서 [승인]하거나 '응'이라고 답해 주세요.`;
+
+  return {
+    type: "proposal",
+    summary,
+    reply,
+    before: { goals: beforeGoals },
+    after: { goals: afterGoals },
+  };
+}
+
+function buildSetPaceResult(
+  args: ProgressArgs,
+  ctx: ProgressContext,
+  forceDays?: number
+): ProgressResult {
+  const resolved = resolveTargetGoalIds(args.goalId, ctx);
+  if ("invalid" in resolved) {
+    return { type: "invalid", reply: resolved.invalid };
+  }
+  if ("clarify" in resolved) {
+    return buildTargetClarify(ctx, "바꿀");
+  }
+
+  let rawDays: number | null = null;
+  if (typeof forceDays === "number" && Number.isInteger(forceDays)) {
+    rawDays = forceDays;
+  } else {
+    const argN = parseOptionalNumber(args.days);
+    if (Number.isInteger(argN)) {
+      rawDays = argN;
+    } else {
+      rawDays = parseDayCount(ctx.userText);
+    }
+  }
+
+  if (rawDays === null) {
+    return {
+      type: "clarify",
+      reply: "매 통화 몇 과씩 올릴까요? 1~3과 중에서 골라 주세요.",
+    };
+  }
+
+  const clampedOver3 = rawDays > MAX_LESSONS_PER_CALL;
+  const newPace = Math.min(Math.max(rawDays, MIN_LESSONS_PER_CALL), MAX_LESSONS_PER_CALL);
+
+  const beforeGoals: GoalIdx = {};
+  const afterGoals: GoalIdx = {};
+  const changedGoals: { goal: ProgressGoal; oldPace: number }[] = [];
+
+  for (const id of resolved.ids) {
+    const goal = ctx.goals.find((g) => g.id === id);
+    if (!goal) continue;
+    const curPace = normalizeLessonsPerCall(goal.lessonsPerCall);
+    if (curPace === newPace) continue;
+    beforeGoals[id] = { lessonsPerCall: curPace };
+    afterGoals[id] = { lessonsPerCall: newPace };
+    changedGoals.push({ goal, oldPace: curPace });
+  }
+
+  if (changedGoals.length === 0) {
+    if (resolved.ids.length === 1) {
+      const goal = ctx.goals.find((g) => g.id === resolved.ids[0]);
+      const name = goal ? goalShortName(goal.id, ctx.goals) : resolved.ids[0];
+      return {
+        type: "noop",
+        reply: `${name}은 이미 매 통화 ${newPace}과씩이에요.`,
+      };
+    }
+    return {
+      type: "noop",
+      reply: `모든 목표가 이미 매 통화 ${newPace}과씩이에요.`,
+    };
+  }
+
+  const clampNote = clampedOver3
+    ? ` (매 통화 최대 3과까지라 3과씩으로 맞췄어요)`
+    : "";
+
+  if (changedGoals.length === 1) {
+    const { goal, oldPace } = changedGoals[0];
+    const name = goalShortName(goal.id, ctx.goals);
+    const sentences = buildPaceSentences({
+      name,
+      cur: goal.nextLessonIndex,
+      oldPace,
+      newPace,
+      last: lastLessonIndex(goal.lessons),
+    });
+    const summary = `${name} 매 통화 ${oldPace}과씩 → ${newPace}과씩`;
+    const reply = `${sentences.join(". ")}.${clampNote} ${CALENDAR_INVARIANT}. 카드에서 [승인]하거나 '응'이라고 답해 주세요.`;
+    return {
+      type: "proposal",
+      summary,
+      reply,
+      before: { goals: beforeGoals },
+      after: { goals: afterGoals },
+    };
+  }
+
+  const parts = changedGoals.map(
+    ({ goal }) => `${goalShortName(goal.id, ctx.goals)} 매 통화 ${newPace}과씩`
+  );
+  const summary = parts.join(", ");
+  const protectNote = newPace > 1 ? " 각 트랙의 마지막 과는 건너뛰지 않습니다." : "";
+  const reply =
+    `진행 중인 목표를 매 통화 ${newPace}과씩 올리도록 바꾸는 안을 준비했어요(${parts.join(", ")}).` +
+    `${protectNote}${clampNote} ${CALENDAR_INVARIANT}. 카드에서 [승인]하거나 '응'이라고 답해 주세요.`;
 
   return {
     type: "proposal",
@@ -519,7 +819,8 @@ function buildSetLessonResult(args: ProgressArgs, ctx: ProgressContext): Progres
 }
 
 export function buildProgressProposal(args: ProgressArgs, ctx: ProgressContext): ProgressResult {
-  const intent = args?.intent;
+  const reconciled = reconcileProgressIntent(args?.intent, ctx.userText);
+  const intent = reconciled.intent;
   if (intent === "undo") {
     return {
       type: "undo_request",
@@ -529,16 +830,112 @@ export function buildProgressProposal(args: ProgressArgs, ctx: ProgressContext):
   if (intent === "postpone") {
     return buildPostponeResult(args, ctx);
   }
-  if (intent === "pull_forward") {
-    return buildPullForwardResult(args, ctx);
+  if (intent === "pull_forward" || intent === "set_pace") {
+    if (reconciled.ambiguousPace) {
+      return buildAmbiguousPaceClarify(args, ctx);
+    }
+    if (intent === "pull_forward") {
+      return buildPullForwardResult(args, ctx);
+    }
+    return buildSetPaceResult(args, ctx, reconciled.forceDays);
   }
   if (intent === "set_lesson") {
     return buildSetLessonResult(args, ctx);
   }
   return {
     type: "invalid",
-    reply: "지원하지 않는 진도 조정 요청이에요. 미루기, 앞당기기, 특정 과 지정, 되돌리기만 도와드릴 수 있어요.",
+    reply: "지원하지 않는 진도 조정 요청이에요. 미루기, 앞당기기, 속도 변경, 특정 과 지정, 되돌리기만 도와드릴 수 있어요.",
   };
+}
+
+/** Builds display lines and approve button label for a progress/pace proposal card. */
+export function buildProgressCardView(
+  change: {
+    before?: { goals?: Record<string, GoalProgressPatch | undefined> };
+    after?: { goals?: Record<string, GoalProgressPatch | undefined> };
+  },
+  ctx: {
+    goals: readonly {
+      id: string;
+      title?: string;
+      nextLessonIndex?: number;
+      lessonsPerCall?: number;
+      lessons?: { index: number }[];
+    }[];
+    weeklyPattern?: Partial<Record<DayKey, string[]>>;
+    todayKst: string;
+  }
+): {
+  title: string;
+  beforeLines: string[];
+  afterLines: string[];
+  detailLines: string[];
+  approveLabel: string;
+} {
+  const beforeLines: string[] = [];
+  const afterLines: string[] = [];
+  const labelParts: string[] = [];
+
+  for (const [gid, patch] of Object.entries(change.after?.goals || {})) {
+    if (!patch || typeof patch !== "object") continue;
+    const goal = ctx.goals.find((g) => g.id === gid);
+    const name = goalShortName(gid, ctx.goals);
+
+    if (typeof patch.nextLessonIndex === "number") {
+      const beforeIdx =
+        change.before?.goals?.[gid]?.nextLessonIndex ?? goal?.nextLessonIndex ?? 1;
+      beforeLines.push(`${name} ${beforeIdx}과`);
+      afterLines.push(`${name} ${patch.nextLessonIndex}과`);
+      labelParts.push(`${name} ${beforeIdx}과 → ${patch.nextLessonIndex}과`);
+    }
+    if (typeof patch.lessonsPerCall === "number") {
+      const beforePace = normalizeLessonsPerCall(
+        change.before?.goals?.[gid]?.lessonsPerCall ?? goal?.lessonsPerCall
+      );
+      beforeLines.push(`${name} 매 통화 ${beforePace}과씩`);
+      afterLines.push(`${name} 매 통화 ${patch.lessonsPerCall}과씩`);
+      labelParts.push(`${name} 매 통화 ${patch.lessonsPerCall}과씩`);
+    }
+  }
+
+  return {
+    title: "📋 진도 조정 제안",
+    beforeLines,
+    afterLines,
+    detailLines: describeProgressChange(change.before, change.after, ctx),
+    approveLabel:
+      labelParts.length === 1 ? `승인 (${labelParts[0]})` : "승인 (진도 변경 적용)",
+  };
+}
+
+/** Formats the coach confirmation reply after applying a plan/progress/pace change. */
+export function formatAppliedProgressReply(
+  change: {
+    after?: { goals?: Record<string, GoalProgressPatch | undefined> };
+  },
+  ctx: {
+    goals: readonly { id: string; title?: string }[];
+    weeklyPattern?: Partial<Record<DayKey, string[]>>;
+    todayKst: string;
+  }
+): string {
+  if (!isProgressChange(change.after)) {
+    return "요청하신 계획 변경을 적용했어요.";
+  }
+  const parts: string[] = [];
+  for (const [gid, patch] of Object.entries(change.after?.goals || {})) {
+    if (!patch || typeof patch !== "object") continue;
+    const name = goalShortName(gid, ctx.goals);
+    if (typeof patch.nextLessonIndex === "number") {
+      const nextDate = nextLessonDate(ctx.weeklyPattern, gid, ctx.todayKst, true);
+      const dateStr = nextDate ? `${formatKstDay(nextDate)}부터 ` : "다음 수업부터 ";
+      parts.push(`${name}은 ${dateStr}${patch.nextLessonIndex}과예요`);
+    }
+    if (typeof patch.lessonsPerCall === "number") {
+      parts.push(`${name}은 앞으로 매 통화 ${patch.lessonsPerCall}과씩 올라가요`);
+    }
+  }
+  return `적용했어요. ${parts.join(", ")}. 구글 캘린더는 바뀌지 않습니다.`;
 }
 
 export function isProgressChange(after: unknown): boolean {
@@ -550,28 +947,39 @@ export function isProgressChange(after: unknown): boolean {
       Boolean(
         g &&
           typeof g === "object" &&
-          typeof (g as { nextLessonIndex?: unknown }).nextLessonIndex === "number"
+          (typeof (g as { nextLessonIndex?: unknown }).nextLessonIndex === "number" ||
+            typeof (g as { lessonsPerCall?: unknown }).lessonsPerCall === "number")
       )
   );
 }
 
 export function isStaleProgressChange(
   change: {
-    before?: { goals?: Record<string, { nextLessonIndex?: number }> };
-    after?: { goals?: Record<string, { nextLessonIndex?: number }> };
+    before?: { goals?: Record<string, GoalProgressPatch | undefined> };
+    after?: { goals?: Record<string, GoalProgressPatch | undefined> };
   },
-  liveGoals: readonly { id: string; nextLessonIndex: number }[]
+  liveGoals: readonly { id: string; nextLessonIndex: number; lessonsPerCall?: number }[]
 ): boolean {
   const afterGoals = change?.after?.goals;
   if (!afterGoals || typeof afterGoals !== "object") return false;
 
   for (const [goalId, afterPatch] of Object.entries(afterGoals)) {
-    if (!afterPatch || typeof afterPatch.nextLessonIndex !== "number") continue;
-    const beforeIdx = change.before?.goals?.[goalId]?.nextLessonIndex;
-    if (typeof beforeIdx !== "number") continue;
-    const live = liveGoals.find((g) => g.id === goalId);
-    if (!live || live.nextLessonIndex !== beforeIdx) {
-      return true;
+    if (!afterPatch || typeof afterPatch !== "object") continue;
+    if (typeof afterPatch.nextLessonIndex === "number") {
+      const beforeIdx = change.before?.goals?.[goalId]?.nextLessonIndex;
+      if (typeof beforeIdx === "number") {
+        const live = liveGoals.find((g) => g.id === goalId);
+        if (!live || live.nextLessonIndex !== beforeIdx) {
+          return true;
+        }
+      }
+    }
+    if (typeof afterPatch.lessonsPerCall === "number") {
+      const beforePace = change.before?.goals?.[goalId]?.lessonsPerCall ?? 1;
+      const live = liveGoals.find((g) => g.id === goalId);
+      if (!live || normalizeLessonsPerCall(live.lessonsPerCall) !== beforePace) {
+        return true;
+      }
     }
   }
   return false;
@@ -582,15 +990,22 @@ export interface UndoCandidateChange {
   status: string;
   at: string;
   appliedAt?: string;
-  before?: { plan?: unknown; goals?: Record<string, { nextLessonIndex?: number } | undefined> };
-  after?: { plan?: unknown; goals?: Record<string, { nextLessonIndex?: number } | undefined> };
+  before?: { plan?: unknown; goals?: Record<string, GoalProgressPatch | undefined> };
+  after?: { plan?: unknown; goals?: Record<string, GoalProgressPatch | undefined> };
 }
+
+export type UndoRestoreEntry = {
+  from?: number;
+  to?: number;
+  paceFrom?: number;
+  paceTo?: number;
+};
 
 export type PickUndoResult =
   | {
       ok: true;
       changeId: string;
-      restore: Record<string, { from: number; to: number }>;
+      restore: Record<string, UndoRestoreEntry>;
     }
   | {
       ok: false;
@@ -600,7 +1015,7 @@ export type PickUndoResult =
 
 export function pickUndoTarget(
   changes: readonly UndoCandidateChange[],
-  liveGoals: readonly { id: string; nextLessonIndex: number }[]
+  liveGoals: readonly { id: string; nextLessonIndex: number; lessonsPerCall?: number }[]
 ): PickUndoResult {
   const candidates = changes.filter(
     (c) => c.status === "approved" && isProgressChange(c.after)
@@ -629,21 +1044,49 @@ export function pickUndoTarget(
     }
   }
 
-  const restore: Record<string, { from: number; to: number }> = {};
+  const restore: Record<string, UndoRestoreEntry> = {};
   const afterGoals = latest.after?.goals || {};
   for (const [goalId, afterPatch] of Object.entries(afterGoals)) {
-    if (!afterPatch || typeof afterPatch.nextLessonIndex !== "number") continue;
+    if (!afterPatch || typeof afterPatch !== "object") continue;
+    const hasLesson = typeof afterPatch.nextLessonIndex === "number";
+    const hasPace = typeof afterPatch.lessonsPerCall === "number";
+    if (!hasLesson && !hasPace) continue;
+
     const live = liveGoals.find((g) => g.id === goalId);
-    if (!live || live.nextLessonIndex !== afterPatch.nextLessonIndex) {
-      return {
-        ok: false,
-        reason: "moved",
-        reply: "그 뒤로 수업을 하셔서 되돌리면 진도가 뒤로 가요. 진도 바꾸기로 직접 지정해 주세요",
-      };
+    const entry: UndoRestoreEntry = {};
+
+    if (hasLesson) {
+      if (!live || live.nextLessonIndex !== afterPatch.nextLessonIndex) {
+        return {
+          ok: false,
+          reason: "moved",
+          reply: "그 뒤로 수업을 하셔서 되돌리면 진도가 뒤로 가요. 진도 바꾸기로 직접 지정해 주세요",
+        };
+      }
+      const beforeIdx = latest.before?.goals?.[goalId]?.nextLessonIndex;
+      if (typeof beforeIdx === "number") {
+        entry.from = afterPatch.nextLessonIndex;
+        entry.to = beforeIdx;
+      }
     }
-    const beforeIdx = latest.before?.goals?.[goalId]?.nextLessonIndex;
-    if (typeof beforeIdx === "number") {
-      restore[goalId] = { from: afterPatch.nextLessonIndex, to: beforeIdx };
+
+    if (hasPace) {
+      if (!live || normalizeLessonsPerCall(live.lessonsPerCall) !== afterPatch.lessonsPerCall) {
+        return {
+          ok: false,
+          reason: "moved",
+          reply: "그 뒤로 수업을 하셔서 되돌리면 진도가 뒤로 가요. 진도 바꾸기로 직접 지정해 주세요",
+        };
+      }
+      const beforePace = latest.before?.goals?.[goalId]?.lessonsPerCall;
+      if (typeof beforePace === "number") {
+        entry.paceFrom = afterPatch.lessonsPerCall;
+        entry.paceTo = beforePace;
+      }
+    }
+
+    if (Object.keys(entry).length > 0) {
+      restore[goalId] = entry;
     }
   }
 
@@ -660,6 +1103,25 @@ export function pickUndoTarget(
     changeId: latest.id,
     restore,
   };
+}
+
+/** Formats the confirmation prompt text for an undo offer card. */
+export function describeUndoOffer(
+  restore: Record<string, UndoRestoreEntry>,
+  goals: readonly { id: string; title?: string }[]
+): string {
+  const parts = Object.entries(restore).map(([gid, r]) => {
+    const name = goalShortName(gid, goals);
+    const segs: string[] = [];
+    if (typeof r.from === "number" && typeof r.to === "number") {
+      segs.push(`${r.from}과 → ${r.to}과`);
+    }
+    if (typeof r.paceFrom === "number" && typeof r.paceTo === "number") {
+      segs.push(`매 통화 ${r.paceFrom}과씩 → ${r.paceTo}과씩`);
+    }
+    return `${name} ${segs.join(", ")}`;
+  });
+  return `${parts.join(", ")}로 되돌릴까요? 구글 캘린더는 바뀌지 않습니다`;
 }
 
 const APPROVE_REPLIES = new Set([

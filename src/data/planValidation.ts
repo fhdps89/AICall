@@ -18,11 +18,25 @@ export interface GoalShape {
 
 export interface SanitizedPlanSnapshot {
   plan?: { weeklyPattern?: Partial<Record<DayKey, string[]>>; minutesPerDay?: number };
-  goals?: Record<string, { nextLessonIndex?: number; deadline?: string; status?: GoalStatus }>;
+  goals?: Record<
+    string,
+    { nextLessonIndex?: number; lessonsPerCall?: number; deadline?: string; status?: GoalStatus }
+  >;
 }
 
 const MIN_MINUTES = 5;
 const MAX_MINUTES = 240;
+
+export const MIN_LESSONS_PER_CALL = 1;
+export const MAX_LESSONS_PER_CALL = 3;
+
+/** Read-time normalizer for GoalData.lessonsPerCall: clamps integer to 1..3, defaults non-integer/missing to 1. */
+export function normalizeLessonsPerCall(v: unknown): number {
+  if (typeof v !== "number" || !Number.isInteger(v)) return MIN_LESSONS_PER_CALL;
+  if (v < MIN_LESSONS_PER_CALL) return MIN_LESSONS_PER_CALL;
+  if (v > MAX_LESSONS_PER_CALL) return MAX_LESSONS_PER_CALL;
+  return v;
+}
 
 function isRealDate(v: unknown): v is string {
   if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
@@ -36,7 +50,7 @@ function isRealDate(v: unknown): v is string {
  * - weeklyPattern days: arrays of known goal ids (a single id string is accepted as [id])
  * - minutesPerDay: whole number 5..240
  * - goal patches: known goals only; nextLessonIndex must be one of that goal's lessons,
- *   deadline a real YYYY-MM-DD date, status active | paused | done
+ *   lessonsPerCall a whole number 1..3, deadline a real YYYY-MM-DD date, status active | paused | done
  */
 export function sanitizePlanChangeAfter(after: unknown, goals: GoalShape[]): SanitizedPlanSnapshot {
   const out: SanitizedPlanSnapshot = {};
@@ -67,9 +81,18 @@ export function sanitizePlanChangeAfter(after: unknown, goals: GoalShape[]): San
     for (const [goalId, raw] of Object.entries(a.goals as Record<string, any>)) {
       const goal = goals.find((g) => g.id === goalId);
       if (!goal || !raw || typeof raw !== "object") continue;
-      const patch: { nextLessonIndex?: number; deadline?: string; status?: GoalStatus } = {};
+      const patch: { nextLessonIndex?: number; lessonsPerCall?: number; deadline?: string; status?: GoalStatus } = {};
       const idx = Number(raw.nextLessonIndex);
       if (raw.nextLessonIndex !== undefined && goal.lessons.some((l) => l.index === idx)) patch.nextLessonIndex = idx;
+      if (
+        raw.lessonsPerCall !== undefined &&
+        typeof raw.lessonsPerCall === "number" &&
+        Number.isInteger(raw.lessonsPerCall) &&
+        raw.lessonsPerCall >= MIN_LESSONS_PER_CALL &&
+        raw.lessonsPerCall <= MAX_LESSONS_PER_CALL
+      ) {
+        patch.lessonsPerCall = raw.lessonsPerCall;
+      }
       if (isRealDate(raw.deadline)) patch.deadline = raw.deadline;
       if (GOAL_STATUSES.includes(raw.status)) patch.status = raw.status;
       if (Object.keys(patch).length > 0) patches[goalId] = patch;

@@ -37,3 +37,24 @@ test('garbage input leaves an empty change', () => {
     assert.ok(isEmptyPlanChange(sanitizePlanChangeAfter(bad, goals)));
   }
 });
+
+test('lessonsPerCall 1..3 is preserved and out-of-range/non-integer values are dropped', () => {
+  const kept = sanitizePlanChangeAfter({ goals: { opic: { lessonsPerCall: 2 } } }, goals);
+  assert.deepEqual(kept, { goals: { opic: { lessonsPerCall: 2 } } });
+  assert.equal(isEmptyPlanChange(kept), false);
+
+  for (const bad of [0, 4, 1.5, '2', null]) {
+    const dropped = sanitizePlanChangeAfter({ goals: { opic: { lessonsPerCall: bad } } }, goals);
+    assert.equal(dropped.goals, undefined);
+    assert.equal(isEmptyPlanChange(dropped), true);
+  }
+
+  const unknownGoal = sanitizePlanChangeAfter({ goals: { ghost: { lessonsPerCall: 2 } } }, goals);
+  assert.equal(isEmptyPlanChange(unknownGoal), true);
+
+  const combined = sanitizePlanChangeAfter(
+    { goals: { opic: { nextLessonIndex: 3, lessonsPerCall: 2 } } },
+    goals
+  );
+  assert.deepEqual(combined, { goals: { opic: { nextLessonIndex: 3, lessonsPerCall: 2 } } });
+});

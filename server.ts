@@ -23,8 +23,8 @@ import { LIVE_LANGUAGE_CODE, normalizeVoiceName } from './src/config/voices.ts';
 import { buildLiveConfigAttempts } from './server/liveConfig.ts';
 import { userRecordingPath as userRecordingPathIn } from './server/recordingPath.ts';
 import { apiError, noKey, NO_KEY_MESSAGE } from './server/errors.ts';
-import { buildProgressProposal, finalizeCoachProgressResponse } from './src/data/progressAdjust.ts';
-import { sanitizePlanChangeAfter, isEmptyPlanChange } from './src/data/planValidation.ts';
+import { buildProgressProposal, finalizeCoachProgressResponse, sanitizeTodayGoalId } from './src/data/progressAdjust.ts';
+import { sanitizePlanChangeAfter, isEmptyPlanChange, normalizeLessonsPerCall } from './src/data/planValidation.ts';
 import {
   MAX_STORAGE_FILE_BYTES,
   STORAGE_FETCH_TIMEOUT_MS,
@@ -1028,7 +1028,7 @@ ${listStr}
 
 // B-9 Requirement 4: Coach LLM chat endpoint (gemini-3.8-flash + function calling)
 app.post('/api/coach/chat', requireAuth, geminiLimit, async (req: Request, res: Response) => {
-  const { text, plan, goals, mistakeStats, recentSessions, memory, history = [] } = req.body || {};
+  const { text, plan, goals, mistakeStats, recentSessions, memory, history = [], todayGoalId: rawTodayGoalId } = req.body || {};
 
   if (!text || typeof text !== 'string' || !text.trim()) {
     res.status(400).json({ ok: false, error: '메시지를 입력해 주세요.' });
@@ -1042,6 +1042,24 @@ app.post('/api/coach/chat', requireAuth, geminiLimit, async (req: Request, res: 
   }
 
   try {
+    const safeGoals = Array.isArray(goals)
+      ? goals
+          .filter((g: any) => g && typeof g.id === 'string')
+          .map((g: any) => ({
+            id: g.id,
+            title: typeof g.title === 'string' ? g.title : undefined,
+            nextLessonIndex: typeof g.nextLessonIndex === 'number' ? g.nextLessonIndex : 1,
+            lessonsPerCall: normalizeLessonsPerCall(g.lessonsPerCall),
+            status: g.status,
+            lessons: Array.isArray(g.lessons)
+              ? g.lessons
+                  .filter((l: any) => l && typeof l.index === 'number')
+                  .map((l: any) => ({ index: l.index }))
+              : [],
+          }))
+      : [];
+    const todayGoalId = sanitizeTodayGoalId(rawTodayGoalId, safeGoals.map((g) => g.id));
+
     const systemInstruction = `당신은 '찬식'님(episode.kim@gmail.com)의 전담 1:1 영어 학습 스케줄/목표 코치입니다.
 [코칭 원칙 - 절대 규칙]:
 1. 오직 학습 계획, 요일별 루틴, 목표(OPIc AL, 필리조선소 주재원, Bluey 듣기, 미국·호주 여행), 진도 및 실수 패턴만 다룹니다.
@@ -1052,12 +1070,18 @@ app.post('/api/coach/chat', requireAuth, geminiLimit, async (req: Request, res: 
    - goalPatches에 { opic: { deadline: "2026-11-29" } }를 넣고,
    - 시험 1~2주 전 구간에 OPIc 실전 모의고사(14과)를 월·토 OPIc 슬롯에 집중 배치하는 제안을 만드세요.
 6. 사용자가 학습 제약(출장, 시간 부족 등), 선호도(선호 시간대, 선호 과목 등), 본인의 취약점(문법, 발음 등)을 언급하면 memoryPatch({ constraints?, preferences?, weakPoints? })에 포함시켜 기록하도록 제안하세요.
-7. 진도 미루기·땡기기·"N과로"·되돌리기는 반드시 'propose_progress_adjust'만 쓰고 nextLessonIndex를 직접 계산하지 않는다. "시험"이 나오면 goalId는 opic, "전부"는 all, 트랙이 불분명하면 today. 진도는 통화를 끝낼 때만 1과씩 오르고 요일 패턴은 바꾸지 않는다.
+7. 진도 미루기·땡기기·속도("N과씩")·"N과로"·되돌리기는 반드시 'propose_progress_adjust'만 쓰고 nextLessonIndex를 직접 계산하지 않는다.
+   - "씩·매 통화·앞으로·속도"는 set_pace(days 1~3), "한 번만·점프"는 pull_forward다.
+   - "원래 속도로"는 set_pace(days 1), "미뤄"는 postpone이다.
+   - 날수만 있고 둘 다 없으면 그대로 호출한다(서버가 되묻는다).
+   - 되묻기에 대한 답이면 이전 대화의 트랙과 과 수를 goalId·days에 명시한다.
+   - "시험"이 나오면 goalId는 opic, "전부"는 all, 트랙이 불분명하면 today. 진도는 통화를 마칠 때 트랙별 페이스만큼 오르고 요일 패턴은 바꾸지 않는다.
 8. 앱은 구글 캘린더를 바꾸지 않는다.
 
 [현재 사용자 상태]:
 - 현재 주간 계획(plan.weeklyPattern): ${JSON.stringify(plan?.weeklyPattern || { mon:['opic'], tue:['philly'], wed:['bluey'], thu:['philly'], fri:['travel'], sat:['opic'], sun:[] })}
-- 목표별 진도: ${JSON.stringify((goals || []).map((g: any) => ({ id: g.id, title: g.title, nextLessonIndex: g.nextLessonIndex, status: g.status, deadline: g.deadline || null })))}
+- 목표별 진도: ${JSON.stringify((goals || []).map((g: any) => ({ id: g.id, title: g.title, nextLessonIndex: g.nextLessonIndex, lessonsPerCall: g.lessonsPerCall ?? 1, status: g.status, deadline: g.deadline || null })))}
+- 오늘 고른 트랙: ${todayGoalId || '없음(요일 패턴대로)'}
 - 복습 통계: ${JSON.stringify(mistakeStats || { reviewing: 0, graduated: 0, dueToday: 0 })}
 - 최근 7일 세션: ${JSON.stringify(recentSessions || [])}
 - 코치 메모리: ${JSON.stringify(memory || { constraints: [], preferences: [], weakPoints: [] })}`;
@@ -1109,12 +1133,12 @@ app.post('/api/coach/chat', requireAuth, geminiLimit, async (req: Request, res: 
         properties: {
           intent: {
             type: Type.STRING,
-            enum: ['postpone', 'pull_forward', 'set_lesson', 'undo'],
+            enum: ['postpone', 'pull_forward', 'set_lesson', 'set_pace', 'undo'],
             description: '진도 조정 의도',
           },
           days: {
             type: Type.INTEGER,
-            description: 'pull_forward 시 앞당길 과 수 (1~7)',
+            description: 'pull_forward: 한 번에 앞당길 과 수(1~7) / set_pace: 매 통화 올라갈 과 수(1~3)',
           },
           goalId: {
             type: Type.STRING,
@@ -1195,27 +1219,12 @@ app.post('/api/coach/chat', requireAuth, geminiLimit, async (req: Request, res: 
 
       const progressCall = functionCalls.find((c: any) => c.name === 'propose_progress_adjust');
       if (progressCall) {
-        const safeGoals = Array.isArray(goals)
-          ? goals
-              .filter((g: any) => g && typeof g.id === 'string')
-              .map((g: any) => ({
-                id: g.id,
-                title: typeof g.title === 'string' ? g.title : undefined,
-                nextLessonIndex: typeof g.nextLessonIndex === 'number' ? g.nextLessonIndex : 1,
-                status: g.status,
-                lessons: Array.isArray(g.lessons)
-                  ? g.lessons
-                      .filter((l: any) => l && typeof l.index === 'number')
-                      .map((l: any) => ({ index: l.index }))
-                  : [],
-              }))
-          : [];
-
         const progressResult = buildProgressProposal((progressCall.args as any) || {}, {
           goals: safeGoals,
           weeklyPattern: plan?.weeklyPattern,
           todayKst: kstToday(),
           userText: text,
+          todayGoalId,
         });
 
         const sanitized = progressResult.type === 'proposal'
