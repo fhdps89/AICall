@@ -140,6 +140,8 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
                   ? "새 실수·복습 대상이 없어요"
                   : lecture.error === "INTERRUPTED"
                   ? "서버가 다시 시작되어 만들던 강의가 멈췄어요. 다시 만들어 주세요."
+                  : lecture.error === "TIMED_OUT"
+                  ? "시간이 초과되어 강의 만들기가 멈췄어요. 다시 만들어 주세요."
                   : "강의를 만들지 못했어요. 잠시 후 다시 만들어 주세요."}
               </div>
             )}
