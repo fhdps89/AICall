@@ -4,6 +4,20 @@
 
 ---
 
+### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 코치 자연어 진도 조정 (`propose_progress_adjust`, 확인 후 반영, QA/stale/moved 가드) (브랜치 `englead/coach-progress-adjust-20261122`)
+- **배경**: 원콜 「코치와 대화하기」에서 "하루 미뤄줘", "시험 때문에 이틀치 땡겨줘", "여행 5과부터 할래", "방금 거 되돌려줘" 같은 자연어 진도 조정 요청을 받고, 사용자 확인 후에만 기존 `planChanges` → `goals.nextLessonIndex` 경로로 안전하게 반영할 수 있어야 한다. 머지·배포는 하지 않음.
+- **원인**: 기존 코치 도구(`propose_plan_change`)는 자유 형식 `goalPatches`에 의존해 `nextLessonIndex` 경계·요일 패턴 계산·되돌리기·QA 가드가 일관되지 않았고, 미루기(`postpone`)나 "씩" 반복 속도 오해, 빠른 확인 답장 처리가 없었다.
+- **수정**:
+  - **순수 진도 조정 규칙 (`src/data/progressAdjust.ts`, 신규)**: Firebase·DOM 의존 없이 `buildProgressProposal` (`postpone`은 항상 `noop` + `nextLessonDate(..., includeToday=true)` 안내, `pull_forward`는 1~7과 1회 점프 + 매 통화 반복 미지원 및 캘린더 불변 명시 + `after.plan` 미생성, `set_lesson`은 과 범위 검사, `undo`는 `undo_request`), `clampDays`, `resolveTargetGoalIds`("시험"→`opic`, `"today"`, `"all"` active만, 복기일 `clarify`), `describeProgressChange`, `isProgressChange`, `isStaleProgressChange`, `pickUndoTarget`, `classifyQuickReply`, `qaBlocksPlanChange` 구현.
+  - **서버 엔드포인트 (`server.ts`, `/api/coach/chat`)**: `propose_progress_adjust` 도구 선언(`intent` 필수) 및 시스템 프롬프트 규칙 7·8 추가. 호출 시 `buildProgressProposal` + `sanitizePlanChangeAfter`로 서버에서 `after`와 `reply`를 결정론적으로 생성(진도 제안 우선 시 LLM 텍스트 폐기, `undo_request`는 `progress: { type: "undo_request" }` 반환).
+  - **코치 UI (`src/ui/coach/CoachModal.tsx`)**: 전송 전 `classifyQuickReply` 분기(승인·거절은 대기 카드 1개일 때만 LLM 없이 실행, 2개 이상이면 카드 버튼 안내), 진도 조정 카드 UI(건드린 목표만 짧은 이름 표시, `describeProgressChange` 목록, QA 모드 시 미리보기만 띄우고 `createPlanChange`·실제 적용 차단), 로컬 `undoOffer` 카드(`confirm()` 생략), `handleApplyChange` stale 가드 및 `handleRevertChange` `moved`·QA 가드, 환영 문구 1줄 및 `⏩ "OPIc 이틀치 땡겨줘"` 칩 추가.
+  - **문서 (`PROJECT_CONTEXT.md`)**: 「코치 UI 및 LLM 통제」에 `propose_progress_adjust`, 의도 규칙, QA 가드, 캘린더 불변을 추가.
+- **방어 조치 (Safeguards)**: `tests/progressAdjust.test.ts`(설계 5절 케이스 1–19) 추가, `tests/serverNodeImports.test.ts`로 순수 node 로드 검증, `tests/userFacingText.test.ts`로 UI 내부 용어 비노출 검증.
+- **검증**: `npm test`(383/383 통과), `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build` 통과. 머지·배포 미실행.
+- **모델 및 PR 겹침 메모**: 설계 Claude CLI Opus 5.5 high, 구현 agy gemini-4-hydrogen-high. #41·#42와 같은 문서 상단을 수정함, 코드 파일 겹침 없음(`qaMode`는 import만, `HomeScreen`/`db.ts` 미수정).
+
+---
+
 ### [2026-11-22 KST] 핫픽스 — 배포 서버 기동 실패(ERR_MODULE_NOT_FOUND lecturePick) 수정 (브랜치 `englead/hotfix-server-imports-20261122`)
 - **배경**: PR #39(main `970605d`) 머지 후 AI Studio 재게시가 「Failed to publish app」으로 실패했다. 라이브는 이전 번들(`index-Lqzg9F7x.js`) 그대로.
 - **원인**: #39에서 `server.ts`가 `src/services/lecture/lectureSource.ts`를 새로 불러오는데, 이 파일은 `./lecturePick`, `../review/speechCheck`를 확장자 없이 import한다. 배포 서버는 `node server.ts`(tsx 없음)라 확장자 없는 경로를 찾지 못해 컨테이너가 exit(1). 테스트·dev는 tsx라 통과했다.

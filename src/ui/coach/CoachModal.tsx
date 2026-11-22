@@ -24,6 +24,7 @@ import {
   CoachMemoryData,
   CoachMessageData,
   getUserPlan,
+  getUserGoals,
   getPlanChanges,
   createPlanChange,
   applyPlanChange,
@@ -40,6 +41,19 @@ import {
 } from "../../services/firebase/db";
 import { authFetch } from "../../services/api/authFetch";
 import { sanitizePlanChangeAfter, isEmptyPlanChange } from "../../data/planValidation";
+import { isQaMode } from "../../data/qaMode";
+import {
+  classifyQuickReply,
+  describeProgressChange,
+  formatKstDay,
+  goalShortName,
+  isProgressChange,
+  isStaleProgressChange,
+  kstTodayStr,
+  nextLessonDate,
+  pickUndoTarget,
+  qaBlocksPlanChange,
+} from "../../data/progressAdjust";
 
 const DAY_LABELS: Record<string, string> = {
   mon: "월",
@@ -80,11 +94,17 @@ export const CoachModal: React.FC<CoachModalProps> = ({
   });
   const [expandedChangeId, setExpandedChangeId] = useState<string | null>(null);
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
+  const [undoOffer, setUndoOffer] = useState<{
+    changeId: string;
+    restore: Record<string, { from: number; to: number }>;
+  } | null>(null);
+  const [undoLoading, setUndoLoading] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const loadData = async () => {
     if (!userId) return;
+    setUndoOffer(null);
     try {
       const [p, changes, mem, msgs] = await Promise.all([
         getUserPlan(userId),
@@ -101,7 +121,9 @@ export const CoachModal: React.FC<CoachModalProps> = ({
         const initialMsg: CoachMessageData = {
           id: "welcome",
           role: "coach",
-          text: "안녕하세요 찬식님! 전담 영어 학습 코치입니다. 출장, 시험 일정, 바쁜 요일 등 학습 패턴 변경이나 목표 조정이 필요하시면 언제든 말씀해 주세요.",
+          text:
+            "안녕하세요 찬식님! 전담 영어 학습 코치입니다. 출장, 시험 일정, 바쁜 요일 등 학습 패턴 변경이나 목표 조정이 필요하시면 언제든 말씀해 주세요." +
+            "\n\n진도도 말로 바꿀 수 있어요. 예: 「시험이 얼마 안 남아서 OPIc 이틀치 땡겨줘」, 「여행은 5과부터 할래」, 「방금 거 되돌려줘」",
           at: new Date().toISOString(),
         };
         setMessages([initialMsg]);
@@ -125,6 +147,58 @@ export const CoachModal: React.FC<CoachModalProps> = ({
 
   if (!isOpen) return null;
 
+  const appendAndSaveCoachMessage = async (
+    text: string,
+    opts?: { planChangeId?: string; planChange?: PlanChangeData; persistChangeId?: boolean }
+  ) => {
+    const coachMsg: CoachMessageData = {
+      id: `coach-${Date.now()}`,
+      role: "coach",
+      text,
+      at: new Date().toISOString(),
+      planChangeId: opts?.planChangeId,
+      planChange: opts?.planChange,
+    };
+    await saveCoachMessage(userId, {
+      role: "coach",
+      text: coachMsg.text,
+      at: coachMsg.at,
+      ...(opts?.persistChangeId !== false && opts?.planChangeId ? { planChangeId: opts.planChangeId } : {}),
+    }).catch(() => {});
+    setMessages((prev) => [...prev, coachMsg]);
+  };
+
+  const runLocalUndoFlow = async (fallbackText?: string): Promise<string> => {
+    const [latestChanges, liveGoals] = await Promise.all([
+      getPlanChanges(userId),
+      getUserGoals(userId),
+    ]);
+    setPlanChanges(latestChanges);
+    const pick = pickUndoTarget(latestChanges, liveGoals);
+    if (!pick.ok) {
+      setUndoOffer(null);
+      return pick.reply;
+    }
+    setUndoOffer({ changeId: pick.changeId, restore: pick.restore });
+    return fallbackText || "방금 바꾼 진도를 되돌릴까요? 아래 카드에서 확인해 주세요.";
+  };
+
+  const formatAppliedProgressReply = (change: PlanChangeData): string => {
+    if (!isProgressChange(change.after)) {
+      return "요청하신 계획 변경을 적용했어요.";
+    }
+    const todayKst = kstTodayStr();
+    const parts = Object.entries(change.after?.goals || {})
+      .filter(([, g]) => typeof g?.nextLessonIndex === "number")
+      .map(([gid, g]) => {
+        const name = goalShortName(gid, goals);
+        const nextDate = nextLessonDate(plan?.weeklyPattern, gid, todayKst, true);
+        const dateStr = nextDate ? `${formatKstDay(nextDate)}부터 ` : "다음 수업부터 ";
+        return `${name}은 ${dateStr}${g.nextLessonIndex}과예요`;
+      });
+    return `적용했어요. ${parts.join(", ")}. 구글 캘린더는 바뀌지 않습니다.`;
+  };
+
   const handleSendMessage = async (customPrompt?: string) => {
     const textToSend = (customPrompt || inputText).trim();
     if (!textToSend || isLoading) return;
@@ -141,12 +215,44 @@ export const CoachModal: React.FC<CoachModalProps> = ({
     setIsLoading(true);
 
     try {
-      // 1. Save user message to Firestore
+      // 1. Save user message
       await saveCoachMessage(userId, {
         role: "user",
         text: textToSend,
         at: userMsg.at,
       }).catch(() => {});
+
+      // 1-a. Quick reply check before calling LLM
+      const pendingChanges = planChanges.filter((c) => c.status === "proposed");
+      const quick = classifyQuickReply(textToSend, { hasPending: pendingChanges.length > 0 });
+
+      if (quick === "approve" || quick === "reject") {
+        if (pendingChanges.length >= 2) {
+          await appendAndSaveCoachMessage("대기 중인 제안이 여러 개 있어요. 카드의 버튼으로 골라 주세요.");
+          return;
+        }
+        if (pendingChanges.length === 1) {
+          const target = pendingChanges[0];
+          if (quick === "approve") {
+            const resApply = await handleApplyChange(target.id);
+            if (resApply.ok) {
+              await appendAndSaveCoachMessage(formatAppliedProgressReply(target));
+            } else if (resApply.reason) {
+              await appendAndSaveCoachMessage(resApply.reason);
+            }
+          } else {
+            await handleRejectChange(target.id);
+            await appendAndSaveCoachMessage("제안을 거절했어요. 기존 진도와 일정은 그대로 유지됩니다.");
+          }
+          return;
+        }
+      }
+
+      if (quick === "undo") {
+        const undoReply = await runLocalUndoFlow();
+        await appendAndSaveCoachMessage(undoReply);
+        return;
+      }
 
       // 2. Fetch stats for coach context
       const [allM, dueM] = await Promise.all([
@@ -180,10 +286,9 @@ export const CoachModal: React.FC<CoachModalProps> = ({
 
       let planChangeId: string | undefined = undefined;
       let createdChange: PlanChangeData | undefined = undefined;
+      let persistChangeId = true;
 
-      // 4. If coach proposed a plan change, save it to planChanges collection with status: proposed
-      // Drop anything in the coach's proposal that does not fit the app's data; a proposal with
-      // nothing valid left gets no card (memory notes below are still kept).
+      // 4. If coach proposed a plan change, validate it before saving/showing
       const safeAfter = data.proposal ? sanitizePlanChangeAfter(data.proposal.after, goals) : null;
       if (data.proposal && safeAfter && !isEmptyPlanChange(safeAfter)) {
         const changePayload = {
@@ -195,15 +300,24 @@ export const CoachModal: React.FC<CoachModalProps> = ({
           at: new Date().toISOString(),
         };
 
-        planChangeId = await createPlanChange(userId, changePayload);
-        createdChange = {
-          ...changePayload,
-          id: planChangeId,
-        };
+        if (isProgressChange(safeAfter) && isQaMode()) {
+          planChangeId = `qa-preview-${Date.now()}`;
+          createdChange = {
+            ...changePayload,
+            id: planChangeId,
+          };
+          persistChangeId = false;
+        } else {
+          planChangeId = await createPlanChange(userId, changePayload);
+          createdChange = {
+            ...changePayload,
+            id: planChangeId,
+          };
 
-        // Refresh planChanges list
-        const updatedChanges = await getPlanChanges(userId);
-        setPlanChanges(updatedChanges);
+          // Refresh planChanges list
+          const updatedChanges = await getPlanChanges(userId);
+          setPlanChanges(updatedChanges);
+        }
       }
 
       // If memory patch provided, update coachMemory
@@ -221,24 +335,17 @@ export const CoachModal: React.FC<CoachModalProps> = ({
         setMemory(newMem);
       }
 
+      let replyText = data.reply || "네, 확인했습니다.";
+      if (data.progress?.type === "undo_request") {
+        replyText = await runLocalUndoFlow(data.reply);
+      }
+
       // 5. Save coach message
-      const coachMsg: CoachMessageData = {
-        id: `coach-${Date.now()}`,
-        role: "coach",
-        text: data.reply || "네, 확인했습니다.",
-        at: new Date().toISOString(),
+      await appendAndSaveCoachMessage(replyText, {
         planChangeId,
         planChange: createdChange,
-      };
-
-      await saveCoachMessage(userId, {
-        role: "coach",
-        text: coachMsg.text,
-        at: coachMsg.at,
-        planChangeId,
-      }).catch(() => {});
-
-      setMessages((prev) => [...prev, coachMsg]);
+        persistChangeId,
+      });
     } catch (err: any) {
       console.error("[CoachModal] Send error:", err);
       const errorMsg: CoachMessageData = {
@@ -253,9 +360,41 @@ export const CoachModal: React.FC<CoachModalProps> = ({
     }
   };
 
-  const handleApplyChange = async (changeId: string) => {
+  const findChangeById = (changeId: string): PlanChangeData | undefined => {
+    return (
+      planChanges.find((c) => c.id === changeId) ||
+      messages.find((m) => m.planChange?.id === changeId)?.planChange
+    );
+  };
+
+  const handleApplyChange = async (changeId: string): Promise<{ ok: boolean; reason?: string }> => {
+    const targetChange = findChangeById(changeId);
+    if (targetChange && qaBlocksPlanChange(targetChange.after, isQaMode())) {
+      const msg = "QA 모드에서는 실제 진도를 바꾸지 않습니다.";
+      alert(msg);
+      return { ok: false, reason: msg };
+    }
+
     setActionLoadingId(changeId);
     try {
+      if (targetChange && isProgressChange(targetChange.after)) {
+        const liveGoals = await getUserGoals(userId);
+        if (isStaleProgressChange(targetChange, liveGoals)) {
+          const changedGoalId = Object.entries(targetChange.after?.goals || {}).find(
+            ([, patch]) => typeof patch?.nextLessonIndex === "number"
+          )?.[0];
+          const liveIdx = changedGoalId
+            ? liveGoals.find((g) => g.id === changedGoalId)?.nextLessonIndex
+            : undefined;
+          const msg =
+            typeof liveIdx === "number"
+              ? `그 사이 진도가 ${liveIdx}과로 바뀌었어요. 다시 요청해 주세요.`
+              : "그 사이 진도가 바뀌었어요. 다시 요청해 주세요.";
+          alert(msg);
+          return { ok: false, reason: msg };
+        }
+      }
+
       await applyPlanChange(userId, changeId);
       // Refresh local states
       const [updatedPlan, updatedChanges] = await Promise.all([
@@ -276,8 +415,11 @@ export const CoachModal: React.FC<CoachModalProps> = ({
 
       // Trigger app-wide plan & goals refresh
       await onPlanUpdated();
+      return { ok: true };
     } catch (err: any) {
-      alert(`적용 오류: ${friendlyError(err)}`);
+      const errMsg = friendlyError(err);
+      alert(`적용 오류: ${errMsg}`);
+      return { ok: false, reason: errMsg };
     } finally {
       setActionLoadingId(null);
     }
@@ -305,6 +447,23 @@ export const CoachModal: React.FC<CoachModalProps> = ({
   };
 
   const handleRevertChange = async (changeId: string) => {
+    const targetChange = findChangeById(changeId);
+    if (targetChange && isProgressChange(targetChange.after)) {
+      if (qaBlocksPlanChange(targetChange.after, isQaMode())) {
+        alert("QA 모드에서는 실제 진도를 바꾸지 않습니다.");
+        return;
+      }
+      const liveGoals = await getUserGoals(userId);
+      for (const [gid, patch] of Object.entries(targetChange.after?.goals || {})) {
+        if (typeof patch?.nextLessonIndex !== "number") continue;
+        const live = liveGoals.find((g) => g.id === gid);
+        if (!live || live.nextLessonIndex !== patch.nextLessonIndex) {
+          alert("그 뒤로 수업을 하셔서 되돌리면 진도가 뒤로 가요. 진도 바꾸기로 직접 지정해 주세요.");
+          return;
+        }
+      }
+    }
+
     if (!confirm("이 변경을 되돌리고 이전 상태로 복구하시겠습니까?")) return;
     setActionLoadingId(changeId);
     try {
@@ -320,6 +479,45 @@ export const CoachModal: React.FC<CoachModalProps> = ({
       alert(`되돌리기 오류: ${friendlyError(err)}`);
     } finally {
       setActionLoadingId(null);
+    }
+  };
+
+  const handleConfirmUndoOffer = async () => {
+    if (!undoOffer || undoLoading) return;
+    if (isQaMode()) {
+      alert("QA 모드에서는 실제 진도를 바꾸지 않습니다.");
+      setUndoOffer(null);
+      return;
+    }
+
+    setUndoLoading(true);
+    try {
+      const [latestChanges, liveGoals] = await Promise.all([
+        getPlanChanges(userId),
+        getUserGoals(userId),
+      ]);
+      const pick = pickUndoTarget(latestChanges, liveGoals);
+      if (!pick.ok || pick.changeId !== undoOffer.changeId) {
+        const msg = !pick.ok ? pick.reply : "되돌릴 대상을 다시 확인해 주세요.";
+        setUndoOffer(null);
+        await appendAndSaveCoachMessage(msg);
+        return;
+      }
+
+      await revertPlanChange(userId, undoOffer.changeId);
+      const [updatedPlan, updatedChanges] = await Promise.all([
+        getUserPlan(userId),
+        getPlanChanges(userId),
+      ]);
+      setPlan(updatedPlan);
+      setPlanChanges(updatedChanges);
+      setUndoOffer(null);
+      await onPlanUpdated();
+      await appendAndSaveCoachMessage("진도를 이전 상태로 되돌렸어요. 구글 캘린더는 바뀌지 않습니다.");
+    } catch (err: any) {
+      alert(`되돌리기 오류: ${friendlyError(err)}`);
+    } finally {
+      setUndoLoading(false);
     }
   };
 
@@ -445,13 +643,43 @@ export const CoachModal: React.FC<CoachModalProps> = ({
                     </div>
 
                     {/* Linked Plan Change Card */}
-                    {linkedChange && (
+                    {linkedChange && (() => {
+                      const progressCard = isProgressChange(linkedChange.after);
+                      const touchedProgressEntries = progressCard
+                        ? Object.entries(linkedChange.after?.goals || {}).filter(
+                            ([, g]: [string, any]) => typeof g?.nextLessonIndex === "number"
+                          )
+                        : [];
+                      const progressLines = progressCard
+                        ? describeProgressChange(linkedChange.before, linkedChange.after, {
+                            goals,
+                            weeklyPattern: plan?.weeklyPattern,
+                            todayKst: kstTodayStr(),
+                          })
+                        : [];
+                      const qaBlocked = qaBlocksPlanChange(linkedChange.after, isQaMode());
+                      const approveLabel = (() => {
+                        if (!progressCard) return "승인 (적용하기)";
+                        if (touchedProgressEntries.length === 1) {
+                          const [gid, g]: [string, any] = touchedProgressEntries[0];
+                          const beforeIdx =
+                            linkedChange.before?.goals?.[gid]?.nextLessonIndex ??
+                            goals.find((goal) => goal.id === gid)?.nextLessonIndex;
+                          const name = goalShortName(gid, goals);
+                          return typeof beforeIdx === "number"
+                            ? `승인 (${name} ${beforeIdx}과 → ${g.nextLessonIndex}과)`
+                            : `승인 (${name} ${g.nextLessonIndex}과)`;
+                        }
+                        return "승인 (진도 변경 적용)";
+                      })();
+
+                      return (
                       <div className="w-full max-w-[92%] mt-2.5 p-4 rounded-2xl bg-[#131A26] border border-amber-500/40 shadow-xl space-y-3">
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-1.5">
                             <Sparkles className="w-4 h-4 text-amber-400" />
                             <span className="text-xs font-bold text-amber-300">
-                              📋 계획 변경 제안
+                              {progressCard ? "📋 진도 조정 제안" : "📋 계획 변경 제안"}
                             </span>
                           </div>
                           <span
@@ -486,20 +714,36 @@ export const CoachModal: React.FC<CoachModalProps> = ({
                               [현재 상태]
                             </span>
                             <div className="space-y-0.5 text-slate-300">
-                              {linkedChange.before?.plan?.weeklyPattern && (
-                                <p className="truncate">
-                                  루틴: {Object.entries(linkedChange.before.plan.weeklyPattern)
-                                    .filter(([_, v]) => Array.isArray(v) && v.length > 0)
-                                    .map(([k, v]) => `${DAY_LABELS[k] || k}:${v[0]}`)
-                                    .join(", ")}
-                                </p>
+                              {progressCard ? (
+                                touchedProgressEntries.map(([gid]) => {
+                                  const beforeIdx =
+                                    linkedChange.before?.goals?.[gid]?.nextLessonIndex ??
+                                    goals.find((goal) => goal.id === gid)?.nextLessonIndex ??
+                                    1;
+                                  return (
+                                    <p key={gid} className="truncate">
+                                      {goalShortName(gid, goals)} {beforeIdx}과
+                                    </p>
+                                  );
+                                })
+                              ) : (
+                                <>
+                                  {linkedChange.before?.plan?.weeklyPattern && (
+                                    <p className="truncate">
+                                      루틴: {Object.entries(linkedChange.before.plan.weeklyPattern)
+                                        .filter(([_, v]) => Array.isArray(v) && v.length > 0)
+                                        .map(([k, v]) => `${DAY_LABELS[k] || k}:${v[0]}`)
+                                        .join(", ")}
+                                    </p>
+                                  )}
+                                  {linkedChange.before?.goals &&
+                                    Object.entries(linkedChange.before.goals).map(([gid, g]: [string, any]) => (
+                                      <p key={gid} className="truncate">
+                                        {gid}: {g.deadline ? `시험 ${g.deadline.slice(5)}` : `${g.nextLessonIndex || 1}과`}
+                                      </p>
+                                    ))}
+                                </>
                               )}
-                              {linkedChange.before?.goals &&
-                                Object.entries(linkedChange.before.goals).map(([gid, g]: [string, any]) => (
-                                  <p key={gid} className="truncate">
-                                    {gid}: {g.deadline ? `시험 ${g.deadline.slice(5)}` : `${g.nextLessonIndex || 1}과`}
-                                  </p>
-                                ))}
                             </div>
                           </div>
 
@@ -508,54 +752,111 @@ export const CoachModal: React.FC<CoachModalProps> = ({
                               [제안 변경안]
                             </span>
                             <div className="space-y-0.5 text-amber-200">
-                              {linkedChange.after?.plan?.weeklyPattern && (
-                                <p className="truncate">
-                                  루틴: {Object.entries(linkedChange.after.plan.weeklyPattern)
-                                    .filter(([_, v]) => Array.isArray(v) && v.length > 0)
-                                    .map(([k, v]) => `${DAY_LABELS[k] || k}:${v[0]}`)
-                                    .join(", ")}
-                                </p>
-                              )}
-                              {linkedChange.after?.goals &&
-                                Object.entries(linkedChange.after.goals).map(([gid, g]: [string, any]) => (
+                              {progressCard ? (
+                                touchedProgressEntries.map(([gid, g]: [string, any]) => (
                                   <p key={gid} className="truncate font-medium">
-                                    {gid}: {g.deadline ? `시험일 ${g.deadline}` : g.status ? `상태 ${g.status}` : `${g.nextLessonIndex}과`}
+                                    {goalShortName(gid, goals)} {g.nextLessonIndex}과
                                   </p>
-                                ))}
+                                ))
+                              ) : (
+                                <>
+                                  {linkedChange.after?.plan?.weeklyPattern && (
+                                    <p className="truncate">
+                                      루틴: {Object.entries(linkedChange.after.plan.weeklyPattern)
+                                        .filter(([_, v]) => Array.isArray(v) && v.length > 0)
+                                        .map(([k, v]) => `${DAY_LABELS[k] || k}:${v[0]}`)
+                                        .join(", ")}
+                                    </p>
+                                  )}
+                                  {linkedChange.after?.goals &&
+                                    Object.entries(linkedChange.after.goals).map(([gid, g]: [string, any]) => (
+                                      <p key={gid} className="truncate font-medium">
+                                        {gid}: {g.deadline ? `시험일 ${g.deadline}` : g.status ? `상태 ${g.status}` : `${g.nextLessonIndex}과`}
+                                      </p>
+                                    ))}
+                                </>
+                              )}
                             </div>
                           </div>
                         </div>
 
+                        {progressCard && progressLines.length > 0 && (
+                          <ul className="space-y-1 text-[11px] text-slate-300 bg-slate-900/40 rounded-xl px-3 py-2 border border-slate-800/80">
+                            {progressLines.map((line, i) => (
+                              <li key={i}>• {line}</li>
+                            ))}
+                          </ul>
+                        )}
+
                         {/* Action buttons if status === 'proposed' */}
                         {linkedChange.status === "proposed" && (
-                          <div className="flex gap-2 pt-1">
-                            <button
-                              onClick={() => handleApplyChange(linkedChange.id)}
-                              disabled={actionLoadingId === linkedChange.id}
-                              className="flex-1 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer shadow-lg shadow-emerald-600/20 active:scale-95"
-                            >
-                              {actionLoadingId === linkedChange.id ? (
-                                <Loader2 size={13} className="animate-spin" />
-                              ) : (
-                                <CheckCircle2 size={14} />
-                              )}
-                              <span>승인 (적용하기)</span>
-                            </button>
+                          qaBlocked ? (
+                            <p className="text-[11px] font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-xl px-3 py-2">
+                              QA 모드에서는 실제 진도를 바꾸지 않습니다
+                            </p>
+                          ) : (
+                            <div className="flex gap-2 pt-1">
+                              <button
+                                onClick={() => handleApplyChange(linkedChange.id)}
+                                disabled={actionLoadingId === linkedChange.id}
+                                className="flex-1 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer shadow-lg shadow-emerald-600/20 active:scale-95"
+                              >
+                                {actionLoadingId === linkedChange.id ? (
+                                  <Loader2 size={13} className="animate-spin" />
+                                ) : (
+                                  <CheckCircle2 size={14} />
+                                )}
+                                <span>{approveLabel}</span>
+                              </button>
 
-                            <button
-                              onClick={() => handleRejectChange(linkedChange.id)}
-                              disabled={actionLoadingId === linkedChange.id}
-                              className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 font-medium text-xs transition cursor-pointer"
-                            >
-                              <span>거절</span>
-                            </button>
-                          </div>
+                              <button
+                                onClick={() => handleRejectChange(linkedChange.id)}
+                                disabled={actionLoadingId === linkedChange.id}
+                                className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 font-medium text-xs transition cursor-pointer"
+                              >
+                                <span>거절</span>
+                              </button>
+                            </div>
+                          )
                         )}
                       </div>
-                    )}
+                      );
+                    })()}
                   </div>
                 );
               })}
+
+              {undoOffer && (
+                <div className="w-full max-w-[92%] p-4 rounded-2xl bg-[#131A26] border border-purple-500/40 shadow-xl space-y-3">
+                  <div className="flex items-center gap-1.5">
+                    <RotateCcw className="w-4 h-4 text-purple-400" />
+                    <span className="text-xs font-bold text-purple-300">진도 되돌리기 확인</span>
+                  </div>
+                  <p className="text-xs text-slate-200">
+                    {Object.entries(undoOffer.restore)
+                      .map(([gid, r]) => `${goalShortName(gid, goals)} ${r.from}과 → ${r.to}과`)
+                      .join(", ")}
+                    로 되돌릴까요? 구글 캘린더는 바뀌지 않습니다
+                  </p>
+                  <div className="flex gap-2 pt-1">
+                    <button
+                      onClick={handleConfirmUndoOffer}
+                      disabled={undoLoading}
+                      className="flex-1 py-2 px-3 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
+                    >
+                      {undoLoading ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}
+                      <span>되돌리기</span>
+                    </button>
+                    <button
+                      onClick={() => setUndoOffer(null)}
+                      disabled={undoLoading}
+                      className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 font-medium text-xs transition cursor-pointer"
+                    >
+                      <span>그대로 두기</span>
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {isLoading && (
                 <div className="flex items-center gap-2 text-xs text-amber-400 p-2 animate-pulse">
@@ -823,6 +1124,12 @@ export const CoachModal: React.FC<CoachModalProps> = ({
               className="shrink-0 px-2.5 py-1 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700/60 transition cursor-pointer"
             >
               ⏱️ "하루 20분만"
+            </button>
+            <button
+              onClick={() => handleSendMessage("OPIc 이틀치 땡겨줘")}
+              className="shrink-0 px-2.5 py-1 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700/60 transition cursor-pointer"
+            >
+              ⏩ "OPIc 이틀치 땡겨줘"
             </button>
           </div>
         )}

@@ -23,6 +23,8 @@ import { LIVE_LANGUAGE_CODE, normalizeVoiceName } from './src/config/voices.ts';
 import { buildLiveConfigAttempts } from './server/liveConfig.ts';
 import { userRecordingPath as userRecordingPathIn } from './server/recordingPath.ts';
 import { apiError, noKey, NO_KEY_MESSAGE } from './server/errors.ts';
+import { buildProgressProposal } from './src/data/progressAdjust.ts';
+import { sanitizePlanChangeAfter, isEmptyPlanChange } from './src/data/planValidation.ts';
 import {
   MAX_STORAGE_FILE_BYTES,
   STORAGE_FETCH_TIMEOUT_MS,
@@ -1050,6 +1052,8 @@ app.post('/api/coach/chat', requireAuth, geminiLimit, async (req: Request, res: 
    - goalPatches에 { opic: { deadline: "2026-11-29" } }를 넣고,
    - 시험 1~2주 전 구간에 OPIc 실전 모의고사(14과)를 월·토 OPIc 슬롯에 집중 배치하는 제안을 만드세요.
 6. 사용자가 학습 제약(출장, 시간 부족 등), 선호도(선호 시간대, 선호 과목 등), 본인의 취약점(문법, 발음 등)을 언급하면 memoryPatch({ constraints?, preferences?, weakPoints? })에 포함시켜 기록하도록 제안하세요.
+7. 진도 미루기·땡기기·"N과로"·되돌리기는 반드시 'propose_progress_adjust'만 쓰고 nextLessonIndex를 직접 계산하지 않는다. "시험"이 나오면 goalId는 opic, "전부"는 all, 트랙이 불분명하면 today. 진도는 통화를 끝낼 때만 1과씩 오르고 요일 패턴은 바꾸지 않는다.
+8. 앱은 구글 캘린더를 바꾸지 않는다.
 
 [현재 사용자 상태]:
 - 현재 주간 계획(plan.weeklyPattern): ${JSON.stringify(plan?.weeklyPattern || { mon:['opic'], tue:['philly'], wed:['bluey'], thu:['philly'], fri:['travel'], sat:['opic'], sun:[] })}
@@ -1097,6 +1101,35 @@ app.post('/api/coach/chat', requireAuth, geminiLimit, async (req: Request, res: 
       parameters: { type: Type.OBJECT, properties: {} },
     };
 
+    const proposeProgressAdjustDeclaration: any = {
+      name: 'propose_progress_adjust',
+      description: '목표별 진도(nextLessonIndex) 미루기·앞당기기·특정 과로 바꾸기·되돌리기를 구조화된 인자로 제안합니다.',
+      parameters: {
+        type: Type.OBJECT,
+        properties: {
+          intent: {
+            type: Type.STRING,
+            enum: ['postpone', 'pull_forward', 'set_lesson', 'undo'],
+            description: '진도 조정 의도',
+          },
+          days: {
+            type: Type.INTEGER,
+            description: 'pull_forward 시 앞당길 과 수 (1~7)',
+          },
+          goalId: {
+            type: Type.STRING,
+            enum: ['opic', 'philly', 'bluey', 'travel', 'today', 'all'],
+            description: '대상 목표 id, 오늘 트랙(today), 또는 전체(all)',
+          },
+          lessonIndex: {
+            type: Type.INTEGER,
+            description: 'set_lesson 시 이동할 과 번호',
+          },
+        },
+        required: ['intent'],
+      },
+    };
+
     // Prepare message turns from history
     const contents: any[] = [];
     if (Array.isArray(history)) {
@@ -1118,12 +1151,13 @@ app.post('/api/coach/chat', requireAuth, geminiLimit, async (req: Request, res: 
       contents,
       config: {
         systemInstruction,
-        tools: [{ functionDeclarations: [proposePlanChangeDeclaration, getProgressDeclaration, getMistakeStatsDeclaration] }],
+        tools: [{ functionDeclarations: [proposePlanChangeDeclaration, proposeProgressAdjustDeclaration, getProgressDeclaration, getMistakeStatsDeclaration] }],
       },
     });
 
     let reply = response.text || '';
     let proposal: any = null;
+    let progressPayload: { type: 'undo_request' } | undefined = undefined;
 
     const functionCalls = response.functionCalls;
     if (Array.isArray(functionCalls) && functionCalls.length > 0) {
@@ -1158,6 +1192,60 @@ app.post('/api/coach/chat', requireAuth, geminiLimit, async (req: Request, res: 
           }
         }
       }
+
+      const progressCall = functionCalls.find((c: any) => c.name === 'propose_progress_adjust');
+      if (progressCall) {
+        const safeGoals = Array.isArray(goals)
+          ? goals
+              .filter((g: any) => g && typeof g.id === 'string')
+              .map((g: any) => ({
+                id: g.id,
+                title: typeof g.title === 'string' ? g.title : undefined,
+                nextLessonIndex: typeof g.nextLessonIndex === 'number' ? g.nextLessonIndex : 1,
+                status: g.status,
+                lessons: Array.isArray(g.lessons)
+                  ? g.lessons
+                      .filter((l: any) => l && typeof l.index === 'number')
+                      .map((l: any) => ({ index: l.index }))
+                  : [],
+              }))
+          : [];
+
+        const progressResult = buildProgressProposal((progressCall.args as any) || {}, {
+          goals: safeGoals,
+          weeklyPattern: plan?.weeklyPattern,
+          todayKst: kstToday(),
+          userText: text,
+        });
+
+        const memoryPatch = proposal?.memoryPatch;
+        if (progressResult.type === 'proposal') {
+          const sanitized = sanitizePlanChangeAfter(progressResult.after, safeGoals);
+          if (isEmptyPlanChange(sanitized)) {
+            reply = '진도 변경 내용을 적용할 수 없어요. 과 번호를 다시 확인해 주세요.';
+            proposal = memoryPatch
+              ? { summary: proposal.summary || '코치 메모', before: {}, after: {}, memoryPatch }
+              : null;
+          } else {
+            proposal = {
+              summary: progressResult.summary,
+              before: progressResult.before,
+              after: sanitized,
+              memoryPatch,
+              status: 'proposed',
+            };
+            reply = progressResult.reply;
+          }
+        } else {
+          reply = progressResult.reply;
+          proposal = memoryPatch
+            ? { summary: proposal.summary || '코치 메모', before: {}, after: {}, memoryPatch }
+            : null;
+          if (progressResult.type === 'undo_request') {
+            progressPayload = { type: 'undo_request' };
+          }
+        }
+      }
     }
 
     if (!reply && !proposal) {
@@ -1168,6 +1256,7 @@ app.post('/api/coach/chat', requireAuth, geminiLimit, async (req: Request, res: 
       ok: true,
       reply,
       proposal,
+      ...(progressPayload ? { progress: progressPayload } : {}),
     });
   } catch (err: any) {
     console.error('[CoachChat] error:', err);
