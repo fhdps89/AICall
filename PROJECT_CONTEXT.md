@@ -1,7 +1,7 @@
 # 📖 프로젝트 컨텍스트 및 히스토리 (Project Context)
 
 > **프로젝트**: One Call English (옛 이름: 「오늘도 한 통」) — AI 1:1 전화영어  
-> **현재 버전**: `v2.10.0` (공식 빌드 표기: `getBuildVersion()`이 `server.ts` 수정 시각으로 계산하는 `20261110-multilingual-HHmm`) | **최종 갱신**: 2026-11-21 (KST)  
+> **현재 버전**: `v2.10.0` (공식 빌드 표기: `getBuildVersion()`이 `server.ts` 수정 시각으로 계산하는 `20261110-multilingual-HHmm`) | **최종 갱신**: 2026-11-22 (KST)  
 > **기준 기획**: [`docs/plan/implementation_plan_v4.md`](./docs/plan/implementation_plan_v4.md) Part B · 진행 가이드 [`docs/plan/ai-studio-build-guide.md`](./docs/plan/ai-studio-build-guide.md) · 현재 앱과의 차이 [`docs/plan/gap-v2.1.0-vs-plan-v4.md`](./docs/plan/gap-v2.1.0-vs-plan-v4.md)  
 > **관리 규칙**: `README.md` 변경 시 본 문서의 아키텍처 및 히스토리를 함께 최신화하며, 모든 일시는 한국 표준시(KST)를 기준으로 합니다.
 
@@ -131,10 +131,12 @@
 10. **B-7 아침 강의 · B-8 그록봇 피드 (`server/lecture.ts`, `server/feed.ts`, `src/ui/lecture/`)**:
    - 새 실수 최대 6개 + 복습 실수 최대 3개로 `gemini-3.8-flash` 대본 → `gemini-3.8-flash-tts` 2인 음성, 답 전 3초 무음, WAV 1개. 앱에서 재생·오프라인 보관.
    - 그록봇은 `/feed/{비밀키}/today(.json)`만 열면 됨. 앱이 홈 화면을 열 때마다 비밀키·후보 실수를 서버에 다시 보냄(`syncFeed`). 강의가 없으면 피드 요청 때 생성 시작, 실패한 강의는 30분에 한 번만 다시 시도.
-   - **한계**: 강의 음성·피드 설정은 서버의 `.data/` 폴더에 저장되어, Cloud Run/AI Studio 서버가 다시 켜지면 지워질 수 있음.
+   - **한계(일부 해소, 2026-11-22)**: 피드 설정은 Firestore `feeds/{id}`에 암호화 백업되어 재시작 뒤에도 복원됨(v2.8.1). ready 강의의 대본·상태도 `feeds/{id}/days/{date}`에 같은 방식으로 백업되며, 재시작 뒤에는 같은 대본으로 TTS만 다시 만든다(새 강의 생성 아님). WAV 원본은 서버 `.data/`에만 있어 재시작 직후 1–3분 동안 피드가 제목과 함께 `generating`을 보여줄 수 있음. 예비 녹음은 여전히 `.data/`에만 있다.
+   - **피드 audioUrl 스킴** (2026-11-22): `today.json`의 절대 URL은 프록시 뒤에서도 https로 만든다(`X-Forwarded-Proto` / `Forwarded`, `trust proxy`). 공개 호스트는 컨테이너가 http로 보여도 https를 쓴다. localhost는 http를 유지한다.
    - **만들던 중 서버가 다시 켜진 강의** (v2.8.0): 서버 기록이 "생성 중"인데 실제 작업이 없으면 `failed`/`INTERRUPTED`로 알려 줌. 서버 기록 자체가 지워졌으면 앱이 Firestore의 "생성 중"을 같은 상태로 바꿈. 홈 카드는 "서버가 다시 시작되어 만들던 강의가 멈췄어요"와 **오늘 강의 만들기** 버튼을 보여 주고, 그록봇 피드는 30분 기다리지 않고 바로 다시 만듦.
    - **생성 작업 타임아웃** (2026-11-22): 대본+TTS 전체 15분, 각 `generateContent`(대본·TTS 한 조각) 90초. 시간 초과 시 `failed`/`TIMED_OUT`이고, 그록봇 피드는 `INTERRUPTED`와 같이 바로 다시 만듦. 프로세스 안에서 작업이 멈춰도(`running`에 남아 있는 채 응답 없음) 15분이 지나면 풀리며, 늦은 완료는 새 상태를 덮어쓰지 않음(작업 epoch). TTS 조각이 끝날 때마다 상태를 갱신함. `force`여도 아직 살아있는(타임아웃 전) 작업은 다시 시작하지 않음.
    - **ready 강의의 오디오가 사라진 경우** (QA 5차 30행): Firestore에 대본이 남아 있으면 `POST /api/lecture/audio/rebuild`가 TTS만 다시 만들고 `status`는 `ready`로 유지함(`audioStatus: rebuilding`). 모달은 「오디오를 다시 만드는 중…」과 재시도를 보여 주며, 대본이 없으면 홈에서 강의를 다시 만들어야 함. WAV는 임시 파일 후 rename.
+   - **홈 카드·Storage 업로드** (QA 34·28행, 2026-11-22): 앱이 올리는 경로는 `users/{uid}/lectures/{date}.wav`인데, 문서의 Storage 규칙 예시는 원래 `recordings/**`만 허용해 403이 나고 `audioUrl`이 비었다. 그 결과 새로고침마다 전체 WAV를 받느라 카드가 「불러오는 중…」에 수십 초 머물렀다. 이제 ready 문서(audioUrl 없음 포함)는 즉시 보여주고, 업로드는 백그라운드·실패 백오프다. Storage 규칙 예시에 lectures 경로를 추가했으나 AI Studio Publish만으로는 규칙이 바뀌지 않으며 Firebase 콘솔에서 게시해야 한다.
    - **복기에서 오늘 강의로 연결** (P0-4): 복기 모달 「오늘 강의 보기」는 복기를 닫고 홈 강의 카드로 이동해 첫 `refresh()` 완료 후 스크롤하며, 이미 `ready`(오디오 포함)인 경우에만 `LectureModal`을 연다. 준비 전이면 `startLecture`를 부르지 않고 카드의 「오늘 강의 만들기」 버튼만 노출된 상태로 둔다.
 11. **B-10 Keep 가져오기 · 사용량 · 1-F 받아쓰기 품질 시험**:
    - Keep "English mistake log" 붙여넣기 → `gemini-3.8-flash`로 [내가 한 말/자연스러운 표현/이유] 미리보기 → 저장(1일 단계부터).

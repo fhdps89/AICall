@@ -8,9 +8,10 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { GoogleGenAI, Modality, Type } from '@google/genai';
 import { requireAuth, verifyFirebaseIdToken, setAfterAuthHook } from './server/auth.ts';
 import { ensureUserGeminiKey, getUserSuppliedKey } from './server/userKey.ts';
-import { saveFeedBackup, deleteFeedBackup } from './server/feedStore.ts';
+import { saveFeedBackup, deleteFeedBackup, saveLectureBackup } from './server/feedStore.ts';
 import { geminiLimit, clusterLimit, checkLiveSessionStart } from './server/rateLimit.ts';
 import { DATA_DIR, startLectureJob, startLectureAudioRebuild, readLectureState, lectureAudioPath, lectureHasLocalScript, kstToday, LECTURE_AUDIO_MISSING, LECTURE_AUDIO_SCRIPT_MISSING } from './server/lecture.ts';
+import type { LectureState } from './server/lecture.ts';
 import { computeMistakeClusters, validateClusterRequestBody } from './server/mistakeClusters.ts';
 import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive } from './server/sttBench.ts';
 import { LIVE_MODEL, TEXT_MODEL, GEMINI_STT_MODEL, GEMINI_TTS_LITE_MODEL } from './src/config/models.ts';
@@ -29,12 +30,14 @@ import {
   storageMediaUrl,
   storageObjectPath,
 } from './server/storageRelay.ts';
-import { isValidFeedSecret, writeFeedSync, loadFeedForSecret, buildFeedToday, feedAudioFile, renderFeedHtml } from './server/feed.ts';
+import { isValidFeedSecret, writeFeedSync, loadFeedForSecret, feedForUid, ensureTodayLecture, buildFeedToday, feedAudioFile, renderFeedHtml, publicFeedBaseUrl } from './server/feed.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+// First hop is the Cloud Run / AI Studio proxy that terminates TLS.
+app.set('trust proxy', 1);
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const isProd = process.env.NODE_ENV === 'production';
 
@@ -1077,7 +1080,7 @@ app.post('/api/coach/chat', requireAuth, geminiLimit, async (req: Request, res: 
 
 // Health check endpoints for Cloud Run container probes
 // B-7 Morning Lecture (auth required: Firebase ID token of the single allowed user)
-app.post('/api/lecture/generate', requireAuth, geminiLimit, (req: Request, res: Response) => {
+app.post('/api/lecture/generate', requireAuth, geminiLimit, async (req: Request, res: Response) => {
   const uid = res.locals.user.uid as string;
   const { date, newMistakes, reviewMistakes, force } = req.body || {};
   const ai = createGenAI();
@@ -1085,8 +1088,35 @@ app.post('/api/lecture/generate', requireAuth, geminiLimit, (req: Request, res: 
     noKey(res);
     return;
   }
+  const day = typeof date === 'string' ? date : kstToday();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+    apiError(res, 400, 'BAD_REQUEST', '날짜 형식이 올바르지 않아요.');
+    return;
+  }
+  const isForce = Boolean(force);
+  const feed = feedForUid(uid);
+  if (!isForce && feed) {
+    try {
+      await ensureTodayLecture(ai, feed, day);
+    } catch (err: any) {
+      console.warn('[Lecture] backup check before generate failed:', err?.message || err);
+      apiError(res, 503, 'LECTURE_FAILED', '오늘 강의를 확인하지 못했어요. 잠시 후 다시 시도해 주세요.');
+      return;
+    }
+  }
   try {
-    const state = startLectureJob(ai, uid, typeof date === 'string' ? date : kstToday(), newMistakes || [], reviewMistakes || [], { force: Boolean(force) });
+    const state = startLectureJob(ai, uid, day, newMistakes || [], reviewMistakes || [], {
+      force: isForce,
+      onReady: async (s: LectureState) => {
+        const f = feedForUid(uid);
+        if (!f) return;
+        try {
+          await saveLectureBackup(f.secret, s);
+        } catch (err: any) {
+          console.warn('[Lecture] backup save failed:', err?.message || err);
+        }
+      },
+    });
     res.json({ ok: true, lecture: state });
   } catch (err: any) {
     console.warn('[Lecture] start failed:', err?.message || err);
@@ -1094,10 +1124,22 @@ app.post('/api/lecture/generate', requireAuth, geminiLimit, (req: Request, res: 
   }
 });
 
-app.get('/api/lecture/status', requireAuth, (req: Request, res: Response) => {
+app.get('/api/lecture/status', requireAuth, async (req: Request, res: Response) => {
   const uid = res.locals.user.uid as string;
+  const date = typeof req.query.date === 'string' ? req.query.date : kstToday();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    apiError(res, 400, 'BAD_REQUEST', '날짜 형식이 올바르지 않아요.');
+    return;
+  }
+  const feed = feedForUid(uid);
+  if (feed) {
+    try {
+      await ensureTodayLecture(createGenAI(), feed, date);
+    } catch (err: any) {
+      console.warn('[Lecture] backup check on status failed:', err?.message || err);
+    }
+  }
   try {
-    const date = typeof req.query.date === 'string' ? req.query.date : kstToday();
     res.json({ ok: true, lecture: readLectureState(uid, date) });
   } catch (err: any) {
     apiError(res, 400, 'BAD_REQUEST', '날짜 형식이 올바르지 않아요.');
@@ -1178,6 +1220,11 @@ app.post('/api/feed/sync', requireAuth, async (req: Request, res: Response) => {
     syncedAt: new Date().toISOString(),
   };
   writeFeedSync(state);
+  try {
+    await ensureTodayLecture(createGenAI(), state, kstToday());
+  } catch (err: any) {
+    console.warn('[feed] ensure lecture after sync failed:', err?.message || err);
+  }
   // Firestore backup so the feed URL survives a fresh server (see server/feedStore.ts).
   const idToken = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
   let backedUp = false;
@@ -1194,9 +1241,13 @@ app.post('/api/feed/sync', requireAuth, async (req: Request, res: Response) => {
 });
 
 function feedBaseUrl(req: Request): string {
-  const proto = String(req.headers['x-forwarded-proto'] || req.protocol).split(',')[0].trim();
-  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '');
-  return `${proto}://${host}`;
+  return publicFeedBaseUrl({
+    forwardedProto: req.headers['x-forwarded-proto'],
+    forwarded: req.headers['forwarded'],
+    forwardedHost: req.headers['x-forwarded-host'],
+    host: req.headers.host,
+    protocol: req.protocol,
+  });
 }
 
 app.get(['/feed/:secret/today', '/feed/:secret/today.json'], async (req: Request, res: Response) => {
@@ -1207,7 +1258,16 @@ app.get(['/feed/:secret/today', '/feed/:secret/today.json'], async (req: Request
     res.status(404).send('Not found');
     return;
   }
-  const today = buildFeedToday(createGenAI(), st, feedBaseUrl(req));
+  const date = kstToday();
+  const ai = createGenAI();
+  let skipStart = false;
+  try {
+    await ensureTodayLecture(ai, st, date);
+  } catch (err: any) {
+    skipStart = true;
+    console.warn('[feed] could not check lecture backup:', err?.message || err);
+  }
+  const today = buildFeedToday(ai, st, feedBaseUrl(req), { date, skipStart });
   if (req.path.endsWith('.json')) res.json(today);
   else res.type('html').send(renderFeedHtml(today));
 });
@@ -1215,7 +1275,19 @@ app.get(['/feed/:secret/today', '/feed/:secret/today.json'], async (req: Request
 app.get('/feed/:secret/audio/:file', async (req: Request, res: Response) => {
   const st = await loadFeedForSecret(String(req.params.secret));
   const m = /^(\d{4}-\d{2}-\d{2})\.wav$/.exec(String(req.params.file));
-  const file = st && m ? feedAudioFile(st, m[1]) : null;
+  if (!st || !m) {
+    res.status(404).send('Not found');
+    return;
+  }
+  const date = m[1];
+  if (date === kstToday()) {
+    try {
+      await ensureTodayLecture(createGenAI(), st, date);
+    } catch (err: any) {
+      console.warn('[feed] could not check lecture backup:', err?.message || err);
+    }
+  }
+  const file = feedAudioFile(st, date);
   if (!file) {
     res.status(404).send('Not found');
     return;
