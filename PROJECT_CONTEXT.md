@@ -174,6 +174,9 @@
 
 ---
 
+## 4-2. 서버 런타임 import 규칙 (2026-11-22 KST)
+- 배포 서버는 `node server.ts`(Node 타입 스트리핑, tsx 없음)로 실행된다. 서버가 불러오는 `src/` 모듈과 그 모듈이 다시 불러오는 상대 경로는 반드시 `.ts` 확장자를 붙인다(`tsconfig.json` `allowImportingTsExtensions: true`). 테스트는 tsx로 돌아 확장자 누락을 못 잡으므로 `tests/serverNodeImports.test.ts`가 순수 node로 서버 import 대상을 불러 확인한다.
+
 ## 5. 버전 히스토리
 - **v2.10.0 이후 수정(미배포) — 사용자 피드백 3건: 홈 트랙 바로 바꾸기·AI 말소리 끊김·목소리 고정/선택 (2026-11-22 KST, 브랜치 `englead/feedback-1122-track-voice-audio`, #33 위에 쌓음)**:
   - **트랙 바꾸기**: 오늘 수업 카드의 「트랙: …」을 눌러 바텀시트(`TrackPickerSheet`, 항목 계산은 순수 `trackOptions.ts`)에서 바로 고름. 진행할 과가 없는 트랙은 비활성. 주간 복기일 「트랙 골라 통화」도 같은 시트를 엶. 고른 트랙은 **오늘(KST) 하루만** `localStorage`(`onecall_today_track_override:{uid}`, 순수 `dailyTrackOverride.ts`)에 저장되어 새로고침·통화 뒤 홈으로 돌아와도 유지되고 다음 날 자동으로 사라짐(기존엔 `useState`뿐이라 새로고침하면 주간 복기로 되돌아갔음). 요일별 주간 루틴(`plan.weeklyPattern`)을 설정에서 고치는 화면은 아직 없음.
