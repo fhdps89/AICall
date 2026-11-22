@@ -11,7 +11,11 @@ import {
   getDueMistakes,
   getKSTToday,
   getSessionById,
+  listRecentSessions,
+  saveCallMistakes,
   advanceMistakeAfterLesson,
+  type MistakeData,
+  type SessionData,
 } from "../firebase/db";
 import { authFetch, authJson } from "../api/authFetch";
 import { recordUsage } from "../usage/usageService";
@@ -25,12 +29,17 @@ import {
   clearUploadFailAt,
 } from "./lectureSyncPolicy";
 import {
-  pickLectureCandidates,
   addDaysKst,
   previousLectureCutoffIso,
+  newCandidateCutoffMs,
+  isQaMistake,
+  sessionCallSeconds,
+  isShortSession,
   PREVIOUS_LECTURE_LOOKBACK_DAYS,
+  type LectureCandidate,
   type SessionTiming,
 } from "./lecturePick";
+import { collectNewLectureItems, planBackfill } from "./lectureSource";
 
 export type LectureStatus = "generating" | "ready" | "failed";
 
@@ -126,24 +135,94 @@ async function loadPreviousLectureCutoff(uid: string, today: string): Promise<st
   return undefined;
 }
 
-/** New = created after the previous ready lecture (or last 24h); review = due today. QA and short sessions are excluded. */
+async function backfillReviewMistakes(uid: string, sessions: SessionData[], existing: MistakeData[]): Promise<void> {
+  const known = [...existing];
+  for (const s of sessions) {
+    if (!s.id || !s.review?.mistakes?.length) continue;
+    const plan = planBackfill(s.id, s.review.mistakes, known);
+    if (plan.toCreate.length === 0) continue;
+    const docs: MistakeData[] = plan.toCreate.map(({ id, item }) => ({
+      id,
+      myPhrase: String(item.myPhrase || ""),
+      naturalPhrase: String(item.naturalPhrase || ""),
+      reason: String(item.reason || ""),
+      sourceStt: item.sourceStt || "sttFinal",
+      stage: 1,
+      status: "reviewing",
+      source: "call",
+      sessionId: s.id,
+      goalId: s.goalId,
+      lessonIndex: s.lessonIndex,
+      lessonTitle: s.review?.lessonTitle,
+      createdAt: s.endedAt || s.startedAt,
+    }));
+    try {
+      const ids = await saveCallMistakes(uid, docs);
+      ids.forEach((mid, i) => {
+        known.push({ ...docs[i], id: mid });
+      });
+    } catch (err) {
+      console.warn("[lectureSource] backfill failed for session", s.id, err);
+    }
+  }
+}
+
+/**
+ * New lecture items come from each qualifying session's post-call review (full-transcript
+ * analysis), not from scanning the mistakes collection. Due reviews still come from the list.
+ */
 export async function pickLectureMistakes(uid: string, today = getKSTToday(), nowIso = new Date().toISOString()) {
-  const [all, due] = await Promise.all([getUserMistakes(uid), getDueMistakes(uid, today)]);
-  const [sessionsById, previousLectureCreatedAt] = await Promise.all([
-    loadSessionsById(uid, [...all, ...due].map((m) => m.sessionId)),
+  const [all, due, recent, previousLectureCreatedAt] = await Promise.all([
+    getUserMistakes(uid),
+    getDueMistakes(uid, today),
+    listRecentSessions(uid, 30),
     loadPreviousLectureCutoff(uid, today),
   ]);
-  return pickLectureCandidates(all, due, today, {
-    nowIso,
-    previousLectureCreatedAt,
-    sessionsById,
-    onMissingSession: ({ mistakeId, sessionId }) => {
-      console.warn("[lecturePick] session doc missing or has no usable duration; keeping mistake", {
-        mistakeId,
-        sessionId,
+  const cutoffMs = newCandidateCutoffMs({ nowIso, previousLectureCreatedAt });
+  await backfillReviewMistakes(uid, recent, all);
+
+  const newItems = collectNewLectureItems(recent, cutoffMs);
+  const newMistakes: LectureCandidate[] = newItems.map((it) => ({
+    id: it.id,
+    myPhrase: it.myPhrase,
+    naturalPhrase: it.naturalPhrase,
+    reason: it.reason,
+    createdAt: it.createdAt,
+    source: it.source,
+    lessonTitle: it.lessonTitle,
+  }));
+  const newIds = new Set(newMistakes.map((m) => m.id));
+
+  const [sessionsById] = await Promise.all([
+    loadSessionsById(uid, due.map((m) => m.sessionId)),
+  ]);
+  const review = (due || []).filter((m) => {
+    if (!m?.id || isQaMistake(m) || newIds.has(m.id)) return false;
+    const sid = m.sessionId;
+    if (!sid || !(sid in sessionsById) || sessionsById[sid] == null) {
+      console.warn("[lecturePick] session doc missing or has no usable duration; keeping review mistake", {
+        mistakeId: m.id,
+        sessionId: sid,
       });
-    },
-  });
+      return true;
+    }
+    const sec = sessionCallSeconds(sessionsById[sid]);
+    if (sec == null) return true;
+    return !isShortSession(sec);
+  }).slice(0, 3);
+
+  return {
+    newMistakes,
+    reviewMistakes: review.map((m) => ({
+      id: m.id!,
+      myPhrase: m.myPhrase,
+      naturalPhrase: m.naturalPhrase,
+      reason: m.reason,
+      createdAt: m.createdAt,
+      source: m.source,
+      lessonTitle: m.lessonTitle,
+    })),
+  };
 }
 
 export async function startLecture(uid: string, date = getKSTToday(), force = false): Promise<LectureDoc> {

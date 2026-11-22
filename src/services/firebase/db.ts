@@ -318,6 +318,7 @@ export interface SessionReviewData {
   repeatedItems?: Array<{ id: string; myPhrase: string; naturalPhrase: string }>;
   keepSyncText: string;
   generatedAt: string;
+  lessonTitle?: string;
   /** false when saving this call's mistakes to the app's review list failed */
   mistakesSaved?: boolean;
   /** false when nothing the learner said was recorded, so the lesson was not counted as done */
@@ -622,6 +623,18 @@ export async function getSessionById(userId: string, sessionId: string): Promise
   }
 }
 
+/** Recent call sessions, newest first. Used to build lecture material from post-call reviews. */
+export async function listRecentSessions(userId: string, limitCount = 30): Promise<SessionData[]> {
+  const sessionsCol = collection(db, "users", userId, "sessions");
+  try {
+    const snap = await getDocs(query(sessionsCol, orderBy("startedAt", "desc"), limit(limitCount)));
+    return snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<SessionData, "id">) }));
+  } catch (error) {
+    console.warn("[db] Failed to list recent sessions:", error);
+    return [];
+  }
+}
+
 /**
  * Save review result & final STT transcript into the session document and mark status done
  */
@@ -714,10 +727,12 @@ export async function saveCallMistakes(
   const tomorrow = getKSTTomorrow();
 
   try {
+    // One batch so a mid-loop failure cannot leave only some of the review items saved.
+    const batch = writeBatch(db);
     for (const m of mistakes) {
-      const newDoc = doc(mistakesCol);
+      const newDoc = m.id ? doc(mistakesCol, m.id) : doc(mistakesCol);
       const nextReviewAt = m.nextReviewAt || m.nextReviewDate || tomorrow;
-      await setDoc(newDoc, {
+      const payload: Record<string, unknown> = {
         ...m,
         id: newDoc.id,
         stage: m.stage || 1,
@@ -726,9 +741,14 @@ export async function saveCallMistakes(
         nextReviewDate: nextReviewAt,
         source: m.source || "call",
         createdAt: m.createdAt || new Date().toISOString(),
-      });
+      };
+      for (const key of Object.keys(payload)) {
+        if (payload[key] === undefined) delete payload[key];
+      }
+      batch.set(newDoc, payload);
       createdIds.push(newDoc.id);
     }
+    if (createdIds.length > 0) await batch.commit();
     return createdIds;
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `users/${userId}/mistakes`);

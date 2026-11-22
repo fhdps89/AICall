@@ -4,6 +4,19 @@
 
 ---
 
+### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 강의 재료를 통화 후 전체 전사 복기에서 가져온다 (브랜치 `englead/lecture-source-20261122`)
+- **배경**: 찬식님이 「뽑아 놓은 항목 중에서 고르는 게 아니라, 어제 전화 스크립트 전체를 분석해서 틀린 문장으로 복습 강의를 만들어야 한다」고 하셨다. 본인 통화 `call-1795270951478`(여행 1과, 6분 9초)의 복기(`review.mistakes`)에는 6개 오류가 있었는데, 실수 컬렉션에는 그 중 1개만 있어 강의에도 1개만 들어갔다.
+- **원인**:
+  - 강의 후보는 `users/{uid}/mistakes`만 본다. 통화 후 복기는 이미 sttFinal·liveTranscript 전체로 mistakes[]를 만들지만, `saveCallMistakes`가 순차 `setDoc`이라 중간에 실패하면 일부만 컬렉션에 남고, 세션 문서의 `review.mistakes`는 그대로 저장된다. 「이건 내가 한 말이 아니에요」는 컬렉션 문서를 지우고 세션에 `hidden`을 남긴다. 이 세션의 `mistakesSaved`·항목별 `id`/`hidden`은 덤프가 아직 복기 섹션을 포함하지 않아 부분 저장 실패와 숨김 중 어느 쪽인지는 미확인.
+  - 전사는 Firestore 세션 문서에만 있다(turns 서브컬렉션 없음). 서버는 로그인 없이 세션을 읽지 못하며, 기존 `/api/feed/sync`는 실수 후보만 받았다.
+- **수정**:
+  - 새 강의 항목은 이전 강의 이후의 실제 연습 통화(3분 이상, QA 제외)의 `review.mistakes`에서 고른다. `hidden`은 제외하고, `myPhrase`는 그 세션 사용자 전사와 대조한다. 컬렉션에 없는 항목은 `source: 'call'`로 백필. `saveCallMistakes`는 배치 원자 쓰기. 복습(due) 후보는 기존 규칙 유지. 복기가 놓친 오류를 위한 보완 Gemini 패스는 후속.
+- **방어 조치 (Safeguards)**: `tests/lectureSource.test.ts`에서 본인 통화 6개 문구 대조·지어낸 문장 거절·hidden 제외·짧은/QA 세션 제외·백필 계획·1개여도 채우지 않음을 확인.
+- **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build`.
+- **모델**: 설계 Claude CLI Opus 5.5 high(`/workspace/collab/onecall_lecture_source_20261122/claude_design_transcript_review.md`). 구현은 그 1단계(복기 재사용·백필·저장 공백 수정)를 따름. 2단계 보완 패스는 기본 꺼짐으로 후속.
+
+---
+
 ### [2026-11-22 KST] v2.10.0 이후 수정(미배포) — 강의 재료 검증·소개 문구, QA 제외, 10/22 템플릿 (브랜치 `englead/lecture-source-20261122`)
 - **배경**: 오늘 강의(12:25 KST, 「일요일 주간 총정리 핵심 영어」)가 9개 표현을 모두 「어젯밤 하신 말」로 소개했다. 1번 「yesterday I go to the office and check the safety gear」는 QA봇이 11:06에 찬식님 계정으로 넣은 테스트 입력이었다. 찬식님은 「내가 한 말이 아닌데?」라고 하셨고, 이어서 10/22 템플릿의 예문·인트로를 적용하고(TG 3963) 분량 상한을 10분으로 바꿨다(TG 3965). 머지·배포는 하지 않음.
 - **원인**:
