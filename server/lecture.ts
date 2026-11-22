@@ -380,6 +380,8 @@ export interface StartLectureJobOpts {
   force?: boolean;
   /** Test hook: shorten the whole-job cap. */
   jobTimeoutMs?: number;
+  /** Called once when the job finishes with status==='ready' and is still the current job. */
+  onReady?: (state: LectureState) => void | Promise<void>;
   /** Test hook: replace script+TTS so tests do not call Gemini. */
   runJobFn?: (
     ai: GoogleGenAI,
@@ -388,6 +390,29 @@ export interface StartLectureJobOpts {
     reviewList: LectureMistakeInput[],
     ctx: LectureJobContext
   ) => Promise<void>;
+}
+
+/**
+ * Restore a ready lecture from backup by bumping the job epoch (so any stale job cannot overwrite)
+ * and re-rendering TTS audio from the backed-up script. Skips when a job is already running.
+ */
+export function restoreReadyLecture(
+  ai: GoogleGenAI,
+  uid: string,
+  date: string,
+  backup: LectureState,
+  opts: { synthesizeFn?: LectureSynthesizeFn } = {}
+): LectureState | null {
+  safeDate(date);
+  const key = `${uid}:${date}`;
+  if (running.has(key)) {
+    return readLectureState(uid, date);
+  }
+  if (!backup || backup.status !== 'ready' || !Array.isArray(backup.script) || backup.script.length === 0) {
+    return readLectureState(uid, date);
+  }
+  bumpJobEpoch(key);
+  return startLectureAudioRebuild(ai, uid, date, backup, opts);
 }
 
 /**
@@ -450,14 +475,26 @@ export function startLectureJob(
   const work = (opts.runJobFn || runJob)(ai, state, newList, reviewList, ctx);
   const timeoutMs = opts.jobTimeoutMs ?? LECTURE_JOB_TIMEOUT_MS;
   withTimeout(work, timeoutMs, 'lecture job')
-    .catch((err) => {
-      if (!isCurrentJob(key, epoch)) return;
-      console.error('[Lecture] job failed:', err);
-      state.status = 'failed';
-      // Shown in the app and on the public feed page: a code only, details stay in the log.
-      state.error = /timed out/i.test(String(err?.message || err)) ? 'TIMED_OUT' : 'GENERATION_FAILED';
-      ctx.write(state);
-    })
+    .then(
+      async () => {
+        if (!isCurrentJob(key, epoch)) return;
+        if (state.status !== 'ready') return;
+        if (!opts.onReady) return;
+        try {
+          await opts.onReady(state);
+        } catch (err: any) {
+          console.warn('[Lecture] onReady failed:', err?.message || err);
+        }
+      },
+      (err) => {
+        if (!isCurrentJob(key, epoch)) return;
+        console.error('[Lecture] job failed:', err);
+        state.status = 'failed';
+        // Shown in the app and on the public feed page: a code only, details stay in the log.
+        state.error = /timed out/i.test(String(err?.message || err)) ? 'TIMED_OUT' : 'GENERATION_FAILED';
+        ctx.write(state);
+      }
+    )
     .finally(() => {
       if (isCurrentJob(key, epoch)) running.delete(key);
     });
