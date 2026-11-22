@@ -2,6 +2,7 @@ import { recordUsage } from "../../services/usage/usageService";
 import { callsForDuration } from "../../services/usage/learningLog";
 import React, { useState, useEffect, useRef } from "react";
 import { useDevMode } from "../../data/devMode";
+import { isQaMode } from "../../data/qaMode";
 import {
   GoalData,
   createCallSession,
@@ -117,6 +118,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
         goalId: goal.id,
         lessonIndex,
         connectionPath: "direct",
+        ...(isQaMode() ? { source: "qa" as const } : {}),
       }).catch((err) => console.warn("[NewCallScreen] createCallSession error:", err));
     }
     return sessionCreatePromiseRef.current || Promise.resolve();
@@ -443,6 +445,11 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
             <span className="text-xs text-slate-300 font-medium truncate max-w-[200px] sm:max-w-none">
               {currentLesson.index}과. {currentLesson.title}
             </span>
+            {isQaMode() && (
+              <span className="text-[10px] font-bold text-amber-300 border border-amber-500/40 rounded px-1.5 py-0.5">
+                QA 모드
+              </span>
+            )}
           </div>
           {devMode && (
             <div className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-1.5 font-mono">

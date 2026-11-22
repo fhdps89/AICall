@@ -43,6 +43,7 @@ import {
 import { PromptPlaceholders } from "../../data/promptCustomizer";
 import { buildTodayLessonSystemPrompt } from "../../data/lessonPromptBuilder";
 import { mergeChunksToWav, groupChunks } from "../recording/audioMerge";
+import { isQaMode, resolveMistakeSource } from "../../data/qaMode";
 import { keepKnownIds, mergeMinuteTranscripts, MinutePartial } from "./reviewRules";
 import { decideSttSource } from "./speechCheck";
 import { createStepTimer, ReviewTiming } from "./reviewTiming";
@@ -413,6 +414,8 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
     try {
       // Step 6: Save mistakes to mistakes collection (stage 1, status reviewing, nextReviewAt=내일)
       const tomorrow = getKSTTomorrow();
+      const sess = await getSessionById(userId, sessionId).catch(() => null);
+      const mistakeSource = resolveMistakeSource(sess, isQaMode());
       mistakeDocs = (review.mistakes || []).map((m) => ({
         myPhrase: m.myPhrase,
         naturalPhrase: m.naturalPhrase,
@@ -422,7 +425,7 @@ export async function runPostCallReview(params: RunReviewParams): Promise<Review
         status: "reviewing",
         nextReviewAt: tomorrow,
         nextReviewDate: tomorrow,
-        source: "call",
+        source: mistakeSource,
         sessionId,
         goalId: goal.id,
         lessonIndex,

@@ -344,6 +344,7 @@ export interface SessionData {
   directFailCount?: number;
   createdAt: string;
   updatedAt?: string;
+  source?: "qa";
 }
 
 export type MistakeStage = 1 | 3 | 7 | 14;
@@ -352,7 +353,7 @@ export type MistakeStatus = "reviewing" | "graduated" | "deferred" | "on_hold";
 export interface MistakeData {
   id?: string;
   createdAt: string;
-  source: "call" | "keep_import";
+  source: "call" | "keep_import" | "qa";
   sessionId?: string;
   goalId?: string;
   lessonIndex?: number;
@@ -393,6 +394,7 @@ export async function createCallSession(
     goalId: string;
     lessonIndex: number;
     connectionPath?: "direct" | "proxy";
+    source?: "qa";
   }
 ): Promise<void> {
   const sessionRef = doc(db, "users", userId, "sessions", sessionId);
@@ -411,6 +413,7 @@ export async function createCallSession(
       directFailCount: 0,
       createdAt: now,
       updatedAt: now,
+      ...(data.source === "qa" ? { source: "qa" as const } : {}),
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `users/${userId}/sessions/${sessionId}`);
@@ -1401,7 +1404,7 @@ export async function deleteCallMistakesForSession(userId: string, sessionId: st
   const batch = writeBatch(db);
   let n = 0;
   for (const d of snap.docs) {
-    if ((d.data() as MistakeData).source === "call") {
+    if ((d.data() as MistakeData).source === "call" || (d.data() as MistakeData).source === "qa") {
       batch.delete(d.ref);
       n++;
     }

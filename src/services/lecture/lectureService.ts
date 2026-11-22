@@ -7,11 +7,9 @@ import { doc, getDoc, setDoc, updateDoc } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "../firebase/config";
 import {
-  MistakeData,
   getUserMistakes,
   getDueMistakes,
   getKSTToday,
-  addKSTDays,
   advanceMistakeAfterLesson,
 } from "../firebase/db";
 import { authFetch, authJson } from "../api/authFetch";
@@ -25,6 +23,7 @@ import {
   writeUploadFailAt,
   clearUploadFailAt,
 } from "./lectureSyncPolicy";
+import { pickLectureCandidates } from "./lecturePick";
 
 export type LectureStatus = "generating" | "ready" | "failed";
 
@@ -37,6 +36,9 @@ export interface LectureScriptItem {
   dialogue: { speaker: "Coach" | "Partner"; line: string }[];
   meaningKo: string;
   answerEnglish: string;
+  similarExample?: string;
+  sourceDateKst?: string;
+  lessonTitle?: string;
   startSec?: number;
 }
 
@@ -71,22 +73,11 @@ export async function getLecture(uid: string, date = getKSTToday()): Promise<Lec
   return snap.exists() ? (snap.data() as LectureDoc) : null;
 }
 
-function toPayload(m: MistakeData) {
-  return { id: m.id!, myPhrase: m.myPhrase, naturalPhrase: m.naturalPhrase, reason: m.reason };
-}
 
-/** New = added since yesterday (KST) & never used in a lecture; review = due today (max 3). */
+/** New = added since yesterday (KST) & never used in a lecture; review = due today (max 3). QA source is excluded. */
 export async function pickLectureMistakes(uid: string, today = getKSTToday()) {
   const [all, due] = await Promise.all([getUserMistakes(uid), getDueMistakes(uid, today)]);
-  const yesterday = addKSTDays(-1, today);
-  const toKst = (iso: string) => new Date(new Date(iso).getTime() + 9 * 3600000).toISOString().slice(0, 10);
-  const fresh = all
-    .filter((m) => m.id && m.status !== "graduated" && !(m as any).lectureDate && m.createdAt && toKst(m.createdAt) >= yesterday)
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-    .slice(0, 6);
-  const freshIds = new Set(fresh.map((m) => m.id));
-  const review = due.filter((m) => m.id && !freshIds.has(m.id)).slice(0, 3);
-  return { newMistakes: fresh.map(toPayload), reviewMistakes: review.map(toPayload) };
+  return pickLectureCandidates(all, due, today);
 }
 
 export async function startLecture(uid: string, date = getKSTToday(), force = false): Promise<LectureDoc> {

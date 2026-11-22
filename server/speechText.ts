@@ -9,6 +9,7 @@ export interface LectureScriptItemLike {
   dialogue: { speaker: 'Coach' | 'Partner'; line: string }[];
   meaningKo: string;
   answerEnglish: string;
+  similarExample?: string;
 }
 
 const NARRATOR_LINE_RE =
@@ -97,6 +98,9 @@ export function stripSpeechDirections(text: string): string {
 export function cleanLectureScriptItem<T extends LectureScriptItemLike>(it: T): T {
   const explanation = stripSpeechDirections(it.explanation || '');
   const meaningKo = stripSpeechDirections(it.meaningKo || '');
+  const similarExample = it.similarExample
+    ? stripSpeechDirections(it.similarExample)
+    : it.similarExample;
   const answerEnglish = stripSpeechDirections(it.answerEnglish || '') || it.naturalPhrase;
   const dialogue = Array.isArray(it.dialogue)
     ? it.dialogue.flatMap((d) => {
@@ -110,6 +114,7 @@ export function cleanLectureScriptItem<T extends LectureScriptItemLike>(it: T): 
     ...it,
     explanation,
     meaningKo,
+    similarExample,
     answerEnglish,
     dialogue,
   };

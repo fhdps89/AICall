@@ -12,6 +12,7 @@ import { saveFeedBackup, deleteFeedBackup, saveLectureBackup } from './server/fe
 import { geminiLimit, clusterLimit, checkLiveSessionStart } from './server/rateLimit.ts';
 import { DATA_DIR, startLectureJob, startLectureAudioRebuild, readLectureState, lectureAudioPath, lectureHasLocalScript, lectureStatusPayload, kstToday, LECTURE_AUDIO_MISSING, LECTURE_AUDIO_SCRIPT_MISSING } from './server/lecture.ts';
 import type { LectureState } from './server/lecture.ts';
+import { sanitizeLectureInputs } from './server/lectureMaterial.ts';
 import { mimeForAudioFile } from './server/lectureAudioEncode.ts';
 import { computeMistakeClusters, validateClusterRequestBody } from './server/mistakeClusters.ts';
 import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive } from './server/sttBench.ts';
@@ -1205,19 +1206,13 @@ app.post('/api/feed/sync', requireAuth, async (req: Request, res: Response) => {
     res.status(400).json({ ok: false, error: 'feed secret 형식 오류' });
     return;
   }
-  const pick = (list: any, max: number) =>
-    (Array.isArray(list) ? list : []).slice(0, max).map((m: any) => ({
-      id: String(m?.id || ''),
-      myPhrase: String(m?.myPhrase || '').slice(0, 400),
-      naturalPhrase: String(m?.naturalPhrase || '').slice(0, 400),
-      reason: String(m?.reason || '').slice(0, 600),
-    })).filter((m: any) => m.id && m.myPhrase && m.naturalPhrase);
+  const { newList, reviewList } = sanitizeLectureInputs(newMistakes, reviewMistakes);
   const state = {
     uid,
     secret,
     quizCount: Math.max(0, Math.min(100, Number(quizCount) || 0)),
-    newMistakes: pick(newMistakes, 6),
-    reviewMistakes: pick(reviewMistakes, 3),
+    newMistakes: newList,
+    reviewMistakes: reviewList,
     syncedAt: new Date().toISOString(),
   };
   writeFeedSync(state);

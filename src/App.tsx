@@ -54,6 +54,9 @@ import {
   pickBackTarget,
 } from "./services/navigation/backTarget";
 import { friendlyError } from "./ui/common/friendlyError";
+import { applyQaModeFromUrl } from "./data/qaMode";
+
+applyQaModeFromUrl();
 import { Loader2 } from "lucide-react";
 
 /** Settings → 1분 임시 받아쓰기 switch (saved in this browser by SettingsModal). Default on. */

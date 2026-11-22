@@ -12,6 +12,29 @@ import { GoogleGenAI, Type } from '@google/genai';
 import { TEXT_MODEL, GEMINI_TTS_MODEL } from '../src/config/models.ts';
 import { stripSpeechDirections, cleanLectureScriptItem } from './speechText.ts';
 import { encodeLectureAudio, mimeForAudioFile, type LectureEncodeFn } from './lectureAudioEncode.ts';
+import {
+  MAX_NEW,
+  MAX_REVIEW,
+  sanitizeLectureInputs,
+  applyModelScriptToInputs,
+  buildLectureSpeechPlan,
+  trimItemsToBudget,
+  type LectureMistakeInput,
+  type LectureScriptItem,
+} from './lectureMaterial.ts';
+
+export type { LectureMistakeInput, LectureScriptItem } from './lectureMaterial.ts';
+export {
+  sanitizeLectureInputs,
+  applyModelScriptToInputs,
+  introLine,
+  openingLine,
+  buildLectureSpeechPlan,
+  trimItemsToBudget,
+  formatLectureDuration,
+  estimatePlanDurationSec,
+  LECTURE_MAX_SEC,
+} from './lectureMaterial.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const DATA_DIR = path.resolve(__dirname, '..', '.data');
@@ -21,10 +44,6 @@ const SCRIPT_MODEL = TEXT_MODEL;
 const LECTURE_TTS_MODEL = GEMINI_TTS_MODEL;
 const VOICE_COACH = 'Kore';
 const VOICE_PARTNER = 'Puck';
-const SILENCE_SEC = 3;
-const MAX_NEW = 6;
-const MAX_REVIEW = 3;
-
 /** Whole job (script + TTS). A hung Gemini call must not leave status=generating all day. */
 export const LECTURE_JOB_TIMEOUT_MS = 15 * 60 * 1000;
 /** One generateContent call (script or one TTS segment). Lets the 3-try loop actually retry. */
@@ -46,25 +65,6 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): 
       }
     );
   });
-}
-
-export interface LectureMistakeInput {
-  id: string;
-  myPhrase: string;
-  naturalPhrase: string;
-  reason?: string;
-}
-
-export interface LectureScriptItem {
-  mistakeId: string;
-  kind: 'new' | 'review';
-  myPhrase: string;
-  naturalPhrase: string;
-  explanation: string;
-  dialogue: { speaker: 'Coach' | 'Partner'; line: string }[];
-  meaningKo: string;
-  answerEnglish: string;
-  startSec?: number;
 }
 
 export interface LectureState {
@@ -229,6 +229,12 @@ export function sanitizeLectureScriptPayload(raw: unknown): LectureScriptSanitiz
           return [{ speaker: speaker as 'Coach' | 'Partner', line: String(line.line).slice(0, 400) }];
         })
       : [];
+    const sourceDateKst =
+      typeof it.sourceDateKst === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(it.sourceDateKst)
+        ? it.sourceDateKst
+        : undefined;
+    const similarExample = typeof it.similarExample === 'string' ? String(it.similarExample).slice(0, 400) : undefined;
+    const lessonTitle = typeof it.lessonTitle === 'string' ? String(it.lessonTitle).slice(0, 80) : undefined;
     items.push({
       mistakeId: String(it.mistakeId).slice(0, 80),
       kind,
@@ -238,6 +244,9 @@ export function sanitizeLectureScriptPayload(raw: unknown): LectureScriptSanitiz
       dialogue,
       meaningKo: String(it.meaningKo || '').slice(0, 400),
       answerEnglish: String(it.answerEnglish || it.naturalPhrase).slice(0, 400),
+      similarExample,
+      sourceDateKst,
+      lessonTitle,
       startSec: typeof it.startSec === 'number' && Number.isFinite(it.startSec) ? it.startSec : undefined,
     });
   }
@@ -471,18 +480,7 @@ export function startLectureJob(
   if (existing && (running.has(key) || (existing.status === 'ready' && !opts.force))) {
     return existing;
   }
-  const clean = (list: LectureMistakeInput[], max: number) =>
-    (Array.isArray(list) ? list : [])
-      .filter((m) => m && typeof m.id === 'string' && m.myPhrase && m.naturalPhrase)
-      .slice(0, max)
-      .map((m) => ({
-        id: String(m.id),
-        myPhrase: String(m.myPhrase).slice(0, 400),
-        naturalPhrase: String(m.naturalPhrase).slice(0, 400),
-        reason: String(m.reason || '').slice(0, 600),
-      }));
-  const newList = clean(newMistakes, MAX_NEW);
-  const reviewList = clean(reviewMistakes, MAX_REVIEW).filter((r) => !newList.some((n) => n.id === r.id));
+  const { newList, reviewList } = sanitizeLectureInputs(newMistakes, reviewMistakes);
 
   const engine = process.env.LECTURE_TTS_ENGINE === 'elevenlabs' ? 'elevenlabs' : 'gemini';
   const now = new Date().toISOString();
@@ -553,10 +551,14 @@ async function generateScript(
   const sunday = isSundayKst(date);
   const fmt = (list: LectureMistakeInput[], kind: string) =>
     list
-      .map((m) => `- id=${m.id} | kind=${kind} | myPhrase="${m.myPhrase}" | naturalPhrase="${m.naturalPhrase}" | reason="${m.reason || ''}"`)
+      .map((m) => {
+        const topic = m.lessonTitle ? ` | lessonTitle="${m.lessonTitle}"` : '';
+        return `- id=${m.id} | kind=${kind} | myPhrase="${m.myPhrase}" | naturalPhrase="${m.naturalPhrase}" | reason="${m.reason || ''}"${topic}`;
+      })
       .join('\n');
+  const itemCount = newList.length + reviewList.length;
 
-  const prompt = `당신은 한국인 성인 학습자를 위한 5분짜리 아침 영어 오디오 강의 작가입니다.
+  const prompt = `당신은 한국인 성인 학습자를 위한 아침 영어 오디오 강의 작가입니다. 전체 길이는 최대 10분입니다.
 아래 실수 목록으로 강의 대본을 만드세요. 해설자는 "Coach"(한국어로 설명), 대화 상대는 "Partner"(영어 원어민)입니다.
 
 [실수 목록]
@@ -565,11 +567,11 @@ ${fmt(reviewList, 'review')}
 
 [대본 규칙 - 반드시 지킬 것]
 1. 영어는 영어 철자 그대로 쓰세요. 영어를 한글 발음으로 적지 마세요(예: "땡큐" 금지, "thank you"로).
-2. 항목마다 순서: 어젯밤 하신 말(myPhrase, 입력 그대로, 고치지 말 것) → 자연스러운 표현(naturalPhrase) → 이유 1~2문장(explanation, 한국어) → 짧은 2인 대화(dialogue, 2~4줄, Coach와 Partner가 번갈아 영어로, naturalPhrase가 자연스럽게 들어감) → 한국어 뜻(meaningKo, naturalPhrase의 한국어 뜻) → 정답 영어(answerEnglish = naturalPhrase). 한국어 뜻과 정답 사이의 무음은 시스템이 따로 넣으니, 대본에는 무음·쉼·초 표시를 쓰지 마세요.
-3. 입력 목록 순서대로, 각 항목의 mistakeId와 kind는 입력 값 그대로 쓰세요. 항목을 빼거나 합치지 마세요.
-4. 전체 분량은 5분 이내가 되도록 explanation과 dialogue를 짧게 유지하세요.
-5. title: 오늘 강의 제목(한국어, 20자 이내).
-6. coachNote: 끝에 코치 한마디(한국어 2~3문장).${sunday ? ' 오늘은 일요일이므로 한 주를 총정리하는 주간 리뷰 톤으로 쓰세요. 이번 주 완수한 수업 진도와 누적 복습/졸업 표현 성과를 짚어주고 다음 주 실전 통화를 응원하는 따뜻하고 구체적인 코칭 메시지로 작성하세요.' : ''}
+2. 항목마다 순서: 학습자의 원래 말(myPhrase, 입력 그대로, 고치지 말 것. 소개 문장은 시스템이 붙이므로 쓰지 마세요) → 자연스러운 표현(naturalPhrase) → 이유(explanation, 한국어, 난도에 따라 1~5문장. 규칙 비교가 필요하면 깊게, 단순 오타·어순은 짧게) → 비슷한 예문 1개(similarExample, 영어 한 문장) → 짧은 2인 대화(dialogue, 2~4줄, Coach와 Partner가 번갈아 영어로, naturalPhrase가 자연스럽게 들어감. lessonTitle이 있으면 그 수업 상황을 따르고, 없으면 일반적인 상황) → 한국어 뜻(meaningKo, naturalPhrase의 한국어 뜻) → 정답 영어(answerEnglish = naturalPhrase). 한국어 뜻과 정답 사이의 무음은 시스템이 따로 넣으니, 대본에는 무음·쉼·초 표시를 쓰지 마세요.
+3. 입력 목록 순서대로, 각 항목의 mistakeId와 kind는 입력 값 그대로 쓰세요. 항목을 빼거나 합치지 마세요. 목록에 없는 표현을 지어내지 마세요.
+4. 전체 분량은 최대 10분입니다. 오늘은 항목 ${itemCount}개입니다. explanation은 난도에 따라 1~5문장(규칙 비교가 필요하면 깊게, 단순 오타·어순은 짧게), similarExample은 항목마다 영어 한 문장입니다. 예문과 해설을 짧게 줄이지 마세요. 시스템이 10분을 넘기면 우선순위가 낮은 항목을 빼므로, 넣은 항목의 깊이는 유지하세요.
+5. title: 오늘 강의 제목(한국어, 20자 이내). title·explanation·dialogue·coachNote·similarExample에 '어젯밤', '어제', '오늘 아침 통화', '이번 주' 같은 시점 표현을 쓰지 마세요.
+6. coachNote: 끝에 코치 한마디(한국어 2~3문장).${sunday ? ' 오늘은 일요일이므로 한 주를 마무리하는 따뜻한 톤으로 쓰세요. 위 목록에 있는 표현만 언급하고, 진도·횟수·졸업 수 같은 수치는 쓰지 마세요.' : ''}
 7. 시험·교재의 상표나 문제를 복제하지 마세요.
 8. 모든 문자열 값은 음성 합성기가 글자 그대로 소리 내어 읽습니다. 실제로 말할 문장만 쓰세요. 다음은 쓰지 마세요: ① 괄호나 대괄호로 된 연기·동작·효과 지시(예: (pause), (웃으며), [Coach smiles], (3초 무음)) ② "Narrator:", "내레이션:" 같은 해설자 줄 ③ "Say cheerfully:" 같은 말투 지시 ④ 마크다운 기호(**, *, \`, #, 목록 기호). dialogue.line에는 화자 이름을 붙이지 말고 대사만 쓰세요(화자는 speaker 필드에 씁니다). 뜻을 덧붙이는 괄호는 써도 됩니다(예: work for (소속)).`;
 
@@ -605,8 +607,9 @@ ${fmt(reviewList, 'review')}
                 },
                 meaningKo: { type: Type.STRING },
                 answerEnglish: { type: Type.STRING },
+                similarExample: { type: Type.STRING },
               },
-              required: ['mistakeId', 'kind', 'myPhrase', 'naturalPhrase', 'explanation', 'dialogue', 'meaningKo', 'answerEnglish'],
+              required: ['mistakeId', 'kind', 'myPhrase', 'naturalPhrase', 'explanation', 'dialogue', 'meaningKo', 'answerEnglish', 'similarExample'],
             },
           },
           coachNote: { type: Type.STRING },
@@ -616,25 +619,15 @@ ${fmt(reviewList, 'review')}
     },
   }), LECTURE_STEP_TIMEOUT_MS, 'lecture script');
   const parsed = JSON.parse(response.text?.trim() || '{}');
-  const inputs = new Map([...newList, ...reviewList].map((m) => [m.id, m]));
-  const items: LectureScriptItem[] = (parsed.items || [])
-    .filter((it: any) => inputs.has(it.mistakeId))
-    .map((it: any) => {
-      const src = inputs.get(it.mistakeId)!;
-      return {
-        ...it,
-        // myPhrase must stay verbatim (never let the model "fix" it)
-        myPhrase: src.myPhrase,
-        naturalPhrase: src.naturalPhrase,
-        answerEnglish: it.answerEnglish || src.naturalPhrase,
-        dialogue: Array.isArray(it.dialogue) ? it.dialogue.slice(0, 4) : [],
-      };
-    });
-  if (items.length === 0) throw new Error('대본 생성 결과가 비어 있습니다.');
+  const applied = applyModelScriptToInputs(newList, reviewList, parsed.items);
+  if (applied.matched === 0) throw new Error('대본 생성 결과가 비어 있습니다.');
+  const title = stripSpeechDirections(String(parsed.title || '')) || '오늘 아침 강의';
+  const coachNote = stripSpeechDirections(String(parsed.coachNote || ''));
+  const cleaned = applied.items.map(cleanLectureScriptItem);
   return {
-    title: stripSpeechDirections(String(parsed.title || '')) || '오늘 아침 강의',
-    items: items.map(cleanLectureScriptItem),
-    coachNote: stripSpeechDirections(String(parsed.coachNote || '')),
+    title,
+    items: trimItemsToBudget(cleaned, date, title, coachNote),
+    coachNote,
     tokens: Number(response.usageMetadata?.totalTokenCount || 0),
   };
 }
@@ -783,6 +776,8 @@ async function runJob(
   state.title = script.title;
   state.coachNote = script.coachNote;
   state.itemCount = script.items.length;
+  state.newMistakeIds = script.items.filter((it) => it.kind === 'new').map((it) => it.mistakeId);
+  state.reviewMistakeIds = script.items.filter((it) => it.kind === 'review').map((it) => it.mistakeId);
   state.textTokens = script.tokens;
   write(state);
 
@@ -804,36 +799,7 @@ async function renderAndSaveAudio(
   const title = stripSpeechDirections(script.title || '') || '오늘 아침 강의';
   const coachNote = stripSpeechDirections(script.coachNote || '');
   const items = script.items.map(cleanLectureScriptItem);
-
-  type PlanSeg =
-    | { kind: 'speech'; text: string; two: boolean; itemIndex?: number }
-    | { kind: 'silence'; sec: number };
-  const plan: PlanSeg[] = [];
-  plan.push({
-    kind: 'speech',
-    text: `Coach: 좋은 아침이에요. 오늘 아침 강의, ${title}. 모두 ${items.length}개 표현을 함께 볼게요.`,
-    two: false,
-  });
-  plan.push({ kind: 'silence', sec: 0.6 });
-
-  for (let i = 0; i < items.length; i++) {
-    const it = items[i];
-    const label = it.kind === 'review' ? '복습 표현' : '새 표현';
-    const body = [
-      `Coach: ${i + 1}번, ${label}이에요. 어젯밤 하신 말은 "${it.myPhrase}" 였어요.`,
-      `Coach: 자연스러운 표현은 "${stripSpeechDirections(it.naturalPhrase)}" 입니다. ${it.explanation}`,
-      `Coach: 짧은 대화로 들어 볼게요.`,
-      ...it.dialogue.map((d) => `${d.speaker === 'Partner' ? 'Partner' : 'Coach'}: ${d.line}`),
-      `Coach: 한국어 뜻은 "${it.meaningKo}". 영어로 말해 보세요.`,
-    ].join('\n');
-    plan.push({ kind: 'speech', text: body, two: true, itemIndex: i });
-    plan.push({ kind: 'silence', sec: SILENCE_SEC });
-    plan.push({ kind: 'speech', text: `Coach: ${it.answerEnglish}`, two: false });
-    plan.push({ kind: 'silence', sec: 0.8 });
-  }
-  if (coachNote) {
-    plan.push({ kind: 'speech', text: `Coach: 오늘의 코치 한마디. ${coachNote}`, two: false });
-  }
+  const plan = buildLectureSpeechPlan(title, items, coachNote, state.date);
 
   const speechTotal = plan.filter((s) => s.kind === 'speech').length;
   let speechDone = 0;
