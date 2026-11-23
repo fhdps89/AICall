@@ -26,6 +26,7 @@ import {
   shouldOverwriteFirestoreLecture,
   listenedAtToKeep,
   shouldMarkLectureDate,
+  shouldClearStaleLectureMedia,
   readUploadFailAt,
   writeUploadFailAt,
   clearUploadFailAt,
@@ -320,6 +321,9 @@ export async function startLecture(uid: string, date = getKSTToday(), force = fa
     ttsEngine: lecture.ttsEngine,
     createdAt: lecture.createdAt,
     updatedAt: new Date().toISOString(),
+    ...(shouldClearStaleLectureMedia(lecture.status, force)
+      ? { audioUrl: null, listenedAt: null }
+      : {}),
     ...(lecture.error ? { error: lecture.error } : {}),
   };
   await setDoc(lectureRef(uid, date), docData, { merge: true });
@@ -367,7 +371,7 @@ export async function syncLectureStatus(uid: string, date = getKSTToday()): Prom
     status: "ready",
     title: lecture.title,
     script: lecture.script,
-    audioUrl: current?.audioUrl || null,
+    audioUrl: current?.createdAt === lecture.createdAt ? (current?.audioUrl || null) : null,
     coachNote: lecture.coachNote,
     itemCount: lecture.itemCount,
     newMistakeIds: lecture.newMistakeIds,

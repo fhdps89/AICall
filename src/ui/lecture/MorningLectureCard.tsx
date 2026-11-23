@@ -4,6 +4,7 @@ import { User } from "firebase/auth";
 import { Headphones, Loader2, Play, RefreshCw, AlertTriangle } from "lucide-react";
 import { getKSTToday } from "../../services/firebase/db";
 import { LectureDoc, getLecture, startLecture, syncLectureStatus, copyLectureAudio } from "../../services/lecture/lectureService";
+import { rebuildTodayLecture } from "../../services/lecture/rebuildTodayLecture";
 import { formatLectureDuration } from "../../services/lecture/lecturePick";
 import { shouldCopyLectureAudio, shouldShowLectureImmediately, readUploadFailAt } from "../../services/lecture/lectureSyncPolicy";
 import { LectureModal } from "./LectureModal";
@@ -118,16 +119,23 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
     }
   }, [lecture?.status]);
 
-  const create = async (force = false) => {
+  const runLectureAction = async (action: () => Promise<LectureDoc>) => {
     setBusy(true);
     setError(null);
     try {
-      setLecture(await startLecture(user.uid, today, force));
+      setLecture(await action());
     } catch (err: any) {
       setError(friendlyError(err));
     } finally {
       setBusy(false);
     }
+  };
+
+  const create = (force = false) => runLectureAction(() => startLecture(user.uid, today, force));
+
+  const rebuild = () => {
+    if (!confirm("오늘 통화까지 넣어 강의를 다시 만들까요?")) return;
+    return runLectureAction(() => rebuildTodayLecture(user.uid, today));
   };
 
   const status = lecture?.status;
@@ -173,12 +181,24 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
         </div>
         <div className="flex gap-2">
           {status === "ready" ? (
-            <button
-              onClick={() => setOpen(true)}
-              className="px-4 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 text-xs font-black flex items-center gap-1.5 cursor-pointer"
-            >
-              <Play className="w-3.5 h-3.5 fill-current" /> 재생
-            </button>
+            <>
+              <button
+                onClick={() => setOpen(true)}
+                className="px-4 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 text-xs font-black flex items-center gap-1.5 cursor-pointer"
+              >
+                <Play className="w-3.5 h-3.5 fill-current" /> 재생
+              </button>
+              <button
+                type="button"
+                data-testid="rebuild-today-lecture"
+                onClick={rebuild}
+                disabled={busy || loading}
+                className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 border border-slate-700 text-slate-300 text-xs font-semibold flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
+              >
+                {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                다시 만들기
+              </button>
+            </>
           ) : status === "generating" ? (
             <div className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-bold flex items-center gap-1.5">
               <Loader2 className="w-3.5 h-3.5 animate-spin" /> 생성 중 (1~3분)

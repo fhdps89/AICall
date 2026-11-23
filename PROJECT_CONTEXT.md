@@ -1,7 +1,7 @@
 # 📖 프로젝트 컨텍스트 및 히스토리 (Project Context)
 
 > **프로젝트**: One Call English (옛 이름: 「오늘도 한 통」) — AI 1:1 전화영어  
-> **현재 버전**: `v2.10.0` (공식 빌드 표기: `getBuildVersion()`이 `server.ts` 수정 시각으로 계산하는 `20261110-multilingual-HHmm`) | **최종 갱신**: 2026-11-22 (KST)  
+> **현재 버전**: `v2.10.0` (공식 빌드 표기: `getBuildVersion()`이 `server.ts` 수정 시각으로 계산하는 `20261110-multilingual-HHmm`) | **최종 갱신**: 2026-11-24 (KST)  
 > **기준 기획**: [`docs/plan/implementation_plan_v4.md`](./docs/plan/implementation_plan_v4.md) Part B · 진행 가이드 [`docs/plan/ai-studio-build-guide.md`](./docs/plan/ai-studio-build-guide.md) · 현재 앱과의 차이 [`docs/plan/gap-v2.1.0-vs-plan-v4.md`](./docs/plan/gap-v2.1.0-vs-plan-v4.md)  
 > **관리 규칙**: `README.md` 변경 시 본 문서의 아키텍처 및 히스토리를 함께 최신화하며, 모든 일시는 한국 표준시(KST)를 기준으로 합니다.
 
@@ -141,7 +141,7 @@
    - **한계(일부 해소, 2026-11-22)**: 피드 설정은 Firestore `feeds/{id}`에 암호화 백업되어 재시작 뒤에도 복원됨(v2.8.1). ready 강의의 대본·상태도 `feeds/{id}/days/{date}`에 같은 방식으로 백업되며, 재시작 뒤에는 같은 대본으로 TTS만 다시 만든다(새 강의 생성 아님). WAV 원본은 서버 `.data/`에만 있어 재시작 직후 1–3분 동안 피드가 제목과 함께 `generating`을 보여줄 수 있음. 예비 녹음은 여전히 `.data/`에만 있다.
    - **피드 audioUrl 스킴** (2026-11-22): `today.json`의 절대 URL은 프록시 뒤에서도 https로 만든다(`X-Forwarded-Proto` / `Forwarded`, `trust proxy`). 공개 호스트는 컨테이너가 http로 보여도 https를 쓴다. localhost는 http를 유지한다.
    - **만들던 중 서버가 다시 켜진 강의** (v2.8.0): 서버 기록이 "생성 중"인데 실제 작업이 없으면 `failed`/`INTERRUPTED`로 알려 줌. 서버 기록 자체가 지워졌으면 앱이 Firestore의 "생성 중"을 같은 상태로 바꿈. 홈 카드는 "서버가 다시 시작되어 만들던 강의가 멈췄어요"와 **오늘 강의 만들기** 버튼을 보여 주고, 그록봇 피드는 30분 기다리지 않고 바로 다시 만듦.
-   - **생성 작업 타임아웃** (2026-11-22, 2026-11-23 wall-clock 보완): 대본+TTS 전체 15분, 각 `generateContent`(대본·TTS 한 조각) 90초. 시간 초과 시 `failed`/`TIMED_OUT`이고, 그록봇 피드는 `INTERRUPTED`와 같이 바로 다시 만듦. 프로세스 안의 `setTimeout`만으로는 AI Studio/Cloud Run이 요청 사이에 CPU를 줄이면 타이머가 벽에 붙은 시각에 안 돌아간다. 그래서 `createdAt` 기준 벽시계 15분을 넘긴 `generating`은 `running`이 남아 있어도 `TIMED_OUT`으로 보고, 피드가 epoch를 올려 바로 다시 만든다. 늦은 완료는 새 상태를 덮어쓰지 않음(작업 epoch). TTS 조각이 끝날 때마다 상태를 갱신함. `force`여도 아직 살아있는(타임아웃 전) 작업은 다시 시작하지 않음.
+   - **생성 작업 타임아웃** (2026-11-22, 2026-11-23 wall-clock 보완): 대본+TTS 전체 15분, 각 `generateContent`(대본·TTS 한 조각) 90초. 시간 초과 시 `failed`/`TIMED_OUT`이고, 그록봇 피드는 `INTERRUPTED`와 같이 바로 다시 만듦. 프로세스 안의 `setTimeout`만으로는 AI Studio/Cloud Run이 요청 사이에 CPU를 줄이면 타이머가 벽에 붙은 시각에 안 돌아간다. 그래서 `createdAt` 기준 벽시계 15분을 넘긴 `generating`은 `running`이 남아 있어도 `TIMED_OUT`으로 보고, 피드가 epoch를 올려 바로 다시 만든다. 늦은 완료는 새 상태를 덮어쓰지 않음(작업 epoch). TTS 조각이 끝날 때마다 상태를 갱신함. `force`여도 아직 살아있는(타임아웃 전) 작업은 다시 시작하지 않음. 오늘 강의가 이미 `ready`일 때는 홈 카드가 「다시 만들기」를 제공하며, 확인 뒤 최신 후보를 동기화(`syncFeed`)하고 `force=true`로 생성을 시작함. 복기가 끝난 통화만 재료에 들어가며, 같은 날짜에 남아 있던 이전 강의의 `audioUrl`·`listenedAt`은 새 작업을 시작할 때 지운다.
    - **ready 강의의 오디오가 사라진 경우** (QA 5차 30행, QA 6차 보강): Firestore에 대본이 남아 있으면 `POST /api/lecture/audio/rebuild`가 TTS만 다시 만들고 `status`는 `ready`로 유지함(`audioStatus: rebuilding`). 모달은 재생성 진행 개수와 재시도를 보여 주며, 대본이 없으면 홈에서 강의를 다시 만들어야 함. 오디오는 ffmpeg가 있으면 AAC/MP3(48kbps)로 저장하고 없으면 WAV이며, 임시 파일 후 rename. 클라이언트는 status를 폴링하며 재생성이 진행 중이면 3분 하드 타임아웃을 쓰지 않음(전체 15분, 정체 3분).
    - **홈 카드·Storage 업로드** (QA 34·28행, 2026-11-22): 앱이 올리는 경로는 `users/{uid}/lectures/{date}.wav`(또는 m4a/mp3)인데, 문서의 Storage 규칙 예시는 원래 `recordings/**`만 허용해 403이 나고 `audioUrl`이 비었다. 그 결과 새로고침마다 전체 파일을 받느라 카드가 「불러오는 중…」에 수십 초 머물렀다. 이제 ready 문서(audioUrl 없음 포함)는 즉시 보여주고, 업로드는 백그라운드·실패 백오프다. Storage 규칙 예시에 lectures 경로를 추가했으나 AI Studio Publish만으로는 규칙이 바뀌지 않으며 Firebase 콘솔에서 게시해야 한다.
    - **복기에서 오늘 강의로 연결** (P0-4): 복기 모달 「오늘 강의 보기」는 복기를 닫고 홈 강의 카드로 이동해 첫 `refresh()` 완료 후 스크롤하며, 이미 `ready`(오디오 포함)인 경우에만 `LectureModal`을 연다. 준비 전이면 `startLecture`를 부르지 않고 카드의 「오늘 강의 만들기」 버튼만 노출된 상태로 둔다.
@@ -179,6 +179,7 @@
 - 배포 서버는 `node server.ts`(Node 타입 스트리핑, tsx 없음)로 실행된다. 서버가 불러오는 `src/` 모듈과 그 모듈이 다시 불러오는 상대 경로는 반드시 `.ts` 확장자를 붙인다(`tsconfig.json` `allowImportingTsExtensions: true`). 테스트는 tsx로 돌아 확장자 누락을 못 잡으므로 `tests/serverNodeImports.test.ts`가 순수 node로 서버 import 대상을 불러 확인한다.
 
 ## 5. 버전 히스토리
+- **v2.10.0 이후 수정(미배포) — 준비된 오늘 강의를 홈에서 다시 만들기 (2026-11-24 KST, 브랜치 `englead/lecture-rebuild-ready-20261124`)**: `MorningLectureCard`에서 오늘 강의가 `ready`일 때 「재생」 옆에 보조 「다시 만들기」(`rebuild-today-lecture`) 버튼을 추가해 확인(`오늘 통화까지 넣어 강의를 다시 만들까요?`) 후 `rebuildTodayLecture`(`syncFeed` 최선 시도 → `startLecture(..., true)`)를 호출하도록 구현(기존 5초 폴링 유지, 서버·인증 변경 없음). 복기가 끝난 통화만 반영되며, 새 작업을 시작할 때 같은 날짜의 옛 `audioUrl`·`listenedAt`은 지운다.
 - **v2.10.0 이후 수정(미배포) — QA 10차 37·43–48행 수정 (2026-11-22 KST, 브랜치 `englead/qa10-fixes-20261122`)**:
   - **37행**: `trackPickerSubtitle("startCall")` 문구 정리 및 `reviewDayRowSubtitle(mode)` 분리(`startCall`이면 「선택하면 복기 카드에 머물러요」).
   - **43행**: `postpone`을 `type: "info"` + `CoachInfoCard` 정보 카드(승인 버튼 없음, 마지막 줄 「구글 캘린더는 바뀌지 않습니다」)로 전환하고 메시지에 `infoCard`로 저장.
