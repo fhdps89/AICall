@@ -52,6 +52,11 @@ export function shouldMarkLectureDate(previousStatus: string | undefined, nextSt
   return nextStatus === "ready" && previousStatus !== "ready";
 }
 
+/** Drop leftover audioUrl/listenedAt when a new generate job starts (force rebuild of a ready lecture). */
+export function shouldClearStaleLectureMedia(status: string | undefined, force: boolean): boolean {
+  return force === true || status === "generating";
+}
+
 export function readUploadFailAt(storage: { getItem(k: string): string | null } | undefined, uid: string, date: string): number | null {
   if (!storage) return null;
   const raw = storage.getItem(lectureUploadFailKey(uid, date));

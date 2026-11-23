@@ -10,6 +10,7 @@ import {
   shouldOverwriteFirestoreLecture,
   listenedAtToKeep,
   shouldMarkLectureDate,
+  shouldClearStaleLectureMedia,
 } from '../src/services/lecture/lectureSyncPolicy.ts';
 
 test('ready lecture without audioUrl can be shown immediately', () => {
@@ -42,6 +43,16 @@ test('listenedAt is kept only for the same lecture createdAt', () => {
   assert.equal(listenedAtToKeep(current, 'b'), null);
   assert.equal(listenedAtToKeep({ createdAt: 'a', listenedAt: null }, 'a'), null);
 });
+
+test('stale lecture media is cleared when force-rebuilding or a new job is generating', () => {
+  assert.equal(shouldClearStaleLectureMedia('generating', true), true);
+  assert.equal(shouldClearStaleLectureMedia('generating', false), true);
+  assert.equal(shouldClearStaleLectureMedia('ready', true), true);
+  assert.equal(shouldClearStaleLectureMedia('ready', false), false);
+  assert.equal(shouldClearStaleLectureMedia('failed', false), false);
+  assert.equal(shouldClearStaleLectureMedia(undefined, false), false);
+});
+
 
 test('lectureDate is recorded only when status first becomes ready', () => {
   assert.equal(shouldMarkLectureDate('generating', 'ready'), true);

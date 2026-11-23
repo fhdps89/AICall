@@ -4,6 +4,18 @@
 
 ---
 
+### [2026-11-24 KST] v2.10.0 이후 수정(미배포) — 준비된 오늘 강의를 홈에서 다시 만들기 (브랜치 `englead/lecture-rebuild-ready-20261124`)
+- **배경**:
+  - 오늘 아침 강의가 이미 `status === "ready"` 상태일 때, 이어서 진행한 아침 통화(예: 11/24 아침 통화)를 반영해 사용자가 홈에서 강의를 다시 만들 수 있는 UI 경로가 없었다(`MorningLectureCard`는 `ready` 상태에서 「재생」만 노출하며, `/api/lecture/generate`의 `force: true` 경로를 호출하지 않았음).
+- **수정**:
+  - `src/services/lecture/rebuildTodayLecture.ts`: `feedService.ts`가 `lectureService.ts`의 `pickLectureMistakes`를 import하는 순환 참조를 피하기 위해 별도 헬퍼 `rebuildTodayLecture`·`rebuildTodayLectureWith`를 추가. 먼저 `syncFeed(uid)`로 최신 후보를 서버에 동기화(실패 시 경고 로그 후 계속 진행)한 뒤 `startLecture(uid, date, true)`(`force=true`)를 호출함(새 서버 엔드포인트·인증 변경 없음).
+  - `src/ui/lecture/MorningLectureCard.tsx`: `status === "ready"` 분기에서만 기존 「재생」 버튼 옆에 보조 스타일(slate 배경·작은 패딩)의 「다시 만들기」 버튼(`data-testid="rebuild-today-lecture"`)을 추가. 클릭 시 `confirm("오늘 통화까지 넣어 강의를 다시 만들까요?")` 확인을 거쳐(취소 시 무동작) `busy || loading` 비활성·로딩 스피너·`friendlyError`·기존 5초 폴링(`generating` 상태 전환 시)을 그대로 사용함(`generating`/실패/미생성 분기 버튼은 불변).
+- **방어 조치 (Safeguards)**: `tests/rebuildTodayLecture.test.ts`(호출 순서 `syncFeed` → `startLecture(..., true)`, `syncFeed` 실패 시 경고 후 계속 진행, `startLecture` 실패 전파) 및 `tests/morningLectureRebuild.test.ts`(`ready` 분기 한정 노출·확인 후 `runLectureAction` 호출 순서·`generating`/실패/미생성 분기 비노출·`rebuildTodayLecture` 호출) 추가, `tests/userFacingText.test.ts`로 사용자 노출 금지어 비포함 확인. 다시 만들기를 시작하면 같은 날짜에 남아 있던 이전 강의의 `audioUrl`·`listenedAt`을 지워 옛 오디오가 재생되거나 「들음」이 남는 일을 막음(`shouldClearStaleLectureMedia`, `syncLectureStatus`는 `createdAt`이 다를 때 `audioUrl`을 이어받지 않음).
+- **한계**: 복기가 끝나 세션에 실수가 저장된 통화만 재료에 들어간다. `syncFeed`가 실패해도 `startLecture`는 세션에서 후보를 다시 골라 generate 본문에 넣는다. 공개 피드 후보 목록은 다음 성공한 sync까지 잠시 예전일 수 있으나, 새 강의가 ready가 되면 피드는 그 강의를 제공한다.
+- **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build`. 머지·배포 안 함.
+
+---
+
 ### [2026-11-23 KST] v2.10.0 이후 수정(미배포) — 아침 강의 생성 정체를 wall-clock 15분으로 풀기 (브랜치 `englead/feed-wallclock-timeout-20261123`)
 - **배경**:
   - 11/21·11/22·11/23 사흘 연속 아침 피드가 `status=generating`에 머물렀다. PR #35(프로세스 `setTimeout` 15분)는 11/22 10:58 머지되어 #44 라이브(`index-DZ567Gqg.js`)에 포함돼 있었지만, 11/23 07:30 점검에서도 정체를 막지 못했다. 11/23은 서버에 요청을 이어 보낸 뒤 07:52에 같은 제목으로 ready가 되었고, Republish는 하지 않았다.
