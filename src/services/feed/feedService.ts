@@ -21,13 +21,19 @@ export async function ensureFeedSecret(uid: string): Promise<string> {
   return secret;
 }
 
-export async function syncFeed(uid: string, secretOverride?: string, previousSecret?: string): Promise<string> {
+export async function syncFeed(
+  uid: string,
+  secretOverride?: string,
+  previousSecret?: string,
+  opts: { autoRegenerate?: boolean } = {}
+): Promise<string> {
   const secret = secretOverride || (await ensureFeedSecret(uid));
   const [picked, due] = await Promise.all([pickLectureMistakes(uid), getDueMistakes(uid)]);
   await authJson("/api/feed/sync", {
     secret,
     previousSecret,
     quizCount: Math.min(due.length, 10),
+    autoRegenerate: opts.autoRegenerate !== false,
     ...picked,
   });
   return secret;

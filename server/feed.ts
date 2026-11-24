@@ -1,8 +1,8 @@
 /**
  * B-8 Grok Bot feed (no scheduler server).
  * The app (logged in) syncs {feedSecret, quizCount, candidate mistakes} to the server.
- * GET /feed/{secret}/today[.json] needs only the secret; if there is no lecture today and
- * there are candidates, generation starts right there and "generating" is returned.
+ * GET /feed/{secret}/today[.json] needs only the secret; after 05:00 KST if there is no
+ * lecture today and there are candidates, generation starts right there.
  */
 import fs from 'fs';
 import path from 'path';
@@ -14,16 +14,26 @@ import {
   startLectureJob,
   restoreReadyLecture,
   lectureAudioPath,
+  lectureJobEpoch,
   lectureRebuildInFlight,
+  installRestoredLectureAudio,
+  maxCreatedAtIso,
   LECTURE_AUDIO_MISSING,
+  LECTURE_AUDIO_RETRY_COOLDOWN_MS,
 } from './lecture.ts';
 import type { LectureMistakeInput, LectureState, LectureSynthesizeFn } from './lecture.ts';
 import { safeEqual } from './auth.ts';
-import { loadFeedBackup, loadLectureBackup, saveLectureBackup } from './feedStore.ts';
+import { loadFeedBackup, loadLectureBackup, persistLectureBackups } from './feedStore.ts';
+import { loadLectureAudioBackup } from './lectureAudioBackup.ts';
 import { setUserKeyFromFeed } from './userKey.ts';
 
 const FEED_FILE = path.join(DATA_DIR, 'feed.json');
 const FAILED_RETRY_COOLDOWN_MS = 30 * 60 * 1000;
+export const FEED_START_HOUR_KST = 5;
+
+export function isBeforeFeedStartKst(now = Date.now()): boolean {
+  return new Date(now + 9 * 3600e3).getUTCHours() < FEED_START_HOUR_KST;
+}
 
 export interface FeedSyncState {
   uid: string;
@@ -32,6 +42,7 @@ export interface FeedSyncState {
   newMistakes: LectureMistakeInput[];
   reviewMistakes: LectureMistakeInput[];
   syncedAt: string;
+  autoRegenerate?: boolean;
 }
 
 export function isValidFeedSecret(secret: unknown): secret is string {
@@ -87,25 +98,106 @@ export async function loadFeedForSecret(secret: string): Promise<FeedSyncState |
 
 export interface FeedToday {
   date: string;
-  status: 'ready' | 'generating' | 'nothing';
+  status: 'ready' | 'generating' | 'waiting' | 'nothing';
   title: string | null;
   itemCount: number;
   coachNote: string | null;
   audioUrl: string | null;
+  audioRestoring: boolean;
   quizCount: number;
+  startsAt?: string;
   error?: string;
+}
+
+export interface FeedDiag {
+  date: string;
+  status: 'ready' | 'generating' | 'waiting' | 'nothing' | 'failed';
+  error: string | null;
+  audioRestoring: boolean;
+  hasAudio: boolean;
+  generatedAt: string | null;
+  durationSec: number | null;
+  itemCount: number;
+  newMistakeCount: number;
+  reviewCount: number;
+  inputNewCount: number;
+  inputReviewCount: number;
+  latestInputCreatedAt: string | null;
+  syncedAt: string | null;
+  syncNewCount: number;
+  syncReviewCount: number;
+  latestSyncCandidateAt: string | null;
+  pendingNewCount: number;
+  autoRegenerateEligible: boolean;
+}
+
+export function feedOnReady(st: FeedSyncState) {
+  return async (s: LectureState, isCurrent: () => boolean) => {
+    try {
+      await persistLectureBackups(st.secret, s, isCurrent);
+    } catch (err: any) {
+      console.warn('[feed] lecture backup failed:', err?.message || err);
+    }
+  };
+}
+
+function lectureInputIdSet(lecture: LectureState): Set<string> {
+  if (lecture.inputNewIds) {
+    return new Set([...lecture.inputNewIds, ...(lecture.inputReviewIds ?? [])]);
+  }
+  return new Set([
+    ...(lecture.newMistakeIds || []),
+    ...(lecture.reviewMistakeIds || []),
+    ...(lecture.inputReviewIds ?? []),
+  ]);
+}
+
+export function shouldAutoRegenerate(
+  lecture: LectureState | null,
+  st: FeedSyncState,
+  now = Date.now()
+): boolean {
+  if (isBeforeFeedStartKst(now)) return false;
+  if (st.autoRegenerate === false) return false;
+  if (!lecture || (lecture.status !== 'ready' && lecture.status !== 'generating')) return false;
+  const syncedMs = Date.parse(st.syncedAt || '');
+  const createdMs = Date.parse(lecture.createdAt || '');
+  if (!Number.isFinite(syncedMs) || !Number.isFinite(createdMs) || syncedMs <= createdMs) return false;
+  const inputs = lectureInputIdSet(lecture);
+  const novel = (st.newMistakes || []).filter((m) => !inputs.has(m.id));
+  return novel.length > 0;
+}
+
+export function maybeAutoRegenerateToday(
+  ai: GoogleGenAI | null,
+  st: FeedSyncState,
+  date: string,
+  opts: { now?: number; startJob?: typeof startLectureJob } = {}
+): boolean {
+  if (!ai) return false;
+  const now = opts.now ?? Date.now();
+  const lecture = readLectureState(st.uid, date, now);
+  if (!shouldAutoRegenerate(lecture, st, now)) return false;
+  const startJob = opts.startJob || startLectureJob;
+  startJob(ai, st.uid, date, st.newMistakes, st.reviewMistakes, {
+    force: true,
+    onReady: feedOnReady(st),
+  });
+  return true;
 }
 
 export interface EnsureTodayLectureDeps {
   loadBackup?: (secret: string, date: string) => Promise<LectureState | null>;
+  loadAudio?: typeof loadLectureAudioBackup;
   restoreLecture?: typeof restoreReadyLecture;
   synthesizeFn?: LectureSynthesizeFn;
+  now?: number;
 }
 
 const ensureInFlight = new Map<string, Promise<void>>();
 
 /**
- * Ensure today's lecture is restored from Firestore backup if local state is missing or failed
+ * Ensure today's lecture is restored from Storage/Firestore backup if local audio is missing
  * and no generation job is actively running. Single-flight per uid:date.
  * Rejects on transient backup read failures (5xx/network) so callers do not start a duplicate job.
  */
@@ -131,36 +223,69 @@ async function ensureTodayLectureOnce(
   date: string,
   deps: EnsureTodayLectureDeps
 ): Promise<void> {
-  const local = readLectureState(st.uid, date);
+  const now = deps.now ?? Date.now();
+  const local = readLectureState(st.uid, date, now);
   if (local?.status === 'ready' && lectureAudioPath(st.uid, date)) return;
   // readLectureState only returns 'generating' when an active job is in memory.
   if (local?.status === 'generating') return;
-  if (lectureRebuildInFlight(st.uid, date)) return;
+  if (lectureRebuildInFlight(st.uid, date) && local?.audioStatus === 'rebuilding') return;
+  const epochBefore = lectureJobEpoch(st.uid, date);
+  const localCreatedAtBefore = local?.createdAt;
 
+  let cand: LectureState | null = null;
   if (local?.status === 'ready' && Array.isArray(local.script) && local.script.length > 0) {
-    if (!ai && !deps.synthesizeFn) return;
-    const restore = deps.restoreLecture || restoreReadyLecture;
-    restore(ai as GoogleGenAI, st.uid, date, local, { synthesizeFn: deps.synthesizeFn });
-    return;
+    cand = local;
+  } else {
+    const load = deps.loadBackup || loadLectureBackup;
+    const backup = await load(st.secret, date);
+    if (
+      !backup ||
+      backup.uid !== st.uid ||
+      backup.date !== date ||
+      backup.status !== 'ready' ||
+      !Array.isArray(backup.script) ||
+      backup.script.length === 0
+    ) {
+      return;
+    }
+    cand = backup;
   }
 
-  const load = deps.loadBackup || loadLectureBackup;
-  const backup = await load(st.secret, date);
   if (
-    !backup ||
-    backup.uid !== st.uid ||
-    backup.date !== date ||
-    backup.status !== 'ready' ||
-    !Array.isArray(backup.script) ||
-    backup.script.length === 0
+    cand.audioRebuildFailedAt &&
+    now - Date.parse(cand.audioRebuildFailedAt) < LECTURE_AUDIO_RETRY_COOLDOWN_MS
   ) {
     return;
   }
+
+  if (cand.audioBackupId) {
+    const loadAudio = deps.loadAudio ?? loadLectureAudioBackup;
+    const audio = await loadAudio(st.secret, date, cand.audioBackupId).catch(() => null);
+    if (
+      audio &&
+      installRestoredLectureAudio(st.uid, date, cand, audio, {
+        expectedEpoch: epochBefore,
+        expectedCreatedAt: localCreatedAtBefore,
+      })
+    ) {
+      return;
+    }
+    if (
+      lectureJobEpoch(st.uid, date) !== epochBefore ||
+      readLectureState(st.uid, date, now)?.createdAt !== localCreatedAtBefore
+    ) {
+      return;
+    }
+  }
+
   if (!ai && !deps.synthesizeFn) return;
   const restore = deps.restoreLecture || restoreReadyLecture;
-  restore(ai as GoogleGenAI, st.uid, date, backup, { synthesizeFn: deps.synthesizeFn });
+  restore(ai as GoogleGenAI, st.uid, date, cand, {
+    synthesizeFn: deps.synthesizeFn,
+    onReady: feedOnReady(st),
+    now,
+  });
 }
-
 
 /**
  * Absolute origin for public feed links (today.json audioUrl).
@@ -193,6 +318,7 @@ export interface BuildFeedTodayOpts {
   date?: string;
   skipStart?: boolean;
   startJob?: typeof startLectureJob;
+  now?: number;
 }
 
 export function buildFeedToday(
@@ -202,26 +328,34 @@ export function buildFeedToday(
   opts: BuildFeedTodayOpts = {}
 ): FeedToday {
   const date = opts.date || kstToday();
-  let lecture = readLectureState(st.uid, date);
+  const now = opts.now ?? Date.now();
+  let lecture = readLectureState(st.uid, date, now);
   const hasCandidates = st.newMistakes.length + st.reviewMistakes.length > 0;
   // Retry a failed lecture at most once per FAILED_RETRY_COOLDOWN_MS, so a feed that is
   // polled repeatedly does not restart a costly, failing generation on every request.
   const failedLongAgo = lecture?.status === 'failed' && lecture.error !== 'NOTHING_TO_TEACH'
-    && Date.now() - Date.parse(lecture.updatedAt || lecture.createdAt) > FAILED_RETRY_COOLDOWN_MS;
+    && now - Date.parse(lecture.updatedAt || lecture.createdAt) > FAILED_RETRY_COOLDOWN_MS;
   // A job cut off by a server restart did not fail on its own, so it is retried right away.
   const interrupted = lecture?.status === 'failed' && (lecture.error === 'INTERRUPTED' || lecture.error === 'TIMED_OUT');
   const startJob = opts.startJob || startLectureJob;
-  if (!opts.skipStart && (!lecture || failedLongAgo || interrupted) && hasCandidates && ai) {
+  const beforeStart = isBeforeFeedStartKst(now);
+
+  if (!opts.skipStart && !beforeStart && (!lecture || failedLongAgo || interrupted) && hasCandidates && ai) {
     lecture = startJob(ai, st.uid, date, st.newMistakes, st.reviewMistakes, {
-      onReady: async (s) => {
-        try {
-          await saveLectureBackup(st.secret, s);
-        } catch (err: any) {
-          console.warn('[feed] lecture backup failed:', err?.message || err);
-        }
+      onReady: feedOnReady(st),
+    });
+  } else if (!opts.skipStart && ai) {
+    let regenState: LectureState | undefined;
+    const regen = maybeAutoRegenerateToday(ai, st, date, {
+      now,
+      startJob: (...args) => {
+        regenState = startJob(...args);
+        return regenState;
       },
     });
+    if (regen && regenState) lecture = regenState;
   }
+
   const base: FeedToday = {
     date,
     status: 'nothing',
@@ -229,9 +363,14 @@ export function buildFeedToday(
     itemCount: 0,
     coachNote: null,
     audioUrl: null,
+    audioRestoring: false,
     quizCount: st.quizCount,
   };
-  if (!lecture) return base;
+  if (!lecture) {
+    return beforeStart
+      ? { ...base, status: 'waiting', startsAt: `${date}T05:00:00+09:00` }
+      : base;
+  }
   if (lecture.status === 'generating') return { ...base, status: 'generating', title: lecture.title || null };
   if (lecture.status === 'ready') {
     if (lectureAudioPath(st.uid, date)) {
@@ -242,14 +381,107 @@ export function buildFeedToday(
         itemCount: lecture.itemCount || 0,
         coachNote: lecture.coachNote || null,
         audioUrl: `${baseUrl}/feed/${st.secret}/audio/${lecture.audioFile || `${date}.wav`}`,
+        audioRestoring: false,
       };
     }
-    if (lecture.audioStatus === 'rebuilding' || lectureRebuildInFlight(st.uid, date)) {
-      return { ...base, status: 'generating', title: lecture.title || null };
+    const restoring =
+      lecture.audioStatus === 'rebuilding' ||
+      Boolean(lectureRebuildInFlight(st.uid, date) && lecture.audioStatus !== 'missing');
+    if (restoring) {
+      return {
+        ...base,
+        status: 'ready',
+        title: lecture.title || null,
+        itemCount: lecture.itemCount || 0,
+        coachNote: lecture.coachNote || null,
+        audioUrl: null,
+        audioRestoring: true,
+      };
     }
-    return { ...base, error: lecture.error || LECTURE_AUDIO_MISSING };
+    return {
+      ...base,
+      status: 'ready',
+      title: lecture.title || null,
+      itemCount: lecture.itemCount || 0,
+      coachNote: lecture.coachNote || null,
+      audioUrl: null,
+      audioRestoring: false,
+      error: lecture.error || LECTURE_AUDIO_MISSING,
+    };
+  }
+  if (beforeStart) {
+    return { ...base, status: 'waiting', startsAt: `${date}T05:00:00+09:00` };
   }
   return { ...base, ...(lecture.error && lecture.error !== 'NOTHING_TO_TEACH' ? { error: lecture.error } : {}) };
+}
+
+/** Read-only diagnostic summary for GET /feed/:secret/today/diag.json (no secrets, ids, or text). */
+export function buildFeedDiag(
+  st: FeedSyncState,
+  opts: { date?: string; now?: number } = {}
+): FeedDiag {
+  const date = opts.date || kstToday();
+  const now = opts.now ?? Date.now();
+  const lecture = readLectureState(st.uid, date, now);
+  const hasAudio = Boolean(lecture?.status === 'ready' && lectureAudioPath(st.uid, date));
+  const audioRestoring = Boolean(
+    lecture?.status === 'ready' &&
+      !hasAudio &&
+      (lecture.audioStatus === 'rebuilding' ||
+        (lectureRebuildInFlight(st.uid, date) && lecture.audioStatus !== 'missing'))
+  );
+
+  let status: FeedDiag['status'];
+  if (!lecture) {
+    status = isBeforeFeedStartKst(now) ? 'waiting' : 'nothing';
+  } else {
+    status = lecture.status;
+  }
+
+  let error: string | null = null;
+  if (lecture?.status === 'failed') {
+    error = lecture.error || 'GENERATION_FAILED';
+  } else if (lecture?.status === 'ready' && !hasAudio && !audioRestoring) {
+    error = lecture.error || LECTURE_AUDIO_MISSING;
+  }
+
+  const script = Array.isArray(lecture?.script) ? lecture!.script! : [];
+  const newMistakeCount =
+    script.length > 0
+      ? script.filter((it) => it.kind === 'new').length
+      : (lecture?.newMistakeIds?.length ?? 0);
+  const reviewCount =
+    script.length > 0
+      ? script.filter((it) => it.kind === 'review').length
+      : (lecture?.reviewMistakeIds?.length ?? 0);
+  const itemCount = lecture ? (lecture.itemCount ?? (script.length || newMistakeCount + reviewCount)) : 0;
+
+  const inputNewIds = lecture ? (lecture.inputNewIds ?? lecture.newMistakeIds ?? []) : [];
+  const inputReviewIds = lecture ? (lecture.inputReviewIds ?? lecture.reviewMistakeIds ?? []) : [];
+  const inputSet = lecture ? lectureInputIdSet(lecture) : new Set<string>();
+  const pendingNewCount = (st.newMistakes || []).filter((m) => !inputSet.has(m.id)).length;
+
+  return {
+    date,
+    status,
+    error,
+    audioRestoring,
+    hasAudio,
+    generatedAt: lecture?.createdAt ?? null,
+    durationSec: typeof lecture?.durationSec === 'number' ? lecture.durationSec : null,
+    itemCount,
+    newMistakeCount,
+    reviewCount,
+    inputNewCount: inputNewIds.length,
+    inputReviewCount: inputReviewIds.length,
+    latestInputCreatedAt: lecture?.inputLatestCreatedAt ?? null,
+    syncedAt: st.syncedAt || null,
+    syncNewCount: st.newMistakes?.length ?? 0,
+    syncReviewCount: st.reviewMistakes?.length ?? 0,
+    latestSyncCandidateAt: maxCreatedAtIso([...(st.newMistakes || []), ...(st.reviewMistakes || [])]) ?? null,
+    pendingNewCount,
+    autoRegenerateEligible: shouldAutoRegenerate(lecture, st, now),
+  };
 }
 
 export function feedAudioFile(st: FeedSyncState, date: string): string | null {
@@ -260,7 +492,16 @@ export function feedAudioFile(st: FeedSyncState, date: string): string | null {
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 
 export function renderFeedHtml(f: FeedToday): string {
-  const statusKo = f.status === 'ready' ? '준비 완료' : f.status === 'generating' ? '생성 중' : '오늘은 강의 없음';
+  const statusKo =
+    f.status === 'ready'
+      ? f.audioRestoring
+        ? '오디오 복원 중'
+        : '준비 완료'
+      : f.status === 'generating'
+      ? '생성 중'
+      : f.status === 'waiting'
+      ? '05:00 이후 준비'
+      : '오늘은 강의 없음';
   return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="robots" content="noindex,nofollow">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>원콜 오늘 아침 강의</title>
 <style>body{font-family:system-ui,sans-serif;max-width:560px;margin:24px auto;padding:0 16px;line-height:1.6}</style></head><body>

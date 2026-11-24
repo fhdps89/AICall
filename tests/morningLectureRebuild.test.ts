@@ -37,15 +37,13 @@ test('MorningLectureCard renders secondary rebuild button only in ready state wi
     'ready branch should include rebuild-today-lecture testid'
   );
 
-  assert.equal(
+  assert.ok(
     generatingBranch.includes('rebuild-today-lecture'),
-    false,
-    'generating branch must not include rebuild-today-lecture'
+    'generating branch must include rebuild-today-lecture'
   );
-  assert.equal(
+  assert.ok(
     generatingBranch.includes('다시 만들기'),
-    false,
-    'generating branch must not include 다시 만들기'
+    'generating branch must include 다시 만들기'
   );
 
   assert.ok(
@@ -62,4 +60,7 @@ test('MorningLectureCard renders secondary rebuild button only in ready state wi
     false,
     'failed/missing branch must not include 다시 만들기'
   );
+
+  assert.ok(src.includes('isLectureAudioRestoring'), 'expected isLectureAudioRestoring in MorningLectureCard');
+  assert.ok(src.includes('오디오 복원 중'), 'expected 오디오 복원 중 in MorningLectureCard');
 });

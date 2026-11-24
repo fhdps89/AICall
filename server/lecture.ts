@@ -5,6 +5,7 @@
  * - Concatenate PCM, insert 3s silence before each answer, save one WAV file
  * - Jobs run in the background; state is persisted under .data/lectures/{uid}/{date}.json
  */
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -15,6 +16,9 @@ import { encodeLectureAudio, mimeForAudioFile, type LectureEncodeFn } from './le
 import {
   MAX_NEW,
   MAX_REVIEW,
+  MAX_DIALOGUE_LINES,
+  MAX_EXTRA_EXAMPLES,
+  normalizeCoachNote,
   sanitizeLectureInputs,
   applyModelScriptToInputs,
   buildLectureSpeechPlan,
@@ -22,6 +26,19 @@ import {
   type LectureMistakeInput,
   type LectureScriptItem,
 } from './lectureMaterial.ts';
+import {
+  RATE as DURATION_RATE,
+  LECTURE_MIN_SEC,
+  LECTURE_EST_MAX_SEC,
+  DRILL_INTRO_TEXT,
+  buildRecapText,
+  fitLectureTimeline,
+  assembleLecturePcm,
+  type Extras,
+  type LectureDurationFit,
+  type MeasuredLecture,
+  type MeasuredLectureItem,
+} from './lectureDuration.ts';
 
 export type { LectureMistakeInput, LectureScriptItem } from './lectureMaterial.ts';
 export {
@@ -48,6 +65,10 @@ const VOICE_PARTNER = 'Puck';
 export const LECTURE_JOB_TIMEOUT_MS = 15 * 60 * 1000;
 /** One generateContent call (script or one TTS segment). Lets the 3-try loop actually retry. */
 export const LECTURE_STEP_TIMEOUT_MS = 90 * 1000;
+export const LECTURE_AUDIO_REBUILD_TIMEOUT_MS = 30 * 60 * 1000;
+export const LECTURE_AUDIO_RETRY_COOLDOWN_MS = 30 * 60 * 1000;
+export const LECTURE_AUDIO_REBUILD_TIMED_OUT = 'AUDIO_REBUILD_TIMED_OUT';
+const JOB_TIMED_OUT_RE = /^(lecture job|audio rebuild) timed out/;
 
 export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -96,14 +117,21 @@ export interface LectureState {
   itemCount?: number;
   newMistakeIds: string[];
   reviewMistakeIds: string[];
+  inputNewIds?: string[];
+  inputReviewIds?: string[];
+  inputLatestCreatedAt?: string;
   ttsEngine: 'gemini' | 'elevenlabs';
   chars?: number;
   textTokens?: number;
   durationSec?: number;
+  durationFit?: LectureDurationFit;
   audioFile?: string; // relative file name inside LECTURE_DIR/{uid}
   audioMime?: string;
+  audioBackupId?: string;
   /** Audio generation only. Do not use status=generating for a TTS rebuild of a ready script. */
   audioStatus?: 'ready' | 'rebuilding' | 'missing';
+  audioRebuildStartedAt?: string;
+  audioRebuildFailedAt?: string;
   audioProgress?: { completed: number; total: number };
   error?: string;
   createdAt: string;
@@ -126,7 +154,43 @@ export function kstToday(): string {
   return new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
 }
 
-export function readLectureState(uid: string, date: string): LectureState | null {
+export function maxCreatedAtIso(items: ReadonlyArray<{ createdAt?: string }>): string | undefined {
+  let maxMs = -Infinity;
+  let maxIso: string | undefined;
+  for (const it of items) {
+    if (!it?.createdAt) continue;
+    const ms = Date.parse(it.createdAt);
+    if (Number.isFinite(ms) && ms > maxMs) {
+      maxMs = ms;
+      maxIso = it.createdAt;
+    }
+  }
+  return maxIso;
+}
+
+export function audioRebuildOverlay(
+  st: LectureState,
+  isRunning: boolean,
+  now = Date.now()
+): LectureState {
+  if (st.status !== 'ready' || st.audioStatus !== 'rebuilding') return st;
+  if (!isRunning) {
+    return { ...st, audioStatus: 'missing', error: 'INTERRUPTED' };
+  }
+  const startedMs = Date.parse(st.audioRebuildStartedAt ?? st.updatedAt ?? '');
+  if (Number.isFinite(startedMs) && now - startedMs > LECTURE_AUDIO_REBUILD_TIMEOUT_MS) {
+    return {
+      ...st,
+      audioStatus: 'missing',
+      error: LECTURE_AUDIO_REBUILD_TIMED_OUT,
+      audioRebuildFailedAt:
+        st.audioRebuildFailedAt ?? new Date(startedMs + LECTURE_AUDIO_REBUILD_TIMEOUT_MS).toISOString(),
+    };
+  }
+  return st;
+}
+
+export function readLectureState(uid: string, date: string, now = Date.now()): LectureState | null {
   const file = path.join(userDir(uid), `${safeDate(date)}.json`);
   if (!fs.existsSync(file)) return null;
   let state: LectureState;
@@ -139,18 +203,16 @@ export function readLectureState(uid: string, date: string): LectureState | null
   // if the wall-clock cap has also passed — the home card should say the server restarted.
   // "generating" past the wall-clock cap while `running` is still set (CPU-throttled
   // timers never fired): TIMED_OUT. The feed retries both immediately.
+  const key = `${uid}:${date}`;
   if (state.status === 'generating') {
-    if (!running.has(`${uid}:${date}`)) {
+    if (!running.has(key)) {
       return { ...state, status: 'failed', error: 'INTERRUPTED' };
     }
-    if (isLectureJobWallClockTimedOut(state)) {
+    if (isLectureJobWallClockTimedOut(state, now)) {
       return { ...state, status: 'failed', error: 'TIMED_OUT' };
     }
   }
-  if (state.status === 'ready' && state.audioStatus === 'rebuilding' && !running.has(`${uid}:${date}`)) {
-    return { ...state, audioStatus: 'missing', error: 'INTERRUPTED' };
-  }
-  return state;
+  return audioRebuildOverlay(state, running.has(key), now);
 }
 
 function writeLectureState(state: LectureState): void {
@@ -201,14 +263,16 @@ function removeLegacyAudioFiles(dir: string, date: string, keepName?: string): v
 
 export const LECTURE_AUDIO_MISSING = 'LECTURE_AUDIO_MISSING';
 export const LECTURE_AUDIO_SCRIPT_MISSING = 'LECTURE_AUDIO_SCRIPT_MISSING';
-export const MAX_LECTURE_SCRIPT_ITEMS = MAX_NEW + MAX_REVIEW;
+// Keep literal 23 so legacy backups with 3 reviews still pass sanitizeLectureScriptPayload.
+export const MAX_LECTURE_SCRIPT_ITEMS = MAX_NEW + 3;
 
 export type LecturePcm = { data: Buffer; rate: number };
 export type LectureSynthesizeFn = (
   ai: GoogleGenAI,
   engine: 'gemini' | 'elevenlabs',
   text: string,
-  twoSpeakers: boolean
+  twoSpeakers: boolean,
+  signal?: AbortSignal
 ) => Promise<LecturePcm>;
 
 export interface LectureAudioScriptPayload {
@@ -218,14 +282,49 @@ export interface LectureAudioScriptPayload {
   itemCount?: number;
   newMistakeIds?: string[];
   reviewMistakeIds?: string[];
+  inputNewIds?: string[];
+  inputReviewIds?: string[];
+  inputLatestCreatedAt?: string;
   ttsEngine?: 'gemini' | 'elevenlabs';
   createdAt?: string;
   textTokens?: number;
+  audioBackupId?: string;
+  durationFit?: LectureDurationFit;
 }
 
 export type LectureScriptSanitizeResult =
   | { ok: true; payload: LectureAudioScriptPayload }
   | { ok: false; error: string };
+
+function sanitizeDurationFit(raw: unknown): LectureDurationFit | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const f = raw as Record<string, unknown>;
+  const nums = [
+    'baseSec',
+    'droppedCount',
+    'replayCount',
+    'drillUnits',
+    'padSec',
+    'guardPadSec',
+    'truncatedSec',
+    'extraTtsCalls',
+  ] as const;
+  for (const k of nums) {
+    if (typeof f[k] !== 'number' || !Number.isFinite(f[k])) return undefined;
+  }
+  if (typeof f.recap !== 'boolean') return undefined;
+  return {
+    baseSec: f.baseSec as number,
+    droppedCount: f.droppedCount as number,
+    replayCount: f.replayCount as number,
+    recap: f.recap,
+    drillUnits: f.drillUnits as number,
+    padSec: f.padSec as number,
+    guardPadSec: f.guardPadSec as number,
+    truncatedSec: f.truncatedSec as number,
+    extraTtsCalls: f.extraTtsCalls as number,
+  };
+}
 
 export function sanitizeLectureScriptPayload(raw: unknown): LectureScriptSanitizeResult {
   if (!raw || typeof raw !== 'object') return { ok: false, error: 'script payload must be an object' };
@@ -247,7 +346,7 @@ export function sanitizeLectureScriptPayload(raw: unknown): LectureScriptSanitiz
     }
     const kind = it.kind === 'review' ? 'review' : 'new';
     const dialogue = Array.isArray(it.dialogue)
-      ? it.dialogue.slice(0, 4).flatMap((d) => {
+      ? it.dialogue.slice(0, MAX_DIALOGUE_LINES).flatMap((d) => {
           if (!d || typeof d !== 'object') return [];
           const line = d as Record<string, unknown>;
           if (typeof line.line !== 'string') return [];
@@ -255,6 +354,12 @@ export function sanitizeLectureScriptPayload(raw: unknown): LectureScriptSanitiz
           return [{ speaker: speaker as 'Coach' | 'Partner', line: String(line.line).slice(0, 400) }];
         })
       : [];
+    const extraExamples = Array.isArray(it.extraExamples)
+      ? it.extraExamples
+          .slice(0, MAX_EXTRA_EXAMPLES)
+          .filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+          .map((x) => x.trim().slice(0, 400))
+      : undefined;
     const sourceDateKst =
       typeof it.sourceDateKst === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(it.sourceDateKst)
         ? it.sourceDateKst
@@ -271,6 +376,7 @@ export function sanitizeLectureScriptPayload(raw: unknown): LectureScriptSanitiz
       meaningKo: String(it.meaningKo || '').slice(0, 400),
       answerEnglish: String(it.answerEnglish || it.naturalPhrase).slice(0, 400),
       similarExample,
+      ...(extraExamples && extraExamples.length > 0 ? { extraExamples } : {}),
       sourceDateKst,
       lessonTitle,
       startSec: typeof it.startSec === 'number' && Number.isFinite(it.startSec) ? it.startSec : undefined,
@@ -278,6 +384,7 @@ export function sanitizeLectureScriptPayload(raw: unknown): LectureScriptSanitiz
   }
   const ids = (list: unknown) =>
     (Array.isArray(list) ? list : []).filter((x) => typeof x === 'string').map((x) => String(x).slice(0, 80));
+  const durationFit = sanitizeDurationFit(obj.durationFit);
   return {
     ok: true,
     payload: {
@@ -287,9 +394,14 @@ export function sanitizeLectureScriptPayload(raw: unknown): LectureScriptSanitiz
       itemCount: items.length,
       newMistakeIds: ids(obj.newMistakeIds),
       reviewMistakeIds: ids(obj.reviewMistakeIds),
+      ...(Array.isArray(obj.inputNewIds) ? { inputNewIds: ids(obj.inputNewIds) } : {}),
+      ...(Array.isArray(obj.inputReviewIds) ? { inputReviewIds: ids(obj.inputReviewIds) } : {}),
+      ...(typeof obj.inputLatestCreatedAt === 'string' ? { inputLatestCreatedAt: obj.inputLatestCreatedAt } : {}),
       ttsEngine: obj.ttsEngine === 'elevenlabs' ? 'elevenlabs' : 'gemini',
       createdAt: typeof obj.createdAt === 'string' ? obj.createdAt : undefined,
       textTokens: typeof obj.textTokens === 'number' && Number.isFinite(obj.textTokens) ? obj.textTokens : undefined,
+      ...(typeof obj.audioBackupId === 'string' && obj.audioBackupId ? { audioBackupId: obj.audioBackupId } : {}),
+      ...(durationFit ? { durationFit } : {}),
     },
   };
 }
@@ -298,6 +410,69 @@ const rebuildDone = new Map<string, Promise<void>>();
 
 export function lectureRebuildInFlight(uid: string, date: string): Promise<void> | undefined {
   return rebuildDone.get(`${uid}:${date}`);
+}
+
+export interface StartLectureAudioRebuildOpts {
+  synthesizeFn?: LectureSynthesizeFn;
+  encodeFn?: LectureEncodeFn;
+  onReady?: (state: LectureState, isCurrent: () => boolean) => void | Promise<void>;
+  now?: number;
+  ignoreCooldown?: boolean;
+  /** Test hook: shorten the audio rebuild cap. */
+  rebuildTimeoutMs?: number;
+}
+
+export function lectureJobEpoch(uid: string, date: string): number {
+  return jobEpoch.get(`${uid}:${safeDate(date)}`) ?? 0;
+}
+
+/** Atomically install downloaded backup audio for a ready lecture unless a job is running or state changed. */
+export function installRestoredLectureAudio(
+  uid: string,
+  date: string,
+  backup: LectureState,
+  audio: { ext: 'm4a' | 'mp3' | 'wav'; mime: string; buffer: Buffer; durationSec?: number },
+  opts?: { expectedEpoch?: number; expectedCreatedAt?: string }
+): LectureState | null {
+  safeDate(date);
+  const key = `${uid}:${date}`;
+  if (running.has(key)) return null;
+  if (opts?.expectedEpoch !== undefined && (jobEpoch.get(key) ?? 0) !== opts.expectedEpoch) {
+    return null;
+  }
+  if (opts && 'expectedCreatedAt' in opts) {
+    const currentLocal = readLectureState(uid, date);
+    if (currentLocal?.createdAt !== opts.expectedCreatedAt) return null;
+  }
+  bumpJobEpoch(key);
+  const dir = userDir(uid);
+  const fileName = `${date}.${audio.ext}`;
+  const finalPath = path.join(dir, fileName);
+  const tmpPath = path.join(dir, `${fileName}.${process.pid}.tmp`);
+  try {
+    fs.writeFileSync(tmpPath, audio.buffer);
+    fs.renameSync(tmpPath, finalPath);
+  } catch (err) {
+    try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+    throw err;
+  }
+  removeLegacyAudioFiles(dir, date, fileName);
+  const next: LectureState = {
+    ...backup,
+    uid,
+    date,
+    status: 'ready',
+    audioStatus: 'ready',
+    audioFile: fileName,
+    audioMime: audio.mime || mimeForAudioFile(fileName),
+    durationSec: audio.durationSec || backup.durationSec,
+  };
+  delete next.audioRebuildStartedAt;
+  delete next.audioRebuildFailedAt;
+  delete next.error;
+  delete next.audioProgress;
+  writeLectureState(next);
+  return next;
 }
 
 /**
@@ -309,17 +484,25 @@ export function startLectureAudioRebuild(
   uid: string,
   date: string,
   payload?: unknown,
-  opts: { synthesizeFn?: LectureSynthesizeFn; encodeFn?: LectureEncodeFn } = {}
+  opts: StartLectureAudioRebuildOpts = {}
 ): LectureState {
   safeDate(date);
   const key = `${uid}:${date}`;
+  const nowMs = opts.now ?? Date.now();
   const existingPath = lectureAudioPath(uid, date);
-  const existing = readLectureState(uid, date);
+  const existing = readLectureState(uid, date, nowMs);
   if (existingPath && existing) {
     return { ...existing, status: 'ready', audioStatus: 'ready' };
   }
   if (running.has(key) && existing) {
-    return { ...existing, audioStatus: 'rebuilding' };
+    if (existing.error !== LECTURE_AUDIO_REBUILD_TIMED_OUT) {
+      return { ...existing, audioStatus: 'rebuilding' };
+    }
+    const failedAt = existing.audioRebuildFailedAt ? Date.parse(existing.audioRebuildFailedAt) : NaN;
+    if (!opts.ignoreCooldown && Number.isFinite(failedAt) && nowMs - failedAt < LECTURE_AUDIO_RETRY_COOLDOWN_MS) {
+      return existing;
+    }
+    abortCurrentJob(key);
   }
 
   let scriptItems = existing?.script;
@@ -327,6 +510,9 @@ export function startLectureAudioRebuild(
   let coachNote = existing?.coachNote;
   let newMistakeIds = existing?.newMistakeIds || [];
   let reviewMistakeIds = existing?.reviewMistakeIds || [];
+  let inputNewIds = existing?.inputNewIds;
+  let inputReviewIds = existing?.inputReviewIds;
+  let inputLatestCreatedAt = existing?.inputLatestCreatedAt;
   let ttsEngine: 'gemini' | 'elevenlabs' = existing?.ttsEngine || 'gemini';
   let createdAt = existing?.createdAt;
   let textTokens = existing?.textTokens;
@@ -341,8 +527,8 @@ export function startLectureAudioRebuild(
         newMistakeIds,
         reviewMistakeIds,
         ttsEngine,
-        createdAt: createdAt || new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        createdAt: createdAt || new Date(nowMs).toISOString(),
+        updatedAt: new Date(nowMs).toISOString(),
         audioStatus: 'missing',
         error: sanitized.error,
       };
@@ -358,6 +544,9 @@ export function startLectureAudioRebuild(
     coachNote = sanitized.payload.coachNote ?? coachNote;
     if (sanitized.payload.newMistakeIds?.length) newMistakeIds = sanitized.payload.newMistakeIds;
     if (sanitized.payload.reviewMistakeIds?.length) reviewMistakeIds = sanitized.payload.reviewMistakeIds;
+    if (sanitized.payload.inputNewIds) inputNewIds = sanitized.payload.inputNewIds;
+    if (sanitized.payload.inputReviewIds) inputReviewIds = sanitized.payload.inputReviewIds;
+    if (sanitized.payload.inputLatestCreatedAt) inputLatestCreatedAt = sanitized.payload.inputLatestCreatedAt;
     ttsEngine = sanitized.payload.ttsEngine || ttsEngine;
     createdAt = sanitized.payload.createdAt || createdAt;
     textTokens = sanitized.payload.textTokens ?? textTokens;
@@ -371,8 +560,8 @@ export function startLectureAudioRebuild(
       newMistakeIds,
       reviewMistakeIds,
       ttsEngine,
-      createdAt: createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      createdAt: createdAt || new Date(nowMs).toISOString(),
+      updatedAt: new Date(nowMs).toISOString(),
       audioStatus: 'missing',
       error: LECTURE_AUDIO_SCRIPT_MISSING,
       ...(existing || {}),
@@ -384,7 +573,10 @@ export function startLectureAudioRebuild(
     return st;
   }
 
-  const now = new Date().toISOString();
+  const ac = new AbortController();
+  const epoch = bumpJobEpoch(key);
+  jobAbort.set(key, ac);
+  const nowIso = new Date(nowMs).toISOString();
   const state: LectureState = {
     ...(existing || {}),
     uid,
@@ -396,28 +588,67 @@ export function startLectureAudioRebuild(
     itemCount: scriptItems.length,
     newMistakeIds,
     reviewMistakeIds,
+    ...(inputNewIds ? { inputNewIds } : {}),
+    ...(inputReviewIds ? { inputReviewIds } : {}),
+    ...(inputLatestCreatedAt ? { inputLatestCreatedAt } : {}),
     ttsEngine,
     textTokens,
-    createdAt: createdAt || existing?.createdAt || now,
-    updatedAt: now,
+    createdAt: createdAt || existing?.createdAt || nowIso,
+    updatedAt: nowIso,
     audioStatus: 'rebuilding',
+    audioRebuildStartedAt: nowIso,
   };
   delete state.error;
   delete state.audioFile;
   delete state.audioMime;
   delete state.audioProgress;
-  writeLectureState(state);
+  delete state.audioRebuildFailedAt;
+  const ctx: LectureJobContext = {
+    key,
+    epoch,
+    signal: ac.signal,
+    write: (st) => writeLectureStateForJob(st, key, epoch),
+  };
+  ctx.write(state);
   running.add(key);
-  const done = renderAndSaveAudio(ai, state, { title: state.title || '오늘 아침 강의', items: scriptItems, coachNote: state.coachNote || '' }, opts.synthesizeFn, undefined, opts.encodeFn)
-    .catch((err) => {
-      console.error('[Lecture] audio rebuild failed:', err);
-      state.audioStatus = 'missing';
-      state.error = 'GENERATION_FAILED';
-      writeLectureState(state);
-    })
+  const cap = opts.rebuildTimeoutMs ?? LECTURE_AUDIO_REBUILD_TIMEOUT_MS;
+  const work = renderAndSaveAudio(
+    ai,
+    state,
+    { title: state.title || '오늘 아침 강의', items: scriptItems, coachNote: state.coachNote || '' },
+    opts.synthesizeFn,
+    ctx,
+    opts.encodeFn
+  );
+  const done = withTimeout(work, cap, 'audio rebuild')
+    .then(
+      async () => {
+        const currentFn = () => isCurrentJob(key, epoch);
+        if (!currentFn()) return;
+        if (!opts.onReady) return;
+        try {
+          await opts.onReady(state, currentFn);
+        } catch (err: any) {
+          console.warn('[Lecture] rebuild onReady failed:', err?.message || err);
+        }
+      },
+      (err) => {
+        if (!isCurrentJob(key, epoch)) return;
+        console.error('[Lecture] audio rebuild failed:', err);
+        try { ac.abort(); } catch { /* ignore */ }
+        const timedOut = JOB_TIMED_OUT_RE.test(String(err?.message || err));
+        state.audioStatus = 'missing';
+        state.error = timedOut ? LECTURE_AUDIO_REBUILD_TIMED_OUT : 'GENERATION_FAILED';
+        state.audioRebuildFailedAt = new Date().toISOString();
+        ctx.write(state);
+      }
+    )
     .finally(() => {
-      running.delete(key);
-      rebuildDone.delete(key);
+      if (isCurrentJob(key, epoch)) {
+        running.delete(key);
+        rebuildDone.delete(key);
+        if (jobAbort.get(key) === ac) jobAbort.delete(key);
+      }
     });
   rebuildDone.set(key, done.then(() => undefined));
   return state;
@@ -425,10 +656,12 @@ export function startLectureAudioRebuild(
 
 const running = new Set<string>();
 const jobEpoch = new Map<string, number>();
+const jobAbort = new Map<string, AbortController>();
 
 export interface LectureJobContext {
   key: string;
   epoch: number;
+  signal: AbortSignal;
   write: (state: LectureState) => boolean;
 }
 
@@ -436,6 +669,35 @@ function bumpJobEpoch(key: string): number {
   const n = (jobEpoch.get(key) || 0) + 1;
   jobEpoch.set(key, n);
   return n;
+}
+
+function abortCurrentJob(key: string): void {
+  const ac = jobAbort.get(key);
+  if (ac) {
+    jobAbort.delete(key);
+    try { ac.abort(); } catch { /* ignore */ }
+  }
+  rebuildDone.delete(key);
+  bumpJobEpoch(key);
+}
+
+export function withAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return p;
+  if (signal.aborted) return Promise.reject(new Error('lecture job superseded'));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new Error('lecture job superseded'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    p.then(
+      (v) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(v);
+      },
+      (e) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(e);
+      }
+    );
+  });
 }
 
 function isCurrentJob(key: string, epoch: number): boolean {
@@ -449,12 +711,20 @@ function writeLectureStateForJob(state: LectureState, key: string, epoch: number
 }
 
 
+export type LectureGenerateScriptFn = (
+  ai: GoogleGenAI,
+  date: string,
+  newList: LectureMistakeInput[],
+  reviewList: LectureMistakeInput[],
+  signal?: AbortSignal
+) => Promise<{ title: string; items: LectureScriptItem[]; coachNote: string; tokens?: number }>;
+
 export interface StartLectureJobOpts {
   force?: boolean;
   /** Test hook: shorten the whole-job cap. */
   jobTimeoutMs?: number;
   /** Called once when the job finishes with status==='ready' and is still the current job. */
-  onReady?: (state: LectureState) => void | Promise<void>;
+  onReady?: (state: LectureState, isCurrent: () => boolean) => void | Promise<void>;
   /** Test hook: replace script+TTS so tests do not call Gemini. */
   runJobFn?: (
     ai: GoogleGenAI,
@@ -463,36 +733,40 @@ export interface StartLectureJobOpts {
     reviewList: LectureMistakeInput[],
     ctx: LectureJobContext
   ) => Promise<void>;
+  /** Test hook: replace script generation so tests do not call Gemini. */
+  generateScriptFn?: LectureGenerateScriptFn;
+  /** Test hook: replace TTS synthesis so tests do not call Gemini. */
+  synthesizeFn?: LectureSynthesizeFn;
+  /** Test hook: replace audio encoding (e.g. stub m4a). */
+  encodeFn?: LectureEncodeFn;
 }
 
 /**
- * Restore a ready lecture from backup by bumping the job epoch (so any stale job cannot overwrite)
- * and re-rendering TTS audio from the backed-up script. Skips when a job is already running.
+ * Restore a ready lecture from backup by re-rendering TTS audio from the backed-up script.
+ * Skips when a non-timed-out job is already running.
  */
 export function restoreReadyLecture(
   ai: GoogleGenAI,
   uid: string,
   date: string,
   backup: LectureState,
-  opts: { synthesizeFn?: LectureSynthesizeFn; encodeFn?: LectureEncodeFn } = {}
+  opts: StartLectureAudioRebuildOpts = {}
 ): LectureState | null {
   safeDate(date);
   const key = `${uid}:${date}`;
-  if (running.has(key)) {
-    return readLectureState(uid, date);
+  const existing = readLectureState(uid, date, opts.now);
+  if (running.has(key) && existing?.error !== LECTURE_AUDIO_REBUILD_TIMED_OUT && existing?.status !== 'failed') {
+    return existing;
   }
   if (!backup || backup.status !== 'ready' || !Array.isArray(backup.script) || backup.script.length === 0) {
-    return readLectureState(uid, date);
+    return existing;
   }
-  bumpJobEpoch(key);
   return startLectureAudioRebuild(ai, uid, date, backup, opts);
 }
 
 /**
  * Start (or return existing) lecture job. Never regenerates a ready lecture unless force=true.
- * A job that is still in memory is reused, even with force=true, until it finishes or hits
- * the in-process or wall-clock timeout. A TIMED_OUT / INTERRUPTED overlay starts a new job
- * even if `running` still holds the stale key (epoch bump discards late writes).
+ * With force=true, aborts any running generation or audio rebuild and supersedes its epoch.
  */
 export function startLectureJob(
   ai: GoogleGenAI,
@@ -505,50 +779,88 @@ export function startLectureJob(
   safeDate(date);
   const key = `${uid}:${date}`;
   const existing = readLectureState(uid, date);
-  if (existing && running.has(key) && existing.status !== 'failed') {
-    return existing;
-  }
-  if (existing?.status === 'ready' && !opts.force) {
-    return existing;
-  }
   const { newList, reviewList } = sanitizeLectureInputs(newMistakes, reviewMistakes);
+
+  if (newList.length + reviewList.length === 0) {
+    if (existing && ((running.has(key) && existing.status !== 'failed') || existing.status === 'ready')) {
+      return existing;
+    }
+    const engine = process.env.LECTURE_TTS_ENGINE === 'elevenlabs' ? 'elevenlabs' : 'gemini';
+    const now = new Date().toISOString();
+    const emptyState: LectureState = {
+      uid,
+      date,
+      status: 'failed',
+      newMistakeIds: [],
+      reviewMistakeIds: [],
+      inputNewIds: [],
+      inputReviewIds: [],
+      ttsEngine: engine,
+      error: 'NOTHING_TO_TEACH',
+      createdAt: now,
+      updatedAt: now,
+    };
+    writeLectureState(emptyState);
+    return emptyState;
+  }
+
+  if (existing && running.has(key) && existing.status !== 'failed' && !opts.force) {
+    return existing;
+  }
+  if (existing?.status === 'ready' && !opts.force && !lectureRebuildInFlight(uid, date)) {
+    return existing;
+  }
+  if (running.has(key)) {
+    abortCurrentJob(key);
+  }
 
   const engine = process.env.LECTURE_TTS_ENGINE === 'elevenlabs' ? 'elevenlabs' : 'gemini';
   const now = new Date().toISOString();
+  const inputNewIds = newList.map((m) => m.id);
+  const inputReviewIds = reviewList.map((m) => m.id);
+  const inputLatestCreatedAt = maxCreatedAtIso([...newList, ...reviewList]);
   const state: LectureState = {
     uid,
     date,
     status: 'generating',
-    newMistakeIds: newList.map((m) => m.id),
-    reviewMistakeIds: reviewList.map((m) => m.id),
+    newMistakeIds: inputNewIds,
+    reviewMistakeIds: inputReviewIds,
+    inputNewIds,
+    inputReviewIds,
+    ...(inputLatestCreatedAt ? { inputLatestCreatedAt } : {}),
     ttsEngine: engine,
     createdAt: now,
     updatedAt: now,
   };
-  if (newList.length + reviewList.length === 0) {
-    state.status = 'failed';
-    state.error = 'NOTHING_TO_TEACH';
-    writeLectureState(state);
-    return state;
-  }
+
+  const ac = new AbortController();
   const epoch = bumpJobEpoch(key);
+  jobAbort.set(key, ac);
   const ctx: LectureJobContext = {
     key,
     epoch,
+    signal: ac.signal,
     write: (st) => writeLectureStateForJob(st, key, epoch),
   };
   ctx.write(state);
   running.add(key);
-  const work = (opts.runJobFn || runJob)(ai, state, newList, reviewList, ctx);
+  const work = opts.runJobFn
+    ? opts.runJobFn(ai, state, newList, reviewList, ctx)
+    : runJob(ai, state, newList, reviewList, ctx, {
+        generateScriptFn: opts.generateScriptFn,
+        synthesizeFn: opts.synthesizeFn,
+        encodeFn: opts.encodeFn,
+      });
   const timeoutMs = opts.jobTimeoutMs ?? LECTURE_JOB_TIMEOUT_MS;
   withTimeout(work, timeoutMs, 'lecture job')
     .then(
       async () => {
-        if (!isCurrentJob(key, epoch)) return;
+        const currentFn = () => isCurrentJob(key, epoch);
+        if (!currentFn()) return;
         if (state.status !== 'ready') return;
         if (!opts.onReady) return;
         try {
-          await opts.onReady(state);
+          await opts.onReady(state, currentFn);
         } catch (err: any) {
           console.warn('[Lecture] onReady failed:', err?.message || err);
         }
@@ -556,14 +868,24 @@ export function startLectureJob(
       (err) => {
         if (!isCurrentJob(key, epoch)) return;
         console.error('[Lecture] job failed:', err);
+        const timedOut = JOB_TIMED_OUT_RE.test(String(err?.message || err));
+        running.delete(key);
+        if (timedOut) {
+          abortCurrentJob(key);
+        } else if (jobAbort.get(key) === ac) {
+          jobAbort.delete(key);
+        }
         state.status = 'failed';
         // Shown in the app and on the public feed page: a code only, details stay in the log.
-        state.error = /timed out/i.test(String(err?.message || err)) ? 'TIMED_OUT' : 'GENERATION_FAILED';
-        ctx.write(state);
+        state.error = timedOut ? 'TIMED_OUT' : 'GENERATION_FAILED';
+        writeLectureState(state);
       }
     )
     .finally(() => {
-      if (isCurrentJob(key, epoch)) running.delete(key);
+      if (isCurrentJob(key, epoch)) {
+        running.delete(key);
+        if (jobAbort.get(key) === ac) jobAbort.delete(key);
+      }
     });
   return state;
 }
@@ -577,7 +899,8 @@ async function generateScript(
   ai: GoogleGenAI,
   date: string,
   newList: LectureMistakeInput[],
-  reviewList: LectureMistakeInput[]
+  reviewList: LectureMistakeInput[],
+  signal?: AbortSignal
 ): Promise<{ title: string; items: LectureScriptItem[]; coachNote: string; tokens: number }> {
   const sunday = isSundayKst(date);
   const fmt = (list: LectureMistakeInput[], kind: string) =>
@@ -588,8 +911,16 @@ async function generateScript(
       })
       .join('\n');
   const itemCount = newList.length + reviewList.length;
+  const perItemSec = Math.max(35, Math.min(120, Math.round((365 - 30) / Math.max(1, itemCount))));
+  const targetChars = perItemSec * 10;
+  const depthGuide =
+    perItemSec >= 100
+      ? 'explanation은 6~10문장으로 자세히 쓰고, extraExamples에 추가 영어 예문 최대 2개를 넣으세요. dialogue는 최대 6줄까지 풍부하게 쓰세요.'
+      : perItemSec >= 60
+      ? 'explanation은 4~7문장으로 충분히 쓰고, extraExamples에 추가 영어 예문 최대 2개를 넣으세요. dialogue는 2~4줄로 쓰세요.'
+      : 'explanation은 1~4문장으로 간결하게 쓰고, dialogue는 2~4줄로 쓰세요.';
 
-  const prompt = `당신은 한국인 성인 학습자를 위한 아침 영어 오디오 강의 작가입니다. 전체 길이는 최대 10분입니다.
+  const prompt = `당신은 한국인 성인 학습자를 위한 아침 영어 오디오 강의 작가입니다. 전체 길이는 약 6분(최대 6분 10초)입니다.
 아래 실수 목록으로 강의 대본을 만드세요. 해설자는 "Coach"(한국어로 설명), 대화 상대는 "Partner"(영어 원어민)입니다.
 
 [실수 목록]
@@ -598,66 +929,74 @@ ${fmt(reviewList, 'review')}
 
 [대본 규칙 - 반드시 지킬 것]
 1. 영어는 영어 철자 그대로 쓰세요. 영어를 한글 발음으로 적지 마세요(예: "땡큐" 금지, "thank you"로).
-2. 항목마다 순서: 학습자의 원래 말(myPhrase, 입력 그대로, 고치지 말 것. 소개 문장은 시스템이 붙이므로 쓰지 마세요) → 자연스러운 표현(naturalPhrase) → 이유(explanation, 한국어, 난도에 따라 1~5문장. 규칙 비교가 필요하면 깊게, 단순 오타·어순은 짧게) → 비슷한 예문 1개(similarExample, 영어 한 문장) → 짧은 2인 대화(dialogue, 2~4줄, Coach와 Partner가 번갈아 영어로, naturalPhrase가 자연스럽게 들어감. lessonTitle이 있으면 그 수업 상황을 따르고, 없으면 일반적인 상황) → 한국어 뜻(meaningKo, naturalPhrase의 한국어 뜻) → 정답 영어(answerEnglish = naturalPhrase). 한국어 뜻과 정답 사이의 무음은 시스템이 따로 넣으니, 대본에는 무음·쉼·초 표시를 쓰지 마세요.
+2. 항목마다 순서: 학습자의 원래 말(myPhrase, 입력 그대로, 고치지 말 것. 소개 문장은 시스템이 붙이므로 쓰지 마세요) → 자연스러운 표현(naturalPhrase) → 이유(explanation, 한국어) → 비슷한 예문 1개(similarExample, 영어 한 문장) → (필요 시) 추가 예문(extraExamples, 최대 2개) → 짧은 2인 대화(dialogue, 최대 6줄, Coach와 Partner가 번갈아 영어로, naturalPhrase가 자연스럽게 들어감. lessonTitle이 있으면 그 수업 상황을 따르고, 없으면 일반적인 상황) → 한국어 뜻(meaningKo, naturalPhrase의 한국어 뜻) → 정답 영어(answerEnglish = naturalPhrase). 한국어 뜻과 정답 사이의 무음은 시스템이 따로 넣으니, 대본에는 무음·쉼·초 표시를 쓰지 마세요.
 3. 입력 목록 순서대로, 각 항목의 mistakeId와 kind는 입력 값 그대로 쓰세요. 항목을 빼거나 합치지 마세요. 목록에 없는 표현을 지어내지 마세요.
-4. 전체 분량은 최대 10분입니다. 오늘은 항목 ${itemCount}개입니다. explanation은 난도에 따라 1~5문장(규칙 비교가 필요하면 깊게, 단순 오타·어순은 짧게), similarExample은 항목마다 영어 한 문장입니다. 예문과 해설을 짧게 줄이지 마세요. 시스템이 10분을 넘기면 우선순위가 낮은 항목을 빼므로, 넣은 항목의 깊이는 유지하세요.
-5. title: 오늘 강의 제목(한국어, 20자 이내). title·explanation·dialogue·coachNote·similarExample에 '어젯밤', '어제', '오늘 아침 통화', '이번 주' 같은 시점 표현을 쓰지 마세요.
-6. coachNote: 끝에 코치 한마디(한국어 2~3문장).${sunday ? ' 오늘은 일요일이므로 한 주를 마무리하는 따뜻한 톤으로 쓰세요. 위 목록에 있는 표현만 언급하고, 진도·횟수·졸업 수 같은 수치는 쓰지 마세요.' : ''}
+4. 전체 강의는 약 6분입니다. 항목 ${itemCount}개, 항목당 약 ${targetChars}자 분량으로 쓰세요. ${depthGuide} 예문과 해설을 짧게 줄이지 마세요. 시스템이 분량을 넘기면 우선순위가 낮은 항목을 빼므로, 넣은 항목의 깊이는 유지하세요.
+5. title: 오늘 강의 제목(한국어, 20자 이내). title·explanation·dialogue·coachNote·similarExample·extraExamples에 '어젯밤', '어제', '오늘 아침 통화', '이번 주' 같은 시점 표현을 쓰지 마세요.
+6. coachNote: 한국어 정확히 2문장. 각 문장은 마침표로 끝내고, 영어 문장은 넣지 마세요.${sunday ? ' 오늘은 일요일이므로 한 주를 마무리하는 따뜻한 톤으로 쓰세요. 위 목록에 있는 표현만 언급하고, 진도·횟수·졸업 수 같은 수치는 쓰지 마세요.' : ''}
 7. 시험·교재의 상표나 문제를 복제하지 마세요.
 8. 모든 문자열 값은 음성 합성기가 글자 그대로 소리 내어 읽습니다. 실제로 말할 문장만 쓰세요. 다음은 쓰지 마세요: ① 괄호나 대괄호로 된 연기·동작·효과 지시(예: (pause), (웃으며), [Coach smiles], (3초 무음)) ② "Narrator:", "내레이션:" 같은 해설자 줄 ③ "Say cheerfully:" 같은 말투 지시 ④ 마크다운 기호(**, *, \`, #, 목록 기호). dialogue.line에는 화자 이름을 붙이지 말고 대사만 쓰세요(화자는 speaker 필드에 씁니다). 뜻을 덧붙이는 괄호는 써도 됩니다(예: work for (소속)).`;
 
-  const response = await withTimeout(ai.models.generateContent({
-    model: SCRIPT_MODEL,
-    contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    config: {
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          title: { type: Type.STRING },
-          items: {
-            type: Type.ARRAY,
+  const response = await withAbort(
+    withTimeout(ai.models.generateContent({
+      model: SCRIPT_MODEL,
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: {
+        abortSignal: signal,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            title: { type: Type.STRING },
             items: {
-              type: Type.OBJECT,
-              properties: {
-                mistakeId: { type: Type.STRING },
-                kind: { type: Type.STRING, enum: ['new', 'review'] },
-                myPhrase: { type: Type.STRING },
-                naturalPhrase: { type: Type.STRING },
-                explanation: { type: Type.STRING },
-                dialogue: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      speaker: { type: Type.STRING, enum: ['Coach', 'Partner'] },
-                      line: { type: Type.STRING },
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  mistakeId: { type: Type.STRING },
+                  kind: { type: Type.STRING, enum: ['new', 'review'] },
+                  myPhrase: { type: Type.STRING },
+                  naturalPhrase: { type: Type.STRING },
+                  explanation: { type: Type.STRING },
+                  dialogue: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        speaker: { type: Type.STRING, enum: ['Coach', 'Partner'] },
+                        line: { type: Type.STRING },
+                      },
+                      required: ['speaker', 'line'],
                     },
-                    required: ['speaker', 'line'],
+                  },
+                  meaningKo: { type: Type.STRING },
+                  answerEnglish: { type: Type.STRING },
+                  similarExample: { type: Type.STRING },
+                  extraExamples: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
                   },
                 },
-                meaningKo: { type: Type.STRING },
-                answerEnglish: { type: Type.STRING },
-                similarExample: { type: Type.STRING },
+                required: ['mistakeId', 'kind', 'myPhrase', 'naturalPhrase', 'explanation', 'dialogue', 'meaningKo', 'answerEnglish', 'similarExample'],
               },
-              required: ['mistakeId', 'kind', 'myPhrase', 'naturalPhrase', 'explanation', 'dialogue', 'meaningKo', 'answerEnglish', 'similarExample'],
             },
+            coachNote: { type: Type.STRING },
           },
-          coachNote: { type: Type.STRING },
+          required: ['title', 'items', 'coachNote'],
         },
-        required: ['title', 'items', 'coachNote'],
       },
-    },
-  }), LECTURE_STEP_TIMEOUT_MS, 'lecture script');
+    }), LECTURE_STEP_TIMEOUT_MS, 'lecture script'),
+    signal
+  );
   const parsed = JSON.parse(response.text?.trim() || '{}');
   const applied = applyModelScriptToInputs(newList, reviewList, parsed.items);
   if (applied.matched === 0) throw new Error('대본 생성 결과가 비어 있습니다.');
   const title = stripSpeechDirections(String(parsed.title || '')) || '오늘 아침 강의';
-  const coachNote = stripSpeechDirections(String(parsed.coachNote || ''));
+  const coachNote = normalizeCoachNote(String(parsed.coachNote || ''));
   const cleaned = applied.items.map(cleanLectureScriptItem);
   return {
     title,
-    items: trimItemsToBudget(cleaned, date, title, coachNote),
+    items: trimItemsToBudget(cleaned, date, title, coachNote, LECTURE_EST_MAX_SEC),
     coachNote,
     tokens: Number(response.usageMetadata?.totalTokenCount || 0),
   };
@@ -722,7 +1061,12 @@ export function toSpeechParts(text: string, twoSpeakers: boolean): any[] {
   return parts;
 }
 
-async function synthesizeGemini(ai: GoogleGenAI, text: string, twoSpeakers: boolean): Promise<Pcm> {
+async function synthesizeGemini(
+  ai: GoogleGenAI,
+  text: string,
+  twoSpeakers: boolean,
+  signal?: AbortSignal
+): Promise<Pcm> {
   const speechConfig: any = twoSpeakers
     ? {
         multiSpeakerVoiceConfig: {
@@ -735,24 +1079,35 @@ async function synthesizeGemini(ai: GoogleGenAI, text: string, twoSpeakers: bool
     : { voiceConfig: { prebuiltVoiceConfig: { voiceName: VOICE_COACH } } };
   let lastErr: any;
   for (let attempt = 0; attempt < 3; attempt++) {
+    if (signal?.aborted) throw new Error('lecture job superseded');
     try {
-      const response = await withTimeout(ai.models.generateContent({
-        model: LECTURE_TTS_MODEL,
-        contents: [{ role: 'user', parts: toSpeechParts(text, twoSpeakers) }],
-        config: { responseModalities: ['AUDIO'], speechConfig },
-      }), LECTURE_STEP_TIMEOUT_MS, 'lecture TTS');
+      const response = await withAbort(
+        withTimeout(ai.models.generateContent({
+          model: LECTURE_TTS_MODEL,
+          contents: [{ role: 'user', parts: toSpeechParts(text, twoSpeakers) }],
+          config: { abortSignal: signal, responseModalities: ['AUDIO'], speechConfig },
+        }), LECTURE_STEP_TIMEOUT_MS, 'lecture TTS'),
+        signal
+      );
       const part = response.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData?.data);
       if (!part?.inlineData?.data) throw new Error('TTS 음성 데이터 없음');
       return parseAudio(part.inlineData.data, part.inlineData.mimeType || '');
     } catch (err) {
       lastErr = err;
-      await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+      if (signal?.aborted) throw err;
+      await withAbort(new Promise((r) => setTimeout(r, 1500 * (attempt + 1))), signal);
     }
   }
   throw lastErr;
 }
 
-async function synthesize(ai: GoogleGenAI, engine: 'gemini' | 'elevenlabs', text: string, twoSpeakers: boolean): Promise<Pcm> {
+async function synthesize(
+  ai: GoogleGenAI,
+  engine: 'gemini' | 'elevenlabs',
+  text: string,
+  twoSpeakers: boolean,
+  signal?: AbortSignal
+): Promise<Pcm> {
   if (engine === 'elevenlabs') {
     try {
       return await synthesizeElevenLabs(text, twoSpeakers);
@@ -760,7 +1115,7 @@ async function synthesize(ai: GoogleGenAI, engine: 'gemini' | 'elevenlabs', text
       console.warn('[Lecture] ElevenLabs unavailable, falling back to Gemini TTS:', err?.message);
     }
   }
-  return synthesizeGemini(ai, text, twoSpeakers);
+  return synthesizeGemini(ai, text, twoSpeakers, signal);
 }
 
 function resample(p: Pcm, rate: number): Buffer {
@@ -794,16 +1149,29 @@ function wavFromPcm(pcm: Buffer, rate: number): Buffer {
   return Buffer.concat([header, pcm]);
 }
 
+const drillIntroCache = new Map<string, Buffer>();
+
 async function runJob(
   ai: GoogleGenAI,
   state: LectureState,
   newList: LectureMistakeInput[],
   reviewList: LectureMistakeInput[],
-  ctx?: LectureJobContext
+  ctx?: LectureJobContext,
+  hooks?: {
+    generateScriptFn?: LectureGenerateScriptFn;
+    synthesizeFn?: LectureSynthesizeFn;
+    encodeFn?: LectureEncodeFn;
+  }
 ): Promise<void> {
   const write = ctx?.write || writeLectureState;
-  const script = await generateScript(ai, state.date, newList, reviewList);
-  if (ctx && !isCurrentJob(ctx.key, ctx.epoch)) return;
+  const script = await (hooks?.generateScriptFn || generateScript)(
+    ai,
+    state.date,
+    newList,
+    reviewList,
+    ctx?.signal
+  );
+  if (ctx && (ctx.signal.aborted || !isCurrentJob(ctx.key, ctx.epoch))) return;
   state.title = script.title;
   state.coachNote = script.coachNote;
   state.itemCount = script.items.length;
@@ -812,7 +1180,7 @@ async function runJob(
   state.textTokens = script.tokens;
   write(state);
 
-  await renderAndSaveAudio(ai, state, script, undefined, ctx);
+  await renderAndSaveAudio(ai, state, script, hooks?.synthesizeFn, ctx, hooks?.encodeFn);
 }
 
 async function renderAndSaveAudio(
@@ -824,11 +1192,17 @@ async function renderAndSaveAudio(
   encodeFn?: LectureEncodeFn
 ): Promise<void> {
   const write = ctx?.write || writeLectureState;
-  const RATE = 24000;
+  const RATE = DURATION_RATE;
   const synth = synthesizeFn || synthesize;
+  const ensureCurrent = () => {
+    if (ctx && (ctx.signal.aborted || !isCurrentJob(ctx.key, ctx.epoch))) {
+      throw new Error('lecture job superseded');
+    }
+  };
 
   const title = stripSpeechDirections(script.title || '') || '오늘 아침 강의';
-  const coachNote = stripSpeechDirections(script.coachNote || '');
+  const coachNote = normalizeCoachNote(script.coachNote || '');
+  state.coachNote = coachNote;
   const items = script.items.map(cleanLectureScriptItem);
   const plan = buildLectureSpeechPlan(title, items, coachNote, state.date);
 
@@ -844,7 +1218,7 @@ async function renderAndSaveAudio(
   const workers = Math.min(2, speechTotal || 1);
   const worker = async () => {
     while (!aborted) {
-      if (ctx && !isCurrentJob(ctx.key, ctx.epoch)) {
+      if (ctx && (ctx.signal.aborted || !isCurrentJob(ctx.key, ctx.epoch))) {
         aborted = true;
         throw new Error('lecture job superseded');
       }
@@ -857,7 +1231,7 @@ async function renderAndSaveAudio(
       }
       chars += seg.text.length;
       try {
-        pcmParts[i] = resample(await synth(ai, state.ttsEngine, seg.text, seg.two), RATE);
+        pcmParts[i] = resample(await synth(ai, state.ttsEngine, seg.text, seg.two, ctx?.signal), RATE);
       } catch (err) {
         aborted = true;
         throw err;
@@ -870,19 +1244,134 @@ async function renderAndSaveAudio(
     }
   };
   await Promise.all(Array.from({ length: workers }, () => worker()));
-  if (ctx && !isCurrentJob(ctx.key, ctx.epoch)) throw new Error('lecture job superseded');
+  ensureCurrent();
 
-  let totalBytes = 0;
+  // Map synthesized speech segments into MeasuredLecture for N1 duration fitting
+  let openingBuf: Buffer = Buffer.alloc(0);
+  let closingBuf: Buffer = Buffer.alloc(0);
+  const bodyByItem = new Map<number, Buffer>();
+  const answerByItem = new Map<number, Buffer>();
+  const bodyCharsByItem = new Map<number, number>();
+  const answerCharsByItem = new Map<number, number>();
+  let speechChars = 0;
+  let speechSamples = 0;
+
   for (let i = 0; i < plan.length; i++) {
     const seg = plan[i];
-    if (seg.kind === 'speech' && typeof seg.itemIndex === 'number') {
-      items[seg.itemIndex].startSec = Math.round((totalBytes / 2 / RATE) * 10) / 10;
+    if (seg.kind !== 'speech') continue;
+    const buf = pcmParts[i];
+    speechChars += seg.text.length;
+    speechSamples += Math.floor(buf.length / 2);
+    if (seg.role === 'opening') {
+      openingBuf = buf;
+    } else if (seg.role === 'closing') {
+      closingBuf = buf;
+    } else if (seg.role === 'body' && typeof seg.itemIndex === 'number') {
+      bodyByItem.set(seg.itemIndex, buf);
+      bodyCharsByItem.set(seg.itemIndex, seg.text.length);
+    } else if (seg.role === 'answer' && typeof seg.itemIndex === 'number') {
+      answerByItem.set(seg.itemIndex, buf);
+      answerCharsByItem.set(seg.itemIndex, seg.text.length);
     }
-    totalBytes += pcmParts[i].length;
   }
 
-  const pcm = Buffer.concat(pcmParts);
+  const measuredItems: MeasuredLectureItem[] = items.map((it, idx) => ({
+    index: idx,
+    kind: it.kind,
+    bodySamples: Math.floor((bodyByItem.get(idx)?.length || 0) / 2),
+    answerSamples: Math.floor((answerByItem.get(idx)?.length || 0) / 2),
+    bodyChars: bodyCharsByItem.get(idx) || 0,
+    answerChars: answerCharsByItem.get(idx) || 0,
+  }));
+  const measured: MeasuredLecture = {
+    openingSamples: Math.floor(openingBuf.length / 2),
+    closingSamples: Math.floor(closingBuf.length / 2),
+    items: measuredItems,
+    speechChars,
+    speechSamples,
+    recapChars: buildRecapText(items).length,
+  };
+
+  let fitRes = fitLectureTimeline(measured);
+  let recapBuf: Buffer | undefined;
+  let drillIntroBuf: Buffer | undefined;
+  const extras: Extras = {};
+
+  const synthExtraWithRetry = async (text: string): Promise<Buffer | null> => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      ensureCurrent();
+      try {
+        return resample(await synth(ai, state.ttsEngine, text, false, ctx?.signal), RATE);
+      } catch (err) {
+        if (ctx && (ctx.signal.aborted || !isCurrentJob(ctx.key, ctx.epoch))) throw err;
+        if (attempt === 1) return null;
+      }
+    }
+    return null;
+  };
+
+  if (fitRes.want === 'recap') {
+    const keptSet = new Set(fitRes.keptItems);
+    const recapText = buildRecapText(items.filter((_, idx) => keptSet.has(idx)));
+    const buf = await synthExtraWithRetry(recapText);
+    if (buf) {
+      recapBuf = buf;
+      chars += recapText.length;
+      extras.recap = Math.floor(buf.length / 2);
+    } else {
+      extras.recap = 'failed';
+    }
+    fitRes = fitLectureTimeline(measured, extras);
+  } else if (fitRes.want === 'drillIntro') {
+    ensureCurrent();
+    const cacheKey = `${DRILL_INTRO_TEXT}::${VOICE_COACH}::${state.ttsEngine}`;
+    const cached = !synthesizeFn ? drillIntroCache.get(cacheKey) : undefined;
+    if (cached) {
+      drillIntroBuf = cached;
+      extras.drillIntro = Math.floor(cached.length / 2);
+    } else {
+      const buf = await synthExtraWithRetry(DRILL_INTRO_TEXT);
+      if (buf) {
+        drillIntroBuf = buf;
+        chars += DRILL_INTRO_TEXT.length;
+        if (!synthesizeFn) drillIntroCache.set(cacheKey, buf);
+        extras.drillIntro = Math.floor(buf.length / 2);
+      } else {
+        extras.drillIntro = 'failed';
+      }
+    }
+    fitRes = fitLectureTimeline(measured, extras);
+  }
+
+  ensureCurrent();
+  if (fitRes.want) {
+    throw new Error('duration fit did not converge');
+  }
+  const { pcm, bodyStartSecByItem } = assembleLecturePcm(
+    fitRes.timeline,
+    {
+      opening: openingBuf,
+      closing: closingBuf,
+      recap: recapBuf,
+      drillIntro: drillIntroBuf,
+      bodyByItem,
+      answerByItem,
+    },
+    fitRes.totalSamples,
+    RATE
+  );
+  const extraFailed = extras.recap === 'failed' || extras.drillIntro === 'failed';
+  const assembledSec = Math.floor(pcm.length / 2) / RATE;
+  if (extraFailed && assembledSec < LECTURE_MIN_SEC) {
+    console.warn(`[Lecture] duration under 6:00 after recap/drill TTS failure: ${assembledSec.toFixed(1)}s`);
+  }
+  const keptItems = fitRes.keptItems.map((origIdx) => ({
+    ...items[origIdx],
+    startSec: bodyStartSecByItem.get(origIdx),
+  }));
+
   const encoded = await (encodeFn || encodeLectureAudio)(pcm, RATE);
+  ensureCurrent();
   const fileName = `${state.date}.${encoded.ext}`;
   const dir = userDir(state.uid);
   const finalPath = path.join(dir, fileName);
@@ -895,14 +1384,21 @@ async function renderAndSaveAudio(
     throw err;
   }
   removeLegacyAudioFiles(dir, state.date, fileName);
-  state.script = items;
+  state.script = keptItems;
+  state.itemCount = keptItems.length;
+  state.newMistakeIds = keptItems.filter((it) => it.kind === 'new').map((it) => it.mistakeId);
+  state.reviewMistakeIds = keptItems.filter((it) => it.kind === 'review').map((it) => it.mistakeId);
   state.chars = chars;
-  state.durationSec = Math.round(pcm.length / 2 / RATE);
+  state.durationSec = Math.round(fitRes.totalSamples / RATE);
+  state.durationFit = fitRes.fit;
+  state.audioBackupId = crypto.randomUUID();
   state.audioFile = fileName;
   state.audioMime = encoded.mime;
   state.status = 'ready';
   state.audioStatus = 'ready';
   state.audioProgress = { completed: speechTotal, total: speechTotal };
   delete state.error;
+  delete state.audioRebuildStartedAt;
+  delete state.audioRebuildFailedAt;
   write(state);
 }

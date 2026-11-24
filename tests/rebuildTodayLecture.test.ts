@@ -12,13 +12,13 @@ function makeLecture(overrides: Partial<LectureDoc> = {}): LectureDoc {
   };
 }
 
-test('rebuildTodayLectureWith calls syncFeed(uid) first, then startLecture(uid, date, true), and returns startLecture result', async () => {
+test('rebuildTodayLectureWith calls syncFeed(uid, { autoRegenerate: false }) first, then startLecture(uid, date, true)', async () => {
   const calls: string[] = [];
   const expected = makeLecture({ title: '아침 강의' });
 
   const result = await rebuildTodayLectureWith('user-1', '2026-11-24', {
-    syncFeed: async (uid) => {
-      calls.push(`syncFeed:${uid}`);
+    syncFeed: async (uid, opts) => {
+      calls.push(`syncFeed:${uid}:${JSON.stringify(opts)}`);
       return 'secret-ok';
     },
     startLecture: async (uid, date, force) => {
@@ -28,7 +28,7 @@ test('rebuildTodayLectureWith calls syncFeed(uid) first, then startLecture(uid, 
   });
 
   assert.deepEqual(calls, [
-    'syncFeed:user-1',
+    'syncFeed:user-1:{"autoRegenerate":false}',
     'startLecture:user-1:2026-11-24:true',
   ]);
   assert.equal(result, expected);

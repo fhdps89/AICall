@@ -98,7 +98,7 @@ function toCandidate(m: LecturePickMistake): LectureCandidate {
 }
 
 const MAX_NEW = 6;
-const MAX_REVIEW = 3;
+export const MAX_REVIEW_PER_LECTURE = 1;
 
 /** Duration in seconds from startedAt to endedAt (or last transcript/chunk). Null if unknown. */
 export function sessionCallSeconds(session: SessionTiming | null | undefined): number | null {
@@ -198,7 +198,7 @@ export function pickLectureCandidates(
       if (!m?.id || isQaMistake(m) || freshIds.has(m.id)) return false;
       return keepBySession(m, sessionsById, onMissingSession);
     })
-    .slice(0, MAX_REVIEW);
+    .slice(0, MAX_REVIEW_PER_LECTURE);
   return {
     newMistakes: fresh.map(toCandidate),
     reviewMistakes: review.map(toCandidate),

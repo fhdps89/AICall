@@ -11,6 +11,8 @@ import {
   listenedAtToKeep,
   shouldMarkLectureDate,
   shouldClearStaleLectureMedia,
+  isLectureAudioRestoring,
+  shouldPollLecture,
 } from '../src/services/lecture/lectureSyncPolicy.ts';
 
 test('ready lecture without audioUrl can be shown immediately', () => {
@@ -83,4 +85,23 @@ test('storage setup doc includes a rule for every users/{uid}/<seg>/ path used i
   for (const seg of required) {
     assert.match(doc, new RegExp(`match /users/\\{uid\\}/${seg}/`), `doc missing rule for users/{uid}/${seg}/`);
   }
+});
+
+test('isLectureAudioRestoring and shouldPollLecture truth table', () => {
+  assert.equal(isLectureAudioRestoring(null), false);
+  assert.equal(isLectureAudioRestoring(undefined), false);
+  assert.equal(isLectureAudioRestoring({ status: 'generating' }), false);
+  assert.equal(isLectureAudioRestoring({ status: 'ready', audioStatus: 'rebuilding' }), true);
+  assert.equal(isLectureAudioRestoring({ status: 'ready', audioStatus: 'rebuilding', audioUrl: null, hasAudio: false }), true);
+  assert.equal(isLectureAudioRestoring({ status: 'ready', audioStatus: 'rebuilding', audioUrl: 'https://x' }), false);
+  assert.equal(isLectureAudioRestoring({ status: 'ready', audioStatus: 'rebuilding', hasAudio: true }), false);
+  assert.equal(isLectureAudioRestoring({ status: 'ready', audioStatus: 'ready' }), false);
+  assert.equal(isLectureAudioRestoring({ status: 'ready', audioStatus: 'missing' }), false);
+
+  assert.equal(shouldPollLecture(null), false);
+  assert.equal(shouldPollLecture({ status: 'generating' }), true);
+  assert.equal(shouldPollLecture({ status: 'ready', audioStatus: 'rebuilding' }), true);
+  assert.equal(shouldPollLecture({ status: 'ready', audioStatus: 'ready' }), false);
+  assert.equal(shouldPollLecture({ status: 'ready', audioStatus: 'missing' }), false);
+  assert.equal(shouldPollLecture({ status: 'failed' }), false);
 });

@@ -10,6 +10,7 @@ export interface LectureScriptItemLike {
   meaningKo: string;
   answerEnglish: string;
   similarExample?: string;
+  extraExamples?: string[];
 }
 
 const NARRATOR_LINE_RE =
@@ -101,6 +102,11 @@ export function cleanLectureScriptItem<T extends LectureScriptItemLike>(it: T): 
   const similarExample = it.similarExample
     ? stripSpeechDirections(it.similarExample)
     : it.similarExample;
+  const extraExamples = Array.isArray(it.extraExamples)
+    ? it.extraExamples
+        .map((ex) => stripSpeechDirections(String(ex || '')).trim())
+        .filter(Boolean)
+    : undefined;
   const answerEnglish = stripSpeechDirections(it.answerEnglish || '') || it.naturalPhrase;
   const dialogue = Array.isArray(it.dialogue)
     ? it.dialogue.flatMap((d) => {
@@ -110,7 +116,7 @@ export function cleanLectureScriptItem<T extends LectureScriptItemLike>(it: T): 
         return cleaned ? [{ ...d, line: cleaned }] : [];
       })
     : [];
-  return {
+  const out: T = {
     ...it,
     explanation,
     meaningKo,
@@ -118,4 +124,10 @@ export function cleanLectureScriptItem<T extends LectureScriptItemLike>(it: T): 
     answerEnglish,
     dialogue,
   };
+  if (extraExamples && extraExamples.length > 0) {
+    out.extraExamples = extraExamples;
+  } else {
+    delete out.extraExamples;
+  }
+  return out;
 }

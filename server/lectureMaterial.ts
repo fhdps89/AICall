@@ -7,11 +7,55 @@ export { formatLectureDuration };
 import { stripSpeechDirections } from './speechText.ts';
 
 export const MAX_NEW = 20;
-export const MAX_REVIEW = 3;
+export const MAX_REVIEW = 1;
+export const MAX_DIALOGUE_LINES = 6;
+export const MAX_EXTRA_EXAMPLES = 2;
 export const LECTURE_MAX_SEC = 10 * 60;
 /** Mixed Korean/English TTS pace used for the budget (chars / second). */
 export const SPEECH_CHARS_PER_SEC = 10;
 export const SILENCE_SEC = 3;
+
+export const COACH_NOTE_FALLBACK = [
+  '오늘 표현들을 끝까지 잘 따라오셨어요.',
+  '틀린 표현은 실력이 자라고 있다는 신호예요.',
+] as const;
+
+export function splitKoreanSentences(text: string): string[] {
+  const lines = String(text || '').split(/\r?\n+/);
+  const out: string[] = [];
+  const boundaryRe = /([가-힣)"'”’][.!?…。！？]+["'”’)\]]*)(?:\s+|$)/g;
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/\s+/g, ' ').trim();
+    if (!line) continue;
+    let last = 0;
+    boundaryRe.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = boundaryRe.exec(line)) !== null) {
+      const end = m.index + m[1].length;
+      const part = line.slice(last, end).trim();
+      if (part) out.push(part);
+      last = m.index + m[0].length;
+    }
+    const tail = line.slice(last).trim();
+    if (tail) out.push(tail);
+  }
+  return out;
+}
+
+export function normalizeCoachNote(raw: string): string {
+  const cleaned = stripSpeechDirections(String(raw || ''));
+  const sentences = splitKoreanSentences(cleaned).map((s) =>
+    /[.!?…。！？]["'”’)\]]*$/.test(s) ? s : `${s}.`
+  );
+  if (sentences.length >= 2) return `${sentences[0]} ${sentences[1]}`;
+  if (sentences.length === 1) {
+    if (sentences[0] === COACH_NOTE_FALLBACK[1]) {
+      return `${COACH_NOTE_FALLBACK[0]} ${sentences[0]}`;
+    }
+    return `${sentences[0]} ${COACH_NOTE_FALLBACK[1]}`;
+  }
+  return COACH_NOTE_FALLBACK.join(' ');
+}
 
 export interface LectureMistakeInput {
   id: string;
@@ -32,13 +76,14 @@ export interface LectureScriptItem {
   meaningKo: string;
   answerEnglish: string;
   similarExample?: string;
+  extraExamples?: string[];
   sourceDateKst?: string;
   lessonTitle?: string;
   startSec?: number;
 }
 
 export type PlanSeg =
-  | { kind: 'speech'; text: string; two: boolean; itemIndex?: number }
+  | { kind: 'speech'; text: string; two: boolean; itemIndex?: number; role?: 'opening' | 'body' | 'answer' | 'closing' }
   | { kind: 'silence'; sec: number };
 
 const MAX_PHRASE = 400;
@@ -74,7 +119,11 @@ export function sanitizeLectureInputs(
       })
       .slice(0, max);
   const newList = clean(newRaw, MAX_NEW);
-  const reviewList = clean(reviewRaw, MAX_REVIEW).filter((r) => !newList.some((n) => n.id === r.id));
+  const newIds = new Set(newList.map((n) => n.id));
+  // Filter overlap with new BEFORE slicing so an overlapping due item doesn't leave 0 reviews.
+  const reviewList = clean(reviewRaw, Number.MAX_SAFE_INTEGER)
+    .filter((r) => !newIds.has(r.id))
+    .slice(0, MAX_REVIEW);
   return { newList, reviewList };
 }
 
@@ -105,12 +154,18 @@ export function applyModelScriptToInputs(
     const it = model.get(src.id);
     if (it) matched += 1;
     const dialogue = Array.isArray(it?.dialogue)
-      ? it.dialogue.slice(0, 4).flatMap((d: any) => {
+      ? it.dialogue.slice(0, MAX_DIALOGUE_LINES).flatMap((d: any) => {
           if (!d || typeof d !== 'object' || typeof d.line !== 'string') return [];
           const speaker = d.speaker === 'Partner' ? 'Partner' : 'Coach';
           return [{ speaker: speaker as 'Coach' | 'Partner', line: String(d.line) }];
         })
       : [];
+    const extraExamples = Array.isArray(it?.extraExamples)
+      ? it.extraExamples
+          .slice(0, MAX_EXTRA_EXAMPLES)
+          .filter((x: unknown): x is string => typeof x === 'string' && x.trim().length > 0)
+          .map((x: string) => x.trim().slice(0, MAX_PHRASE))
+      : undefined;
     return {
       mistakeId: src.id,
       kind,
@@ -121,6 +176,7 @@ export function applyModelScriptToInputs(
       dialogue: it ? dialogue : [],
       meaningKo: it ? String(it.meaningKo || '') : '',
       similarExample: it ? String(it.similarExample || '') : '',
+      ...(extraExamples && extraExamples.length > 0 ? { extraExamples } : {}),
       sourceDateKst: kstDateOfIso(src.createdAt),
       lessonTitle: src.lessonTitle,
     };
@@ -247,7 +303,7 @@ export function buildLectureSpeechPlan(
   const opening = items.length
     ? openingLine(items, lectureDateKst)
     : '찬식님, 좋은 아침이에요.';
-  plan.push({ kind: 'speech', text: `Coach: ${opening}`, two: false });
+  plan.push({ kind: 'speech', text: `Coach: ${opening}`, two: false, role: 'opening' });
   plan.push({ kind: 'silence', sec: 0.6 });
 
   for (let i = 0; i < items.length; i++) {
@@ -258,6 +314,10 @@ export function buildLectureSpeechPlan(
     ];
     const example = (it.similarExample || '').trim();
     if (example) lines.push(`Coach: 비슷한 예로, ${example}`);
+    for (const ex of it.extraExamples || []) {
+      const trimmedEx = String(ex || '').trim();
+      if (trimmedEx) lines.push(`Coach: 하나 더, ${trimmedEx}`);
+    }
     if (it.dialogue.length > 0) {
       lines.push('Coach: 짧은 대화로 들어 볼게요.');
       for (const d of it.dialogue) {
@@ -269,9 +329,9 @@ export function buildLectureSpeechPlan(
     } else {
       lines.push('Coach: 자연스러운 표현을 영어로 말해 보세요.');
     }
-    plan.push({ kind: 'speech', text: lines.join('\n'), two: true, itemIndex: i });
+    plan.push({ kind: 'speech', text: lines.join('\n'), two: true, itemIndex: i, role: 'body' });
     plan.push({ kind: 'silence', sec: SILENCE_SEC });
-    plan.push({ kind: 'speech', text: `Coach: ${it.answerEnglish}`, two: false });
+    plan.push({ kind: 'speech', text: `Coach: ${it.answerEnglish}`, two: false, itemIndex: i, role: 'answer' });
     plan.push({ kind: 'silence', sec: 0.8 });
   }
 
@@ -279,6 +339,6 @@ export function buildLectureSpeechPlan(
   const closing = note
     ? `Coach: 오늘의 코치 한마디. ${note} ${PRACTICE_OUTRO}`
     : `Coach: ${PRACTICE_OUTRO}`;
-  plan.push({ kind: 'speech', text: closing, two: false });
+  plan.push({ kind: 'speech', text: closing, two: false, role: 'closing' });
   return plan;
 }

@@ -8,9 +8,9 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { GoogleGenAI, Type } from '@google/genai';
 import { requireAuth, verifyFirebaseIdToken, setAfterAuthHook } from './server/auth.ts';
 import { ensureUserGeminiKey, getUserSuppliedKey } from './server/userKey.ts';
-import { saveFeedBackup, deleteFeedBackup, saveLectureBackup } from './server/feedStore.ts';
+import { saveFeedBackup, deleteFeedBackup, persistLectureBackups } from './server/feedStore.ts';
 import { geminiLimit, clusterLimit, checkLiveSessionStart } from './server/rateLimit.ts';
-import { DATA_DIR, startLectureJob, startLectureAudioRebuild, readLectureState, lectureAudioPath, lectureHasLocalScript, lectureStatusPayload, kstToday, LECTURE_AUDIO_MISSING, LECTURE_AUDIO_SCRIPT_MISSING } from './server/lecture.ts';
+import { DATA_DIR, startLectureJob, startLectureAudioRebuild, readLectureState, lectureAudioPath, lectureHasLocalScript, lectureStatusPayload, kstToday, LECTURE_AUDIO_MISSING, LECTURE_AUDIO_SCRIPT_MISSING, LECTURE_AUDIO_REBUILD_TIMED_OUT } from './server/lecture.ts';
 import type { LectureState } from './server/lecture.ts';
 import { sanitizeLectureInputs } from './server/lectureMaterial.ts';
 import { mimeForAudioFile } from './server/lectureAudioEncode.ts';
@@ -38,7 +38,7 @@ import {
   storageMediaUrl,
   storageObjectPath,
 } from './server/storageRelay.ts';
-import { isValidFeedSecret, writeFeedSync, loadFeedForSecret, feedForUid, ensureTodayLecture, buildFeedToday, feedAudioFile, renderFeedHtml, publicFeedBaseUrl } from './server/feed.ts';
+import { isValidFeedSecret, writeFeedSync, loadFeedForSecret, feedForUid, ensureTodayLecture, buildFeedToday, buildFeedDiag, maybeAutoRegenerateToday, feedAudioFile, renderFeedHtml, publicFeedBaseUrl } from './server/feed.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1292,11 +1292,11 @@ app.post('/api/lecture/generate', requireAuth, geminiLimit, async (req: Request,
   try {
     const state = startLectureJob(ai, uid, day, newMistakes || [], reviewMistakes || [], {
       force: isForce,
-      onReady: async (s: LectureState) => {
+      onReady: async (s: LectureState, isCurrent: () => boolean) => {
         const f = feedForUid(uid);
         if (!f) return;
         try {
-          await saveLectureBackup(f.secret, s);
+          await persistLectureBackups(f.secret, s, isCurrent);
         } catch (err: any) {
           console.warn('[Lecture] backup save failed:', err?.message || err);
         }
@@ -1357,7 +1357,21 @@ app.get('/api/lecture/audio', requireAuth, (req: Request, res: Response) => {
 
 app.post('/api/lecture/audio/rebuild', requireAuth, geminiLimit, (req: Request, res: Response) => {
   const uid = res.locals.user.uid as string;
-  const { date, script, title, coachNote, newMistakeIds, reviewMistakeIds, ttsEngine, createdAt, textTokens, itemCount } = req.body || {};
+  const {
+    date,
+    script,
+    title,
+    coachNote,
+    newMistakeIds,
+    reviewMistakeIds,
+    inputNewIds,
+    inputReviewIds,
+    inputLatestCreatedAt,
+    ttsEngine,
+    createdAt,
+    textTokens,
+    itemCount,
+  } = req.body || {};
   const ai = createGenAI();
   if (!ai) {
     noKey(res);
@@ -1366,14 +1380,38 @@ app.post('/api/lecture/audio/rebuild', requireAuth, geminiLimit, (req: Request, 
   try {
     const day = typeof date === 'string' ? date : kstToday();
     const payload = script
-      ? { script, title, coachNote, newMistakeIds, reviewMistakeIds, ttsEngine, createdAt, textTokens, itemCount }
+      ? {
+          script,
+          title,
+          coachNote,
+          newMistakeIds,
+          reviewMistakeIds,
+          inputNewIds,
+          inputReviewIds,
+          inputLatestCreatedAt,
+          ttsEngine,
+          createdAt,
+          textTokens,
+          itemCount,
+        }
       : undefined;
-    const state = startLectureAudioRebuild(ai, uid, day, payload);
+    const state = startLectureAudioRebuild(ai, uid, day, payload, {
+      ignoreCooldown: true,
+      onReady: async (s, isCurrent) => {
+        const f = feedForUid(uid);
+        if (!f) return;
+        try {
+          await persistLectureBackups(f.secret, s, isCurrent);
+        } catch (err: any) {
+          console.warn('[Lecture] rebuild backup save failed:', err?.message || err);
+        }
+      },
+    });
     if (state.audioStatus === 'missing' && state.error === LECTURE_AUDIO_SCRIPT_MISSING) {
       res.status(409).json({ ok: false, error: '강의 대본이 없어 오디오를 다시 만들 수 없어요.', code: LECTURE_AUDIO_SCRIPT_MISSING, lecture: state });
       return;
     }
-    if (state.audioStatus === 'missing' && state.error && state.error !== 'GENERATION_FAILED') {
+    if (state.audioStatus === 'missing' && state.error && state.error !== 'GENERATION_FAILED' && state.error !== LECTURE_AUDIO_REBUILD_TIMED_OUT) {
       apiError(res, 400, 'BAD_REQUEST', '강의 대본 형식이 올바르지 않아요.');
       return;
     }
@@ -1387,7 +1425,7 @@ app.post('/api/lecture/audio/rebuild', requireAuth, geminiLimit, (req: Request, 
 // B-8 Grok Bot feed: app syncs secret + candidates (auth), feed URLs need only the secret
 app.post('/api/feed/sync', requireAuth, async (req: Request, res: Response) => {
   const uid = res.locals.user.uid as string;
-  const { secret, previousSecret, quizCount, newMistakes, reviewMistakes } = req.body || {};
+  const { secret, previousSecret, quizCount, newMistakes, reviewMistakes, autoRegenerate } = req.body || {};
   if (!isValidFeedSecret(secret)) {
     res.status(400).json({ ok: false, error: 'feed secret 형식 오류' });
     return;
@@ -1400,12 +1438,20 @@ app.post('/api/feed/sync', requireAuth, async (req: Request, res: Response) => {
     newMistakes: newList,
     reviewMistakes: reviewList,
     syncedAt: new Date().toISOString(),
+    autoRegenerate: autoRegenerate !== false,
   };
   writeFeedSync(state);
+  const today = kstToday();
+  const ai = createGenAI();
   try {
-    await ensureTodayLecture(createGenAI(), state, kstToday());
+    await ensureTodayLecture(ai, state, today);
   } catch (err: any) {
     console.warn('[feed] ensure lecture after sync failed:', err?.message || err);
+  }
+  try {
+    maybeAutoRegenerateToday(ai, state, today);
+  } catch (err: any) {
+    console.warn('[feed] auto-regenerate after sync failed:', err?.message || err);
   }
   // Firestore backup so the feed URL survives a fresh server (see server/feedStore.ts).
   const idToken = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
@@ -1452,6 +1498,17 @@ app.get(['/feed/:secret/today', '/feed/:secret/today.json'], async (req: Request
   const today = buildFeedToday(ai, st, feedBaseUrl(req), { date, skipStart });
   if (req.path.endsWith('.json')) res.json(today);
   else res.type('html').send(renderFeedHtml(today));
+});
+
+app.get('/feed/:secret/today/diag.json', async (req: Request, res: Response) => {
+  res.set('Cache-Control', 'no-store');
+  res.set('X-Robots-Tag', 'noindex');
+  const st = await loadFeedForSecret(String(req.params.secret));
+  if (!st) {
+    res.status(404).send('Not found');
+    return;
+  }
+  res.json(buildFeedDiag(st, { date: kstToday() }));
 });
 
 app.get('/feed/:secret/audio/:file', async (req: Request, res: Response) => {

@@ -6,7 +6,13 @@ import { getKSTToday } from "../../services/firebase/db";
 import { LectureDoc, getLecture, startLecture, syncLectureStatus, copyLectureAudio } from "../../services/lecture/lectureService";
 import { rebuildTodayLecture } from "../../services/lecture/rebuildTodayLecture";
 import { formatLectureDuration } from "../../services/lecture/lecturePick";
-import { shouldCopyLectureAudio, shouldShowLectureImmediately, readUploadFailAt } from "../../services/lecture/lectureSyncPolicy";
+import {
+  shouldCopyLectureAudio,
+  shouldShowLectureImmediately,
+  isLectureAudioRestoring,
+  shouldPollLecture,
+  readUploadFailAt,
+} from "../../services/lecture/lectureSyncPolicy";
 import { LectureModal } from "./LectureModal";
 
 interface MorningLectureCardProps {
@@ -61,8 +67,10 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
       if (shouldShowLectureImmediately(l)) {
         setLecture(l);
         setLoading(false);
-        maybeCopyAudio(l);
-        return l;
+        if (!isLectureAudioRestoring(l)) {
+          maybeCopyAudio(l);
+          return l;
+        }
       }
       // Server may have generated it (e.g. via the Grok Bot feed) → metadata only
       l = (await syncLectureStatus(user.uid, today).catch(() => l)) || l;
@@ -108,16 +116,19 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
   }, [autoOpen, lecture]);
 
   useEffect(() => {
-    if (lecture?.status === "generating" && !pollRef.current) {
+    if (shouldPollLecture(lecture) && !pollRef.current) {
       pollRef.current = window.setInterval(async () => {
         const l = await refresh().catch(() => null);
-        if (l && l.status !== "generating" && pollRef.current) {
+        if (l && !shouldPollLecture(l) && pollRef.current) {
           window.clearInterval(pollRef.current);
           pollRef.current = null;
         }
       }, 5000);
+    } else if (!shouldPollLecture(lecture) && pollRef.current) {
+      window.clearInterval(pollRef.current);
+      pollRef.current = null;
     }
-  }, [lecture?.status]);
+  }, [lecture?.status, lecture?.audioStatus]);
 
   const runLectureAction = async (action: () => Promise<LectureDoc>) => {
     setBusy(true);
@@ -139,6 +150,7 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
   };
 
   const status = lecture?.status;
+  const restoring = isLectureAudioRestoring(lecture);
   return (
     <section className="bg-[#161D2A] border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-lg">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -161,7 +173,12 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
             </div>
             {status === "ready" && (
               <div className="text-[11px] text-slate-400">
-                {lecture?.itemCount}개 표현 · {formatLectureDuration(lecture?.durationSec || 0)}{lecture?.listenedAt ? " · 들음" : ""}
+                {lecture?.itemCount}개 표현 · {formatLectureDuration(lecture?.durationSec || 0)}{lecture?.listenedAt ? " · 들음" : ""}{restoring ? " · 오디오 복원 중" : ""}
+              </div>
+            )}
+            {status === "ready" && lecture?.audioStatus === "missing" && lecture?.error === "AUDIO_REBUILD_TIMED_OUT" && (
+              <div className="text-[11px] text-amber-300">
+                오디오를 만들지 못했어요. 재생을 누르면 다시 만들어요.
               </div>
             )}
             {status === "failed" && lecture?.error && (
@@ -200,9 +217,21 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
               </button>
             </>
           ) : status === "generating" ? (
-            <div className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-bold flex items-center gap-1.5">
-              <Loader2 className="w-3.5 h-3.5 animate-spin" /> 생성 중 (1~3분)
-            </div>
+            <>
+              <div className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-bold flex items-center gap-1.5">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" /> 생성 중 (1~3분)
+              </div>
+              <button
+                type="button"
+                data-testid="rebuild-today-lecture"
+                onClick={rebuild}
+                disabled={busy || loading}
+                className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 border border-slate-700 text-slate-300 text-xs font-semibold flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
+              >
+                {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                다시 만들기
+              </button>
+            </>
           ) : (
             <button
               onClick={() => create(status === "failed")}

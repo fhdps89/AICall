@@ -13,10 +13,22 @@ import {
   estimatePlanDurationSec,
   LECTURE_MAX_SEC,
   PRACTICE_OUTRO,
+  COACH_NOTE_FALLBACK,
+  splitKoreanSentences,
+  normalizeCoachNote,
   type LectureMistakeInput,
   type LectureScriptItem,
 } from '../server/lectureMaterial.ts';
-import { DATA_DIR, startLectureJob, readLectureState, sanitizeLectureScriptPayload } from '../server/lecture.ts';
+import {
+  DATA_DIR,
+  MAX_LECTURE_SCRIPT_ITEMS,
+  startLectureJob,
+  startLectureAudioRebuild,
+  lectureRebuildInFlight,
+  readLectureState,
+  sanitizeLectureScriptPayload,
+} from '../server/lecture.ts';
+import { wavFromPcm } from '../server/lectureAudioEncode.ts';
 
 const LECTURE_DATE = '2026-11-22';
 
@@ -303,6 +315,43 @@ test('sanitizeLectureScriptPayload keeps a valid sourceDateKst and drops a bad o
   });
   assert.equal(bad.ok, true);
   if (bad.ok) assert.equal(bad.payload.script[0].sourceDateKst, undefined);
+
+  const validFit = {
+    baseSec: 300,
+    droppedCount: 0,
+    replayCount: 1,
+    recap: false,
+    drillUnits: 2,
+    padSec: 1.5,
+    guardPadSec: 0,
+    truncatedSec: 0,
+    extraTtsCalls: 1,
+  };
+  const withFit = sanitizeLectureScriptPayload({
+    script: [
+      {
+        mistakeId: 'm1',
+        myPhrase: 'I go',
+        naturalPhrase: 'I went',
+      },
+    ],
+    durationFit: validFit,
+  });
+  assert.equal(withFit.ok, true);
+  if (withFit.ok) assert.deepEqual(withFit.payload.durationFit, validFit);
+
+  const badFit = sanitizeLectureScriptPayload({
+    script: [
+      {
+        mistakeId: 'm1',
+        myPhrase: 'I go',
+        naturalPhrase: 'I went',
+      },
+    ],
+    durationFit: { ...validFit, baseSec: 'NaN' },
+  });
+  assert.equal(badFit.ok, true);
+  if (badFit.ok) assert.equal(badFit.payload.durationFit, undefined);
 });
 
 test('startLectureJob with only QA or empty candidates is NOTHING_TO_TEACH and does not run the job', () => {
@@ -333,4 +382,97 @@ test('startLectureJob with only QA or empty candidates is NOTHING_TO_TEACH and d
   } finally {
     fs.rmSync(path.join(DATA_DIR, 'lectures', uid), { recursive: true, force: true });
   }
+});
+
+test('N2: splitKoreanSentences and normalizeCoachNote enforce exactly 2 sentences without splitting quotes/decimals', async () => {
+  assert.equal(
+    normalizeCoachNote('첫째 문장입니다. 둘째 문장입니다. 셋째 문장입니다.'),
+    '첫째 문장입니다. 둘째 문장입니다.'
+  );
+  assert.equal(
+    normalizeCoachNote('한 문장만 있어요.'),
+    `한 문장만 있어요. ${COACH_NOTE_FALLBACK[1]}`
+  );
+  assert.equal(
+    normalizeCoachNote(COACH_NOTE_FALLBACK[1]),
+    `${COACH_NOTE_FALLBACK[0]} ${COACH_NOTE_FALLBACK[1]}`
+  );
+  assert.equal(normalizeCoachNote(''), COACH_NOTE_FALLBACK.join(' '));
+  assert.equal(
+    normalizeCoachNote('"I went." 를 기억하세요. 잘했어요!'),
+    '"I went." 를 기억하세요. 잘했어요!'
+  );
+  assert.deepEqual(
+    splitKoreanSentences("오늘 배운 표현은 'I went'. 정말 잘했어요. 내일도 화이팅!"),
+    ["오늘 배운 표현은 'I went'.", '정말 잘했어요.', '내일도 화이팅!']
+  );
+  assert.equal(
+    normalizeCoachNote("오늘 배운 표현은 'I went'. 정말 잘했어요. 내일도 화이팅!"),
+    "오늘 배운 표현은 'I went'. 정말 잘했어요."
+  );
+  assert.equal(
+    normalizeCoachNote('3.5배 늘었어요. 좋아요.'),
+    '3.5배 늘었어요. 좋아요.'
+  );
+  const once = normalizeCoachNote('첫 문장. 둘째 문장. 셋째 문장.');
+  assert.equal(normalizeCoachNote(once), once);
+
+  const uid = `test_n2_plan_${process.pid}`;
+  const date = '2026-11-24';
+  const captured: string[] = [];
+  try {
+    startLectureAudioRebuild(
+      {} as GoogleGenAI,
+      uid,
+      date,
+      {
+        title: '테스트',
+        coachNote: '첫 문장. 둘째 문장. 셋째 문장은 잘립니다.',
+        script: [scriptItem({ mistakeId: 'm1' })],
+      },
+      {
+        synthesizeFn: async (_ai, _e, text) => {
+          captured.push(text);
+          return { data: Buffer.alloc(2400 * 2), rate: 24000 };
+        },
+        encodeFn: async (pcm, rate) => ({ ext: 'wav', mime: 'audio/wav', buffer: wavFromPcm(pcm, rate) }),
+      }
+    );
+    await lectureRebuildInFlight(uid, date);
+    const closingLines = captured.filter((t) => t.includes('오늘의 코치 한마디'));
+    assert.equal(closingLines.length, 1);
+    const st = readLectureState(uid, date);
+    assert.equal(st?.coachNote, '첫 문장. 둘째 문장.');
+    assert.equal(splitKoreanSentences(st?.coachNote || '').length, 2);
+  } finally {
+    fs.rmSync(path.join(DATA_DIR, 'lectures', uid), { recursive: true, force: true });
+  }
+});
+
+test('N3: sanitizeLectureInputs caps reviews at 1, filters overlap before slice, and accepts legacy 23-item payloads', () => {
+  const threeReviews = sanitizeLectureInputs(
+    [{ id: 'n1', myPhrase: 'a', naturalPhrase: 'b' }],
+    [
+      { id: 'r1', myPhrase: 'c1', naturalPhrase: 'd1' },
+      { id: 'r2', myPhrase: 'c2', naturalPhrase: 'd2' },
+      { id: 'r3', myPhrase: 'c3', naturalPhrase: 'd3' },
+    ]
+  );
+  assert.deepEqual(threeReviews.reviewList.map((r) => r.id), ['r1']);
+
+  const overlapFirst = sanitizeLectureInputs(
+    [{ id: 'shared', myPhrase: 'a', naturalPhrase: 'b' }],
+    [
+      { id: 'shared', myPhrase: 'a', naturalPhrase: 'b' },
+      { id: 'r2', myPhrase: 'c2', naturalPhrase: 'd2' },
+    ]
+  );
+  assert.deepEqual(overlapFirst.reviewList.map((r) => r.id), ['r2']);
+
+  const zeroDue = sanitizeLectureInputs([{ id: 'n1', myPhrase: 'a', naturalPhrase: 'b' }], []);
+  assert.equal(zeroDue.reviewList.length, 0);
+
+  assert.equal(MAX_LECTURE_SCRIPT_ITEMS, 23);
+  const legacy23 = Array.from({ length: 23 }, (_, i) => scriptItem({ mistakeId: `legacy-${i}` }));
+  assert.equal(sanitizeLectureScriptPayload({ script: legacy23 }).ok, true);
 });

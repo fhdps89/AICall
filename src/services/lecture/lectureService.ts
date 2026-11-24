@@ -39,6 +39,7 @@ import {
   sessionCallSeconds,
   isShortSession,
   PREVIOUS_LECTURE_LOOKBACK_DAYS,
+  MAX_REVIEW_PER_LECTURE,
   type LectureCandidate,
   type SessionTiming,
 } from "./lecturePick";
@@ -61,6 +62,7 @@ export interface LectureScriptItem {
   meaningKo: string;
   answerEnglish: string;
   similarExample?: string;
+  extraExamples?: string[];
   sourceDateKst?: string;
   lessonTitle?: string;
   startSec?: number;
@@ -76,6 +78,9 @@ export interface LectureDoc {
   itemCount?: number;
   newMistakeIds?: string[];
   reviewMistakeIds?: string[];
+  inputNewIds?: string[];
+  inputReviewIds?: string[];
+  inputLatestCreatedAt?: string;
   ttsEngine?: string;
   chars?: number;
   textTokens?: number;
@@ -291,7 +296,7 @@ export async function pickLectureMistakes(uid: string, today = getKSTToday(), no
     const sec = sessionCallSeconds(sessionsById[sid]);
     if (sec == null) return true;
     return !isShortSession(sec);
-  }).slice(0, 3);
+  }).slice(0, MAX_REVIEW_PER_LECTURE);
 
   return {
     newMistakes,
@@ -318,6 +323,9 @@ export async function startLecture(uid: string, date = getKSTToday(), force = fa
     status: lecture.status,
     newMistakeIds: lecture.newMistakeIds,
     reviewMistakeIds: lecture.reviewMistakeIds,
+    ...(Array.isArray(lecture.inputNewIds) ? { inputNewIds: lecture.inputNewIds } : {}),
+    ...(Array.isArray(lecture.inputReviewIds) ? { inputReviewIds: lecture.inputReviewIds } : {}),
+    ...(typeof lecture.inputLatestCreatedAt === "string" ? { inputLatestCreatedAt: lecture.inputLatestCreatedAt } : {}),
     ttsEngine: lecture.ttsEngine,
     createdAt: lecture.createdAt,
     updatedAt: new Date().toISOString(),
@@ -376,6 +384,9 @@ export async function syncLectureStatus(uid: string, date = getKSTToday()): Prom
     itemCount: lecture.itemCount,
     newMistakeIds: lecture.newMistakeIds,
     reviewMistakeIds: lecture.reviewMistakeIds,
+    ...(Array.isArray(lecture.inputNewIds) ? { inputNewIds: lecture.inputNewIds } : {}),
+    ...(Array.isArray(lecture.inputReviewIds) ? { inputReviewIds: lecture.inputReviewIds } : {}),
+    ...(typeof lecture.inputLatestCreatedAt === "string" ? { inputLatestCreatedAt: lecture.inputLatestCreatedAt } : {}),
     ttsEngine: lecture.ttsEngine,
     chars: lecture.chars,
     textTokens: lecture.textTokens,
@@ -469,6 +480,9 @@ export async function rebuildLectureAudio(lecture: LectureDoc): Promise<void> {
     body.coachNote = lecture.coachNote;
     body.newMistakeIds = lecture.newMistakeIds;
     body.reviewMistakeIds = lecture.reviewMistakeIds;
+    if (lecture.inputNewIds) body.inputNewIds = lecture.inputNewIds;
+    if (lecture.inputReviewIds) body.inputReviewIds = lecture.inputReviewIds;
+    if (lecture.inputLatestCreatedAt) body.inputLatestCreatedAt = lecture.inputLatestCreatedAt;
     body.ttsEngine = lecture.ttsEngine;
     body.createdAt = lecture.createdAt;
     body.textTokens = lecture.textTokens;
