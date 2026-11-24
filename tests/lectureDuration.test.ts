@@ -8,6 +8,7 @@ import {
   LECTURE_MIN_SEC,
   LECTURE_MAX_SEC_HARD,
   LECTURE_MAX_SEC_GUARD,
+  LECTURE_MAX_FALLBACK_PAD_SEC,
   SLOT,
   DRILL_GAP_SEC,
   DRILL_TAIL_SEC,
@@ -21,6 +22,8 @@ import {
   lectureRebuildInFlight,
   readLectureState,
   startLectureAudioRebuild,
+  startLectureJob,
+  type LectureMistakeInput,
   type LectureScriptItem,
 } from '../server/lecture.ts';
 import { wavFromPcm } from '../server/lectureAudioEncode.ts';
@@ -110,17 +113,18 @@ test('3) small overshoot (+3s above target) is resolved by shrinking without dro
   assert.ok(r.totalSamples >= LECTURE_MIN_SEC * RATE && r.totalSamples <= LECTURE_MAX_SEC_HARD * RATE);
 });
 
-test('4) recap failed / drillIntro failed still lands in [360s, 370s] via guardPad', () => {
+test('4) recap failed / drillIntro failed caps trailing stretch silence at <= 5s instead of padding to 360s', () => {
   const m = makeMeasured(1, 30, 2);
   const r1 = fitLectureTimeline(m);
   assert.equal(r1.want, 'recap');
   const rFailRecap = fitLectureTimeline(m, { recap: 'failed' });
   assert.equal(rFailRecap.want, null);
-  assert.ok(rFailRecap.fit.guardPadSec > 0);
-  assert.ok(rFailRecap.totalSamples >= LECTURE_MIN_SEC * RATE && rFailRecap.totalSamples <= LECTURE_MAX_SEC_HARD * RATE);
+  assert.ok(rFailRecap.totalSamples < LECTURE_MIN_SEC * RATE);
+  assert.ok(rFailRecap.fit.guardPadSec <= LECTURE_MAX_FALLBACK_PAD_SEC);
+  const lastRecap = rFailRecap.timeline[rFailRecap.timeline.length - 1];
+  const trailingRecapSec = lastRecap && 'silence' in lastRecap ? lastRecap.silence / RATE : 0;
+  assert.ok(trailingRecapSec <= LECTURE_MAX_FALLBACK_PAD_SEC, `trailing=${trailingRecapSec}s`);
 
-  // Trigger drillIntro path directly (gap between 10s and 20s above padUp)
-  const mDrill = makeMeasured(5, 63.5, 2); // base ~359.1, G ~5.9, or adjust to trigger drillIntro
   // With N=2, 1 item ~155s -> 322s + replays skipped (<45) -> recap skipped (<20) -> drillIntro wanted!
   const mNeedDrill = makeMeasured(2, 155, 2);
   // base = 4 + 0.6 + 2*(155+3+2+0.8) + 8 = 334.2, padUp = 0.9 + 2*4.2 + 4 = 13.3, G = 30.8
@@ -129,9 +133,11 @@ test('4) recap failed / drillIntro failed still lands in [360s, 370s] via guardP
   assert.equal(rd1.want, 'drillIntro');
   const rd2 = fitLectureTimeline(mNeedDrill, { drillIntro: 'failed' });
   assert.equal(rd2.want, null);
-  assert.ok(rd2.fit.guardPadSec > 0);
-  assert.ok(rd2.totalSamples >= LECTURE_MIN_SEC * RATE && rd2.totalSamples <= LECTURE_MAX_SEC_HARD * RATE);
-  void mDrill;
+  assert.ok(rd2.totalSamples < LECTURE_MIN_SEC * RATE);
+  assert.ok(rd2.fit.guardPadSec <= LECTURE_MAX_FALLBACK_PAD_SEC);
+  const lastDrill = rd2.timeline[rd2.timeline.length - 1];
+  const trailingDrillSec = lastDrill && 'silence' in lastDrill ? lastDrill.silence / RATE : 0;
+  assert.ok(trailingDrillSec <= LECTURE_MAX_FALLBACK_PAD_SEC, `trailing=${trailingDrillSec}s`);
 });
 
 test('5) pathological 400s single item is truncated to <=369.8s (within 360-370s) with 100ms fade-out', () => {
@@ -240,6 +246,182 @@ test('7) integration via startLectureAudioRebuild writes 360-370s WAV, agrees wi
     assert.equal(st.inputReviewIds?.length, 1);
     // Main plan calls = 2 + 2 * 12 = 26, plus at most 1 extra call
     assert.ok(synthCalls <= 27);
+  } finally {
+    fs.rmSync(path.join(DATA_DIR, 'lectures', uid), { recursive: true, force: true });
+  }
+});
+
+function shortScript(): LectureScriptItem[] {
+  return [
+    {
+      mistakeId: 'm0',
+      kind: 'new',
+      myPhrase: 'I go yesterday',
+      naturalPhrase: 'I went yesterday',
+      explanation: '과거 시제를 사용해야 합니다.',
+      dialogue: [
+        { speaker: 'Coach', line: 'How was your trip?' },
+        { speaker: 'Partner', line: 'I went yesterday.' },
+      ],
+      meaningKo: '어제 갔다',
+      answerEnglish: 'I went yesterday',
+      similarExample: 'She went home early.',
+    },
+  ];
+}
+
+test('8) recap TTS fails once then succeeds on retry -> lands in [360s, 370s] with 2 recap calls', async () => {
+  const uid = `test_n1_recap_retry_${process.pid}`;
+  const date = '2026-11-24';
+  let recapCalls = 0;
+  try {
+    startLectureAudioRebuild(
+      {} as GoogleGenAI,
+      uid,
+      date,
+      { title: '재시도 통합', coachNote: '첫 문장. 둘째 문장.', script: shortScript() },
+      {
+        synthesizeFn: async (_ai, _e, text) => {
+          if (text.includes('오늘 표현을 다시 정리해 볼게요')) {
+            recapCalls += 1;
+            if (recapCalls === 1) throw new Error('transient recap TTS error');
+          }
+          const samples = Math.round((text.length / 10) * RATE);
+          return { data: Buffer.alloc(samples * 2), rate: RATE };
+        },
+        encodeFn: async (pcm, rate) => ({ ext: 'wav', mime: 'audio/wav', buffer: wavFromPcm(pcm, rate) }),
+      }
+    );
+    await lectureRebuildInFlight(uid, date);
+
+    assert.equal(recapCalls, 2);
+    const wavPath = lectureAudioPath(uid, date)!;
+    assert.ok(wavPath);
+    const sec = (fs.readFileSync(wavPath).length - 44) / (RATE * 2);
+    assert.ok(sec >= 360 && sec <= 370, `WAV sec=${sec} out of [360,370]`);
+    const st = readLectureState(uid, date)!;
+    assert.equal(st.status, 'ready');
+    assert.equal(st.durationFit?.recap, true);
+  } finally {
+    fs.rmSync(path.join(DATA_DIR, 'lectures', uid), { recursive: true, force: true });
+  }
+});
+
+test('9) recap TTS fails twice -> ready under 360s, trailing stretch pad <= 5s, and logs warning', async () => {
+  const uid = `test_n1_recap_fail2_${process.pid}`;
+  const date = '2026-11-24';
+  let recapCalls = 0;
+  const warns: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warns.push(args.map(String).join(' '));
+  };
+  try {
+    startLectureAudioRebuild(
+      {} as GoogleGenAI,
+      uid,
+      date,
+      { title: '실패 폴백', coachNote: '첫 문장. 둘째 문장.', script: shortScript() },
+      {
+        synthesizeFn: async (_ai, _e, text) => {
+          if (text.includes('오늘 표현을 다시 정리해 볼게요')) {
+            recapCalls += 1;
+            throw new Error('persistent recap TTS error');
+          }
+          const samples = Math.round((text.length / 10) * RATE);
+          return { data: Buffer.alloc(samples * 2), rate: RATE };
+        },
+        encodeFn: async (pcm, rate) => ({ ext: 'wav', mime: 'audio/wav', buffer: wavFromPcm(pcm, rate) }),
+      }
+    );
+    await lectureRebuildInFlight(uid, date);
+
+    assert.equal(recapCalls, 2);
+    const wavPath = lectureAudioPath(uid, date)!;
+    assert.ok(wavPath);
+    const sec = (fs.readFileSync(wavPath).length - 44) / (RATE * 2);
+    assert.ok(sec < LECTURE_MIN_SEC, `expected <360s, got ${sec}s`);
+    assert.ok(sec < 120, `expected short lecture without dead-air pad, got ${sec}s`);
+
+    const st = readLectureState(uid, date)!;
+    assert.equal(st.status, 'ready');
+    assert.equal(st.audioStatus, 'ready');
+    assert.ok((st.durationSec ?? 999) < LECTURE_MIN_SEC);
+    assert.ok((st.durationFit?.guardPadSec ?? 999) <= LECTURE_MAX_FALLBACK_PAD_SEC);
+    assert.ok(
+      warns.some((w) => w.includes('under 6:00') && /\d+\.\d+s/.test(w)),
+      `expected under-6:00 warning, got: ${JSON.stringify(warns)}`
+    );
+  } finally {
+    console.warn = origWarn;
+    fs.rmSync(path.join(DATA_DIR, 'lectures', uid), { recursive: true, force: true });
+  }
+});
+
+test('10) N1 generation path (startLectureJob -> runJob -> renderAndSaveAudio) with m4a 80ms pad stub stays <= 370s', async () => {
+  const uid = `test_n1_gen_m4a_${process.pid}`;
+  const date = '2026-11-24';
+  const script: LectureScriptItem[] = Array.from({ length: 12 }, (_, i) => ({
+    mistakeId: `m${i}`,
+    kind: i === 11 ? 'review' : 'new',
+    myPhrase: `I go ${i}`,
+    naturalPhrase: `I went ${i}`,
+    explanation: '과거 시제를 사용해야 합니다. '.repeat(20),
+    dialogue: [
+      { speaker: 'Coach', line: 'How was your trip?' },
+      { speaker: 'Partner', line: `I went ${i} yesterday.` },
+    ],
+    meaningKo: '갔다',
+    answerEnglish: `I went ${i}`,
+    similarExample: 'She went home early.',
+  }));
+  const newInputs: LectureMistakeInput[] = script
+    .filter((s) => s.kind === 'new')
+    .map((s) => ({ id: s.mistakeId, myPhrase: s.myPhrase, naturalPhrase: s.naturalPhrase }));
+  const reviewInputs: LectureMistakeInput[] = script
+    .filter((s) => s.kind === 'review')
+    .map((s) => ({ id: s.mistakeId, myPhrase: s.myPhrase, naturalPhrase: s.naturalPhrase }));
+
+  let resolveReady!: () => void;
+  const readyPromise = new Promise<void>((r) => {
+    resolveReady = r;
+  });
+
+  try {
+    const started = startLectureJob({} as GoogleGenAI, uid, date, newInputs, reviewInputs, {
+      generateScriptFn: async () => ({
+        title: '생성 경로 통합',
+        coachNote: '첫 문장. 둘째 문장.',
+        items: script,
+        tokens: 321,
+      }),
+      synthesizeFn: async (_ai, _e, text) => {
+        const samples = Math.round((text.length / 10) * RATE);
+        return { data: Buffer.alloc(samples * 2), rate: RATE };
+      },
+      encodeFn: async (pcm, rate) => {
+        const padSamples = Math.round(0.08 * rate);
+        const padded = Buffer.concat([pcm, Buffer.alloc(padSamples * 2)]);
+        return { ext: 'm4a', mime: 'audio/mp4', buffer: wavFromPcm(padded, rate) };
+      },
+      onReady: () => {
+        resolveReady();
+      },
+    });
+    assert.equal(started.status, 'generating');
+    await readyPromise;
+
+    const audioPath = lectureAudioPath(uid, date);
+    assert.ok(audioPath && audioPath.endsWith('.m4a'), `expected .m4a path, got ${audioPath}`);
+    const wavBuf = fs.readFileSync(audioPath);
+    const measuredSec = (wavBuf.length - 44) / (RATE * 2);
+    assert.ok(measuredSec >= 360 && measuredSec <= 370, `m4a stub sec=${measuredSec} out of [360,370]`);
+
+    const st = readLectureState(uid, date)!;
+    assert.equal(st.status, 'ready');
+    assert.equal(st.audioMime, 'audio/mp4');
+    assert.equal(st.textTokens, 321);
+    assert.equal(st.durationSec, Math.round(measuredSec - 0.08));
   } finally {
     fs.rmSync(path.join(DATA_DIR, 'lectures', uid), { recursive: true, force: true });
   }

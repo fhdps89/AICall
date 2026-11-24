@@ -14,11 +14,11 @@
   - `storage.rules`는 `users/{uid}/lectures/{file}`도 wav·m4a·mp3로 넓힘(클라이언트는 이미 m4a/mp3 업로드) — 규칙 배포는 소유자 별도 승인 단계.
   - F: 오디오만 다시 만드는 복원은 시작 시각 기준 30분 wall-clock 상한(읽을 때 판정, 멈춘 타이머에도 동작). 넘으면 중단·`AUDIO_REBUILD_TIMED_OUT`, 대본·제목은 유지, 30분 쿨다운 뒤 재시도.
   - G: 복원 중 공개 피드는 `status:'ready'`, 제목·항목 수 유지, `audioRestoring:true`, `audioUrl:null`. 앱 카드는 「오디오 복원 중」.
-  - N1 `server/lectureDuration.ts`: 합성한 실제 PCM 길이로 6:00–6:10(360–370초)에 맞춤. 길면 복습→뒤쪽 새 항목 순으로 통째로 빼고, 짧으면 쉼 조정 → 항목 다시 듣기 → 「오늘 표현 다시 정리」 1회(추가 TTS 최대 1회) → 따라 말하기 드릴 → 마지막 무음 보정. 최종 보정으로 항상 창 안. 대본 단계도 6분 목표(항목당 글자 수·깊이, extraExamples ≤2, 대화 ≤6줄).
+  - N1 `server/lectureDuration.ts`: 합성한 실제 PCM 길이로 6:00–6:10(360–370초)에 맞춤. 길면 복습→뒤쪽 새 항목 순으로 통째로 빼고, 짧으면 쉼 조정 → 항목 다시 듣기 → 「오늘 표현 다시 정리」 1회(추가 TTS 최대 1회) → 따라 말하기 드릴 → 마지막 무음 보정. 최종 보정으로 항상 창 안. 대본 단계도 6분 목표(항목당 글자 수·깊이, extraExamples ≤2, 대화 ≤6줄). 요약·드릴 안내 TTS 실패 시 `renderAndSaveAudio`에서 1회 재시도하고, 재시도도 실패해 360초 미만이면 끝 무음(`endSlot`+`guardPad`)을 `LECTURE_MAX_FALLBACK_PAD_SEC`(5초) 이하로 제한해 긴 무음 없이 짧은 강의를 허용하고 경고를 남김.
   - N2: 「오늘의 코치 한마디」는 프롬프트 + 문장 분리 후처리로 정확히 2문장.
   - N3: 복습은 정확히 1개(없으면 0), 클라이언트 고르기·서버 정리 모두 `MAX_REVIEW = 1`.
-- **방어 조치 (Safeguards)**: 새 테스트 `lectureForce`·`feedSchedule`·`feedDiag`(허용 키 목록·내용 비노출)·`lectureAudioBackup`·`lectureDuration`(N=1~15 실측 PCM 창, 슬롯 한계, 실패 대체, 400초 단일 항목 절단), 기존 테스트 기대값은 바뀐 규칙에 맞춤.
-- **배포 전 확인**: ① Storage 규칙 배포는 찬식님 별도 승인 ② 박스 `oncall-feed-check`는 `ready`이면서 `audioUrl`이 있을 때만 보내도록 한 줄 고쳐야 함(복원 중 ready에 오디오 없이 발송 방지).
+- **방어 조치 (Safeguards)**: 새 테스트 `lectureForce`(타이머 대기 없는 결정론적 latch)·`feedSchedule`·`feedDiag`(허용 키 목록·내용 비노출)·`lectureAudioBackup`·`lectureDuration`(N=1~15 실측 PCM 창, 슬롯 한계, 요약/드릴 실패 재시도·5초 무음 상한, 400초 단일 항목 절단, 생성 경로 m4a 80ms 패딩 스텁), 기존 테스트 기대값은 바뀐 규칙에 맞춤.
+- **배포 전 확인**: ① Storage 규칙 배포는 찬식님 별도 승인 ② 박스 `oncall-feed-check`는 `ready`이면서 `audioUrl`이 있을 때만 보내도록 한 줄 패치를 준비해 두었음(`/workspace/collab/onecall_lecture_fixes_20261124/feed_check_ready_audio.patch`). 라이브 스크립트에는 아직 적용하지 않았고, 배포 때 찬식님 승인 후 적용한다.
 - **검증**: `npm test`, `npm run lint`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run build`. 머지·배포 안 함.
 
 ---

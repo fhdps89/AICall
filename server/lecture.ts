@@ -28,6 +28,7 @@ import {
 } from './lectureMaterial.ts';
 import {
   RATE as DURATION_RATE,
+  LECTURE_MIN_SEC,
   LECTURE_EST_MAX_SEC,
   DRILL_INTRO_TEXT,
   buildRecapText,
@@ -710,6 +711,14 @@ function writeLectureStateForJob(state: LectureState, key: string, epoch: number
 }
 
 
+export type LectureGenerateScriptFn = (
+  ai: GoogleGenAI,
+  date: string,
+  newList: LectureMistakeInput[],
+  reviewList: LectureMistakeInput[],
+  signal?: AbortSignal
+) => Promise<{ title: string; items: LectureScriptItem[]; coachNote: string; tokens?: number }>;
+
 export interface StartLectureJobOpts {
   force?: boolean;
   /** Test hook: shorten the whole-job cap. */
@@ -724,6 +733,12 @@ export interface StartLectureJobOpts {
     reviewList: LectureMistakeInput[],
     ctx: LectureJobContext
   ) => Promise<void>;
+  /** Test hook: replace script generation so tests do not call Gemini. */
+  generateScriptFn?: LectureGenerateScriptFn;
+  /** Test hook: replace TTS synthesis so tests do not call Gemini. */
+  synthesizeFn?: LectureSynthesizeFn;
+  /** Test hook: replace audio encoding (e.g. stub m4a). */
+  encodeFn?: LectureEncodeFn;
 }
 
 /**
@@ -829,7 +844,13 @@ export function startLectureJob(
   };
   ctx.write(state);
   running.add(key);
-  const work = (opts.runJobFn || runJob)(ai, state, newList, reviewList, ctx);
+  const work = opts.runJobFn
+    ? opts.runJobFn(ai, state, newList, reviewList, ctx)
+    : runJob(ai, state, newList, reviewList, ctx, {
+        generateScriptFn: opts.generateScriptFn,
+        synthesizeFn: opts.synthesizeFn,
+        encodeFn: opts.encodeFn,
+      });
   const timeoutMs = opts.jobTimeoutMs ?? LECTURE_JOB_TIMEOUT_MS;
   withTimeout(work, timeoutMs, 'lecture job')
     .then(
@@ -1135,10 +1156,21 @@ async function runJob(
   state: LectureState,
   newList: LectureMistakeInput[],
   reviewList: LectureMistakeInput[],
-  ctx?: LectureJobContext
+  ctx?: LectureJobContext,
+  hooks?: {
+    generateScriptFn?: LectureGenerateScriptFn;
+    synthesizeFn?: LectureSynthesizeFn;
+    encodeFn?: LectureEncodeFn;
+  }
 ): Promise<void> {
   const write = ctx?.write || writeLectureState;
-  const script = await generateScript(ai, state.date, newList, reviewList, ctx?.signal);
+  const script = await (hooks?.generateScriptFn || generateScript)(
+    ai,
+    state.date,
+    newList,
+    reviewList,
+    ctx?.signal
+  );
   if (ctx && (ctx.signal.aborted || !isCurrentJob(ctx.key, ctx.epoch))) return;
   state.title = script.title;
   state.coachNote = script.coachNote;
@@ -1148,7 +1180,7 @@ async function runJob(
   state.textTokens = script.tokens;
   write(state);
 
-  await renderAndSaveAudio(ai, state, script, undefined, ctx);
+  await renderAndSaveAudio(ai, state, script, hooks?.synthesizeFn, ctx, hooks?.encodeFn);
 }
 
 async function renderAndSaveAudio(
@@ -1265,16 +1297,28 @@ async function renderAndSaveAudio(
   let drillIntroBuf: Buffer | undefined;
   const extras: Extras = {};
 
+  const synthExtraWithRetry = async (text: string): Promise<Buffer | null> => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      ensureCurrent();
+      try {
+        return resample(await synth(ai, state.ttsEngine, text, false, ctx?.signal), RATE);
+      } catch (err) {
+        if (ctx && (ctx.signal.aborted || !isCurrentJob(ctx.key, ctx.epoch))) throw err;
+        if (attempt === 1) return null;
+      }
+    }
+    return null;
+  };
+
   if (fitRes.want === 'recap') {
-    ensureCurrent();
     const keptSet = new Set(fitRes.keptItems);
     const recapText = buildRecapText(items.filter((_, idx) => keptSet.has(idx)));
-    try {
-      recapBuf = resample(await synth(ai, state.ttsEngine, recapText, false, ctx?.signal), RATE);
+    const buf = await synthExtraWithRetry(recapText);
+    if (buf) {
+      recapBuf = buf;
       chars += recapText.length;
-      extras.recap = Math.floor(recapBuf.length / 2);
-    } catch (err) {
-      if (ctx && (ctx.signal.aborted || !isCurrentJob(ctx.key, ctx.epoch))) throw err;
+      extras.recap = Math.floor(buf.length / 2);
+    } else {
       extras.recap = 'failed';
     }
     fitRes = fitLectureTimeline(measured, extras);
@@ -1286,13 +1330,13 @@ async function renderAndSaveAudio(
       drillIntroBuf = cached;
       extras.drillIntro = Math.floor(cached.length / 2);
     } else {
-      try {
-        drillIntroBuf = resample(await synth(ai, state.ttsEngine, DRILL_INTRO_TEXT, false, ctx?.signal), RATE);
+      const buf = await synthExtraWithRetry(DRILL_INTRO_TEXT);
+      if (buf) {
+        drillIntroBuf = buf;
         chars += DRILL_INTRO_TEXT.length;
-        if (!synthesizeFn) drillIntroCache.set(cacheKey, drillIntroBuf);
-        extras.drillIntro = Math.floor(drillIntroBuf.length / 2);
-      } catch (err) {
-        if (ctx && (ctx.signal.aborted || !isCurrentJob(ctx.key, ctx.epoch))) throw err;
+        if (!synthesizeFn) drillIntroCache.set(cacheKey, buf);
+        extras.drillIntro = Math.floor(buf.length / 2);
+      } else {
         extras.drillIntro = 'failed';
       }
     }
@@ -1316,6 +1360,11 @@ async function renderAndSaveAudio(
     fitRes.totalSamples,
     RATE
   );
+  const extraFailed = extras.recap === 'failed' || extras.drillIntro === 'failed';
+  const assembledSec = Math.floor(pcm.length / 2) / RATE;
+  if (extraFailed && assembledSec < LECTURE_MIN_SEC) {
+    console.warn(`[Lecture] duration under 6:00 after recap/drill TTS failure: ${assembledSec.toFixed(1)}s`);
+  }
   const keptItems = fitRes.keptItems.map((origIdx) => ({
     ...items[origIdx],
     startSec: bodyStartSecByItem.get(origIdx),

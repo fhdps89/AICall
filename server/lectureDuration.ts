@@ -8,6 +8,7 @@ export const LECTURE_MIN_SEC = 360;
 export const LECTURE_MAX_SEC_HARD = 370;
 export const LECTURE_MAX_SEC_GUARD = 369.8;
 export const LECTURE_TARGET_SEC = 365;
+export const LECTURE_MAX_FALLBACK_PAD_SEC = 5;
 export const LECTURE_EST_MAX_SEC = 420;
 
 export const SLOT = {
@@ -370,9 +371,19 @@ export function fitLectureTimeline(m: MeasuredLecture, extras: Extras = {}): Fit
   let truncatedSamples = 0;
 
   // 4. Final guard on exact sum T (leave ~0.2 s headroom for AAC encoder padding)
+  const extraFailed = extras.recap === 'failed' || extras.drillIntro === 'failed';
   if (total < minSamples) {
-    guardPadSamples = targetSamples - total;
-    ({ timeline, total } = buildTimeline(endSlot.samples + guardPadSamples));
+    if (extraFailed) {
+      // Do not stretch a short lecture to 6:00 with dead air after recap/drill TTS failure.
+      const maxFallbackPad = s(LECTURE_MAX_FALLBACK_PAD_SEC);
+      if (endSlot.samples > maxFallbackPad) {
+        endSlot.samples = maxFallbackPad;
+        ({ timeline, total } = buildTimeline(endSlot.samples));
+      }
+    } else {
+      guardPadSamples = targetSamples - total;
+      ({ timeline, total } = buildTimeline(endSlot.samples + guardPadSamples));
+    }
   } else if (total > guardMaxSamples) {
     let over = total - guardMaxSamples;
     for (let j = 0; j < slots.length && over > 0; j++) {

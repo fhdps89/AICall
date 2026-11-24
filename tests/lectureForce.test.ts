@@ -26,8 +26,16 @@ function cleanup(uid: string) {
   fs.rmSync(path.join(DATA_DIR, 'lectures', uid), { recursive: true, force: true });
 }
 
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
+function onceLatch() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+function flushTick() {
+  return new Promise<void>((r) => setImmediate(r));
 }
 
 const mistakes: LectureMistakeInput[] = [
@@ -55,25 +63,33 @@ test('1-2) force aborts a hung job, superseding its writes, onReady, and isCurre
   let oldWriteResult: boolean | undefined;
   let oldOnReadyCalls = 0;
   let newOnReadyIsCurrent: boolean | undefined;
+  const firstStarted = onceLatch();
+  const secondReady = onceLatch();
+  const oldFinished = onceLatch();
 
   try {
     const first = startLectureJob(ai, uid, date, mistakes, [], {
       jobTimeoutMs: 5_000,
       runJobFn: async (_ai, state, _n, _r, ctx) => {
         firstSignal = ctx.signal;
-        await new Promise<void>((r) => {
-          releaseOld = r;
-        });
-        state.status = 'ready';
-        state.title = 'old-title';
-        oldWriteResult = ctx.write(state);
+        firstStarted.resolve();
+        try {
+          await new Promise<void>((r) => {
+            releaseOld = r;
+          });
+          state.status = 'ready';
+          state.title = 'old-title';
+          oldWriteResult = ctx.write(state);
+        } finally {
+          oldFinished.resolve();
+        }
       },
       onReady: () => {
         oldOnReadyCalls += 1;
       },
     });
+    await firstStarted.promise;
     assert.equal(firstSignal.aborted, false);
-    await sleep(5);
 
     const second = startLectureJob(ai, uid, date, mistakes, [], {
       force: true,
@@ -86,16 +102,18 @@ test('1-2) force aborts a hung job, superseding its writes, onReady, and isCurre
       },
       onReady: (_s, isCurrent) => {
         newOnReadyIsCurrent = isCurrent();
+        secondReady.resolve();
       },
     });
 
     assert.notEqual(second.createdAt, first.createdAt);
     assert.equal(firstSignal.aborted, true);
-    await sleep(20);
+    await secondReady.promise;
     assert.equal(newOnReadyIsCurrent, true);
 
     releaseOld();
-    await sleep(20);
+    await oldFinished.promise;
+    await flushTick();
     assert.equal(oldWriteResult, false);
     assert.equal(oldOnReadyCalls, 0);
     const final = readLectureState(uid, date);
@@ -111,16 +129,24 @@ test('3) without force, a running job is returned unchanged', async () => {
   const date = '2026-11-24';
   let runs = 0;
   let release!: () => void;
+  const firstStarted = onceLatch();
+  const firstFinished = onceLatch();
   try {
     const first = startLectureJob(ai, uid, date, mistakes, [], {
       jobTimeoutMs: 5_000,
       runJobFn: async () => {
         runs += 1;
-        await new Promise<void>((r) => {
-          release = r;
-        });
+        firstStarted.resolve();
+        try {
+          await new Promise<void>((r) => {
+            release = r;
+          });
+        } finally {
+          firstFinished.resolve();
+        }
       },
     });
+    await firstStarted.promise;
     const second = startLectureJob(ai, uid, date, mistakes, [], {
       runJobFn: async () => {
         runs += 1;
@@ -129,7 +155,8 @@ test('3) without force, a running job is returned unchanged', async () => {
     assert.equal(second.createdAt, first.createdAt);
     assert.equal(runs, 1);
     release();
-    await sleep(10);
+    await firstFinished.promise;
+    await flushTick();
   } finally {
     cleanup(uid);
   }
@@ -140,6 +167,9 @@ test('4) force while an audio rebuild runs aborts the rebuild and starts generat
   const date = '2026-11-24';
   let rebuildSignal: AbortSignal | undefined;
   let releaseRebuild!: () => void;
+  const rebuildStarted = onceLatch();
+  const rebuildSettled = onceLatch();
+  const forcedReady = onceLatch();
   try {
     startLectureAudioRebuild(
       ai,
@@ -149,34 +179,44 @@ test('4) force while an audio rebuild runs aborts the rebuild and starts generat
       {
         synthesizeFn: async (_ai, _e, _t, _two, signal) => {
           rebuildSignal = signal;
-          await new Promise<void>((r) => {
-            releaseRebuild = r;
-          });
-          return { data: Buffer.alloc(2400 * 2), rate: 24000 };
+          rebuildStarted.resolve();
+          try {
+            await new Promise<void>((r) => {
+              releaseRebuild = r;
+            });
+            return { data: Buffer.alloc(2400 * 2), rate: 24000 };
+          } finally {
+            rebuildSettled.resolve();
+          }
         },
         encodeFn: async (pcm, rate) => ({ ext: 'wav', mime: 'audio/wav', buffer: wavFromPcm(pcm, rate) }),
       }
     );
+    await rebuildStarted.promise;
     assert.ok(lectureRebuildInFlight(uid, date));
     assert.equal(rebuildSignal?.aborted, false);
 
     const forced = startLectureJob(ai, uid, date, mistakes, [], {
       force: true,
       runJobFn: async (_ai, state, _n, _r, ctx) => {
-        await sleep(0);
+        await Promise.resolve();
         state.status = 'ready';
         state.title = 'regenerated';
         state.script = sampleScript;
         ctx.write(state);
+      },
+      onReady: () => {
+        forcedReady.resolve();
       },
     });
     assert.equal(forced.status, 'generating');
     assert.equal(rebuildSignal?.aborted, true);
     assert.equal(lectureRebuildInFlight(uid, date), undefined);
 
-    await sleep(20);
+    await forcedReady.promise;
     releaseRebuild?.();
-    await sleep(20);
+    await rebuildSettled.promise;
+    await flushTick();
     assert.equal(readLectureState(uid, date)?.title, 'regenerated');
     assert.equal(lectureAudioPath(uid, date), null);
   } finally {
@@ -216,6 +256,7 @@ test('5) force with empty inputs on a ready lecture returns the ready lecture un
 test('6) new state stores inputNewIds, inputReviewIds, and inputLatestCreatedAt from sanitized inputs', async () => {
   const uid = uidFor('input_ids');
   const date = '2026-11-24';
+  const done = onceLatch();
   try {
     const st = startLectureJob(
       ai,
@@ -232,13 +273,16 @@ test('6) new state stores inputNewIds, inputReviewIds, and inputLatestCreatedAt 
         { id: 'r2', myPhrase: 'c2', naturalPhrase: 'd2' },
       ],
       {
-        runJobFn: async () => {},
+        runJobFn: async () => {
+          done.resolve();
+        },
       }
     );
     assert.deepEqual(st.inputNewIds, ['n1', 'n2']);
     assert.deepEqual(st.inputReviewIds, ['r1']);
     assert.equal(st.inputLatestCreatedAt, '2026-11-24T03:00:00Z');
-    await sleep(10);
+    await done.promise;
+    await flushTick();
   } finally {
     cleanup(uid);
   }
