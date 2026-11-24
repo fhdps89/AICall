@@ -4,6 +4,20 @@
 
 ---
 
+### [2026-11-25 KST] v2.10.0 이후 수정(미배포) — 게시본에 섞인 옛 .data와 최신 feed 백업 무시 수정 (브랜치 `englead/feed-stale-data-20261125`)
+- **배경**:
+  - 라이브 서버(AI Studio Publish → Cloud Run)가 오전 내내 피드 상태 `nothing`을 반환했다. `/feed/:secret/audio/2026-11-24.m4a`의 `Last-Modified`가 Publish(15:02 KST / 06:02Z) 이전인 `2026-11-24 03:04:46 GMT`이고 진단(`diag.json`)의 `syncedAt`이 `2026-11-24T03:03:19Z`였으며, `.dockerignore`와 `.gcloudignore`에 `.data`가 빠져 있어 개발 작업 공간의 옛 `.data/`가 게시 이미지에 그대로 포함되었다.
+  - Firestore `feeds/{id}` 백업은 `updatedAt 2026-11-24T08:11:17Z`로 최신 상태(16:50 통화 새 실수 11개·사용자 키 포함)였지만, `server/feed.ts`의 `loadFeedForSecret`이 로컬 `feed.json`만 있으면 백업을 읽지 않고 반환해 백업과 사용자 키가 복원되지 않았고, 환경변수 키가 없는 Publish 컨테이너에서 `createGenAI()`가 `null`이 되어 강의 생성이 시작되지 않았다.
+- **수정**:
+  - `.dockerignore`, `.gcloudignore`: 개발 작업 공간의 런타임 데이터가 게시 이미지에 포함되지 않도록 `.data/`와 `.data`를 제외 목록에 추가.
+  - `server/feed.ts`: `loadFeedForSecret`에 비밀키별 `FEED_BACKUP_RECHECK_MS`(5분) 재확인 주기와 테스트용 의존성 주입(`{ loadBackup?, now? }`)·캐시 초기화(`resetFeedBackupCheckCache`)를 추가. 로컬 `feed.json`이 있어도 5분에 최대 1회 `loadFeedBackup`을 확인해 백업 `state.syncedAt`이 더 새로우면 `writeFeedSync`로 덮어쓰고 반환하며, `backup.state.uid === local.uid`이고 `backup.apiKey`가 있으면 `setUserKeyFromFeed`로 사용자 키를 복원함(백업 읽기 실패 시 경고만 남기고 로컬 반환, 비밀키·API 키 비노출, 빈 `.data/` 초기 복원 경로 유지).
+- **방어 조치 (Safeguards)**: `tests/feedStore.test.ts`에 ① 백업이 로컬 `feed.json`보다 새로울 때 백업 반환 및 로컬 갱신, ② 로컬이 더 새로울 때 로컬 유지, ③ 5분 이내 재호출 시 백업 재조회 생략(5분 경과 후 재조회), ④ 백업 조회 실패 시 로컬 반환 케이스를 추가함(`userKey.ts` 모듈 캐시 격리 한계로 로컬 존재 시 키 복원 케이스는 생략).
+- **리뷰 후속 보완**: `loadFeedForSecret` 쓰기 직전 `feedForSecret` 재읽기로 동시 sync 경합 시 최신 로컬(`syncedAt >= backup`)을 보존하고, `LoadFeedDeps.setUserKey` 주입(`setUserKeyFromFeed` 기본값, 로컬 존재 시 `uid` 일치 한정 복원) 및 `loadFeedBackup` 5초 fetch 타임아웃(`AbortSignal.timeout(5000)`)과 `tests/feedStore.test.ts` 키 복원·`uid` 불일치·경합 테스트를 추가함.
+- **검증**: `npm test`, `npx tsc -p tsconfig.server.json --noEmit`, `npm run lint` 통과. 머지·배포 안 함.
+- **배포 후 확인**: 배포 뒤 audio Last-Modified가 배포 시각 이후인지, diag syncedAt이 최신 sync와 같은지 확인.
+
+---
+
 ### [2026-11-24 KST] v2.10.0 이후 수정(미배포) — 아침 강의 생성 수정 묶음: 생성 중 다시 만들기·05:00 게이트·자동 재생성·진단·오디오 백업·복원 상한·6분 고정 (브랜치 `englead/lecture-fixes-20261124`)
 - **배경**: 11/24 강의가 01:4x 공개 피드 GET으로 아침 통화 전 데이터로 만들어졌고, 생성 중에는 「다시 만들기」가 보이지 않았으며 서버도 force를 무시했다. 11:45에는 콜드 스타트 뒤 Firestore 백업(대본만)에서 TTS를 통째로 다시 합성하느라 피드가 generating·itemCount 0으로 보였다(분석: 박스 /workspace/collab/onecall_regen_1124/findings.md). 찬식님 승인 t470u(A·B·E·F=30분·G·6분 고정·코치 2문장·복습 1개), t471u(C).
 - **수정**:

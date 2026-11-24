@@ -19,3 +19,7 @@ dist-ssr/
 .gemini_api_key
 .env
 .env.*
+
+# Runtime data from the dev workspace must not be published
+.data/
+.data
