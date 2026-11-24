@@ -10,6 +10,18 @@ export function shouldShowLectureImmediately(lecture: { status?: string } | null
   return lecture?.status === "ready";
 }
 
+export function isLectureAudioRestoring(
+  lecture: { status?: string; audioStatus?: string; audioUrl?: string | null; hasAudio?: boolean } | null | undefined
+): boolean {
+  return lecture?.status === "ready" && lecture.audioStatus === "rebuilding" && !lecture.audioUrl && !lecture.hasAudio;
+}
+
+export function shouldPollLecture(
+  lecture: { status?: string; audioStatus?: string; audioUrl?: string | null; hasAudio?: boolean } | null | undefined
+): boolean {
+  return lecture?.status === "generating" || isLectureAudioRestoring(lecture);
+}
+
 export function shouldCopyLectureAudio(
   lecture: { status?: string; audioUrl?: string | null } | null | undefined,
   now: number,

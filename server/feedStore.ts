@@ -17,7 +17,8 @@
 import crypto from 'crypto';
 import { firestoreDocUrl } from './userKey.ts';
 import type { FeedSyncState } from './feed.ts';
-import type { LectureState } from './lecture.ts';
+import { lectureAudioPath, type LectureState } from './lecture.ts';
+import { uploadLectureAudioBackup } from './lectureAudioBackup.ts';
 
 export interface FeedBackup {
   state: FeedSyncState;
@@ -31,7 +32,7 @@ export function feedDocId(secret: string): string {
   return sha256(`aicall-feed-id:${secret}`).toString('hex');
 }
 
-function feedCipherKey(secret: string): Buffer {
+export function feedCipherKey(secret: string): Buffer {
   return sha256(`aicall-feed-key:${secret}`);
 }
 
@@ -83,13 +84,44 @@ function sanitizeReadyLectureForBackup(state: LectureState): LectureState | null
     ...(typeof state.itemCount === 'number' ? { itemCount: state.itemCount } : {}),
     newMistakeIds: Array.isArray(state.newMistakeIds) ? state.newMistakeIds : [],
     reviewMistakeIds: Array.isArray(state.reviewMistakeIds) ? state.reviewMistakeIds : [],
+    ...(Array.isArray(state.inputNewIds) ? { inputNewIds: state.inputNewIds } : {}),
+    ...(Array.isArray(state.inputReviewIds) ? { inputReviewIds: state.inputReviewIds } : {}),
+    ...(typeof state.inputLatestCreatedAt === 'string'
+      ? { inputLatestCreatedAt: state.inputLatestCreatedAt }
+      : {}),
     ttsEngine: state.ttsEngine === 'elevenlabs' ? 'elevenlabs' : 'gemini',
     ...(typeof state.chars === 'number' ? { chars: state.chars } : {}),
     ...(typeof state.textTokens === 'number' ? { textTokens: state.textTokens } : {}),
     ...(typeof state.durationSec === 'number' ? { durationSec: state.durationSec } : {}),
+    ...(typeof state.audioBackupId === 'string' && state.audioBackupId
+      ? { audioBackupId: state.audioBackupId }
+      : {}),
+    ...(state.durationFit && typeof state.durationFit === 'object'
+      ? { durationFit: state.durationFit }
+      : {}),
     createdAt: state.createdAt,
     updatedAt: state.updatedAt || new Date().toISOString(),
   };
+}
+
+/**
+ * Upload encrypted lecture audio to Storage first (best-effort), then save script backup.
+ * So the Firestore script backup never points at an audioBackupId that wasn't uploaded.
+ */
+export async function persistLectureBackups(
+  secret: string,
+  state: LectureState,
+  isCurrent: () => boolean = () => true
+): Promise<void> {
+  if (!secret || !isCurrent()) return;
+  const audioPath = lectureAudioPath(state.uid, state.date);
+  let uploaded = false;
+  if (audioPath && state.audioBackupId) {
+    uploaded = await uploadLectureAudioBackup(secret, state, audioPath, isCurrent).catch(() => false);
+  }
+  if (!isCurrent()) return;
+  const nextState: LectureState = uploaded ? state : { ...state, audioBackupId: undefined };
+  await saveLectureBackup(secret, nextState);
 }
 
 /**

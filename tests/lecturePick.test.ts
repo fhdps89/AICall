@@ -12,6 +12,7 @@ import {
   newCandidateCutoffMs,
   SHORT_SESSION_SEC,
   NEW_MISTAKE_FALLBACK_WINDOW_MS,
+  MAX_REVIEW_PER_LECTURE,
   type LecturePickMistake,
   type SessionTiming,
 } from '../src/services/lecture/lecturePick.ts';
@@ -174,10 +175,11 @@ test('source qa is dropped from new and review before the caps, untagged docs st
   });
   assert.equal(got.newMistakes.some((x) => x.id === 'qa1'), false);
   assert.equal(got.newMistakes.length, 6);
-  assert.deepEqual(got.reviewMistakes.map((x) => x.id), ['due1', 'legacy']);
+  assert.deepEqual(got.reviewMistakes.map((x) => x.id), ['due1']);
 });
 
-test('review drops ids already in new and caps at 3; payload keeps createdAt and lessonTitle', () => {
+test('review drops ids already in new and caps at 1; payload keeps createdAt and lessonTitle', () => {
+  assert.equal(MAX_REVIEW_PER_LECTURE, 1);
   const fresh = m({
     id: 'shared',
     createdAt: '2026-11-22T02:00:00Z',
@@ -197,7 +199,7 @@ test('review drops ids already in new and caps at 3; payload keeps createdAt and
   assert.deepEqual(got.newMistakes.map((x) => x.id), ['shared']);
   assert.equal(got.newMistakes[0].createdAt, fresh.createdAt);
   assert.equal(got.newMistakes[0].lessonTitle, '여행 1과');
-  assert.deepEqual(got.reviewMistakes.map((x) => x.id), ['r1', 'r2', 'r3']);
+  assert.deepEqual(got.reviewMistakes.map((x) => x.id), ['r1']);
 });
 
 test('short sessions are dropped from new and review; missing session docs are kept and reported', () => {
@@ -228,7 +230,7 @@ test('short sessions are dropped from new and review; missing session docs are k
     onMissingSession: (info) => missing.push(info),
   });
   assert.deepEqual(got.newMistakes.map((x) => x.id), ['unknown-session', 'no-id', 'no-doc', 'real']);
-  assert.deepEqual(got.reviewMistakes.map((x) => x.id), ['r-real', 'r-missing']);
+  assert.deepEqual(got.reviewMistakes.map((x) => x.id), ['r-real']);
   assert.deepEqual(
     missing.map((x) => x.mistakeId).sort(),
     ['no-doc', 'no-id', 'r-missing', 'unknown-session']

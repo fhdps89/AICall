@@ -3,7 +3,7 @@ import { getKSTToday } from "../firebase/db";
 import { startLecture, type LectureDoc } from "./lectureService";
 
 export interface RebuildTodayLectureDeps {
-  syncFeed: (uid: string) => Promise<unknown>;
+  syncFeed: (uid: string, opts?: { autoRegenerate?: boolean }) => Promise<unknown>;
   startLecture: (uid: string, date?: string, force?: boolean) => Promise<LectureDoc>;
 }
 
@@ -17,7 +17,7 @@ export async function rebuildTodayLectureWith(
   deps: RebuildTodayLectureDeps
 ): Promise<LectureDoc> {
   try {
-    await deps.syncFeed(uid);
+    await deps.syncFeed(uid, { autoRegenerate: false });
   } catch {
     console.warn("피드 동기화에 실패했지만 오늘 강의를 다시 만듭니다.");
   }
@@ -25,5 +25,8 @@ export async function rebuildTodayLectureWith(
 }
 
 export function rebuildTodayLecture(uid: string, date = getKSTToday()): Promise<LectureDoc> {
-  return rebuildTodayLectureWith(uid, date, { syncFeed, startLecture });
+  return rebuildTodayLectureWith(uid, date, {
+    syncFeed: (u, opts) => syncFeed(u, undefined, undefined, opts),
+    startLecture,
+  });
 }

@@ -59,15 +59,17 @@ test('a hung lecture job is marked TIMED_OUT and is no longer generating', async
   }
 });
 
-test('a timed-out job cannot overwrite a later job’s state', async () => {
+test('a timed-out job aborts its signal, ignores late writes even with no successor, and cannot overwrite a later job', async () => {
   const uid = uidFor('epoch');
   const date = '2026-11-22';
   let finishOld!: () => void;
+  let oldSignal!: AbortSignal;
   let lateWrote: boolean | undefined;
   try {
     startLectureJob(ai, uid, date, mistakes, [], {
       jobTimeoutMs: 40,
       runJobFn: async (_ai, state: LectureState, _n, _r, ctx) => {
+        oldSignal = ctx.signal;
         await new Promise<void>((resolve) => {
           finishOld = resolve;
         });
@@ -77,6 +79,15 @@ test('a timed-out job cannot overwrite a later job’s state', async () => {
       },
     });
     await sleep(80);
+    assert.equal(oldSignal.aborted, true);
+    assert.equal(readLectureState(uid, date)?.status, 'failed');
+    assert.equal(readLectureState(uid, date)?.error, 'TIMED_OUT');
+
+    // Even with no new job started, the zombie's late write must be ignored.
+    finishOld();
+    await sleep(30);
+    assert.equal(lateWrote, false);
+    assert.equal(readLectureState(uid, date)?.status, 'failed');
     assert.equal(readLectureState(uid, date)?.error, 'TIMED_OUT');
 
     startLectureJob(ai, uid, date, mistakes, [], {
@@ -88,10 +99,7 @@ test('a timed-out job cannot overwrite a later job’s state', async () => {
       },
     });
     await sleep(20);
-    finishOld();
-    await sleep(30);
     const st = readLectureState(uid, date);
-    assert.equal(lateWrote, false);
     assert.equal(st?.status, 'ready');
     assert.equal(st?.title, 'new');
   } finally {
@@ -99,28 +107,61 @@ test('a timed-out job cannot overwrite a later job’s state', async () => {
   }
 });
 
-test('force does not restart a lecture job that is still running', async () => {
+test('per-step TTS timeout classifies as GENERATION_FAILED rather than TIMED_OUT', async () => {
+  const uid = uidFor('step_to');
+  const date = '2026-11-22';
+  try {
+    startLectureJob(ai, uid, date, mistakes, [], {
+      runJobFn: async () => {
+        throw new Error('lecture TTS timed out after 90000ms');
+      },
+    });
+    await sleep(20);
+    const st = readLectureState(uid, date);
+    assert.equal(st?.status, 'failed');
+    assert.equal(st?.error, 'GENERATION_FAILED');
+  } finally {
+    cleanup(uid);
+  }
+});
+
+test('without force, a running lecture job is reused; with force, it is aborted and restarted', async () => {
   const uid = uidFor('force');
   const date = '2026-11-22';
+  let firstSignal: AbortSignal | undefined;
   try {
     const first = startLectureJob(ai, uid, date, mistakes, [], {
       jobTimeoutMs: 5_000,
-      runJobFn: () => new Promise(() => {}),
+      runJobFn: async (_ai, _state, _n, _r, ctx) => {
+        firstSignal = ctx.signal;
+        return new Promise(() => {});
+      },
     });
     assert.equal(first.status, 'generating');
-    const again = startLectureJob(ai, uid, date, mistakes, [], {
+    const reused = startLectureJob(ai, uid, date, mistakes, [], {
+      runJobFn: async (_ai, state, _n, _r, ctx) => {
+        state.status = 'ready';
+        state.title = 'reused';
+        ctx.write(state);
+      },
+    });
+    assert.equal(reused.createdAt, first.createdAt);
+
+    const forced = startLectureJob(ai, uid, date, mistakes, [], {
       force: true,
       runJobFn: async (_ai, state, _n, _r, ctx) => {
+        await sleep(0);
         state.status = 'ready';
         state.title = 'forced';
         ctx.write(state);
       },
     });
-    assert.equal(again.status, 'generating');
+    assert.equal(forced.status, 'generating');
+    assert.equal(firstSignal?.aborted, true);
     await sleep(20);
     const st = readLectureState(uid, date);
-    assert.equal(st?.status, 'generating');
-    assert.notEqual(st?.title, 'forced');
+    assert.equal(st?.status, 'ready');
+    assert.equal(st?.title, 'forced');
   } finally {
     cleanup(uid);
   }

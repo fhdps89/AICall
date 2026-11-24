@@ -34,13 +34,11 @@ curl -s -o /dev/null -w "%{http_code}\n" "https://storage.googleapis.com/storage
 
 ---
 
-## (c) Storage 보안 규칙 예시
+## (c) Storage 보안 규칙 (`storage.rules`) 및 배포 방법
 
-Firebase 콘솔 → Storage → **규칙(Rules)** 탭에 아래 규칙을 참고하여 적용한다. (`firestore.rules`와 동일하게 단일 허용 계정 `episode.kim@gmail.com` 및 이메일 인증 완료 상태만 `users/{uid}/recordings/**` 읽기·쓰기를 허용하고 나머지는 거부한다.)
+저장소 루트의 [`storage.rules`](../../storage.rules) 파일 내용을 Firebase 콘솔 → Storage → **규칙(Rules)** 탭에 복사해 게시한다. (`firestore.rules`와 동일하게 단일 허용 계정 `episode.kim@gmail.com` 및 이메일 인증 완료 상태만 `users/{uid}/recordings/**` 및 `users/{uid}/lectures/**` 읽기·쓰기를 허용하고, 피드 오디오 백업 `feeds/{feedId}/days/{file}`는 암호화된 24MB 이하 `application/octet-stream`만 허용한다.)
 
-> 참고: 아래 예시는 문서 내 코드블록이며, 저장소 루트에 `storage.rules` 파일을 별도로 생성하지 않는다.
->
-> AI Studio Republish(코드 Pull + 게시)는 앱 서버 컨테이너만 새로 올린다. Storage 규칙은 이 저장소에 규칙 파일(`storage.rules`·`firebase.json`)이 없으므로 게시로 바뀌지 않고, Firebase 콘솔 → Storage → 규칙 탭에서 직접 게시해야 한다. Firestore 규칙도 v2.8.1 기록상 「AI Studio에서 규칙 배포가 필요함」이라 별도 단계다.
+> 참고: AI Studio Republish(코드 Pull + 게시)는 앱 서버 컨테이너만 새로 올린다. Storage 규칙은 `firebase.json` 자동 배포가 없으므로 게시로 바뀌지 않고, Firebase 콘솔 → Storage → 규칙 탭에서 직접 게시해야 한다. 규칙을 게시하기 전까지는 피드 오디오 백업 업로드·다운로드가 403으로 폴백되어 기존처럼 서버 TTS 복원으로 동작한다.
 
 ```
 rules_version = '2';
@@ -60,9 +58,21 @@ service firebase.storage {
     match /users/{uid}/lectures/{file} {
       allow read: if isSingleAllowedUser(uid);
       allow write: if isSingleAllowedUser(uid)
-        && file.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}[.]wav')
+        && file.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}[.](wav|m4a|mp3)')
         && request.resource.size < 60 * 1024 * 1024
-        && request.resource.contentType == 'audio/wav';
+        && (request.resource.contentType == 'audio/wav'
+            || request.resource.contentType == 'audio/mp4'
+            || request.resource.contentType == 'audio/mpeg');
+    }
+
+    match /feeds/{feedId}/days/{file} {
+      allow get: if feedId.matches('^[0-9a-f]{64}$') && file.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}[.]audio[.]enc$');
+      allow create, update: if feedId.matches('^[0-9a-f]{64}$')
+        && file.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}[.]audio[.]enc$')
+        && firestore.exists(/databases/ai-studio-aicall-1bc322d0-1646-4556-a8fb-a70e9638dc34/documents/feeds/$(feedId))
+        && request.resource.size <= 24 * 1024 * 1024
+        && request.resource.contentType == 'application/octet-stream';
+      allow list, delete: if false;
     }
 
     match /{allPaths=**} {
@@ -71,6 +81,13 @@ service firebase.storage {
   }
 }
 ```
+
+### 규칙 게시 단계
+
+1. [Firebase 콘솔](https://console.firebase.google.com/)에서 프로젝트 **`gen-lang-client-0592656565`** → **Storage** → **규칙(Rules)** 탭을 연다.
+2. 저장소 루트 [`storage.rules`](../../storage.rules)의 전체 내용을 붙여넣고 **게시(Publish)** 를 누른다.
+3. 처음 `firestore.exists(...)` 교차 서비스 규칙을 게시할 때 Storage 서비스 계정의 Firestore 읽기 권한(IAM) 부여 확인 창이 뜨면 승인한다.
+4. 만약 named database(`ai-studio-...`) 경로에서 `firestore.exists(...)`가 지원되지 않아 오류가 나면, `&& firestore.exists(...)` 한 줄만 빼고 경로 형식·24MB·`application/octet-stream` 제한은 유지해 게시한다. (피드 오디오는 `feedDocId`와 피드 비밀키로 AES-256-GCM 인증 암호화되어 있어 비밀키 없이는 복호화할 수 없으며, 변조 시에도 자동으로 TTS 복원으로 폴백된다.)
 
 ---
 

@@ -160,19 +160,23 @@ test('2) empty .data/ + ready backup: ensure+build restores title with 0 startJo
 
     const whileRebuilding = buildFeedToday(ai, st, 'https://example.test', {
       date,
+      now: Date.parse('2026-11-22T01:00:00.000Z'), // 10:00 KST (after 05:00 gate)
       startJob: () => {
         startJobCalls += 1;
         throw new Error('should not startJob');
       },
     });
     assert.equal(startJobCalls, 0);
-    assert.equal(whileRebuilding.status, 'generating');
+    assert.equal(whileRebuilding.status, 'ready');
+    assert.equal(whileRebuilding.audioRestoring, true);
+    assert.equal(whileRebuilding.audioUrl, null);
     assert.equal(whileRebuilding.title, '어젯밤 실수 1분 정리');
 
     await lectureRebuildInFlight(uid, date);
 
     const ready = buildFeedToday(ai, st, 'https://example.test', {
       date,
+      now: Date.parse('2026-11-22T01:00:00.000Z'),
       startJob: () => {
         startJobCalls += 1;
         throw new Error('should not startJob');
@@ -210,6 +214,7 @@ test('3) 404 backup starts generation; 500 backup error skips generation (0 star
     assert.equal(skip404, false);
     const out404 = buildFeedToday(ai, st404, 'https://example.test', {
       date,
+      now: Date.parse('2026-11-22T01:00:00.000Z'),
       skipStart: skip404,
       startJob: (_ai, u, d) => {
         started404 += 1;
@@ -286,6 +291,7 @@ test('4) local generating on disk (not running) + no backup -> INTERRUPTED then 
     let started = 0;
     const feed = buildFeedToday(ai, st, 'https://example.test', {
       date,
+      now: Date.parse('2026-11-22T01:00:00.000Z'),
       startJob: (_ai, u, d) => {
         started += 1;
         return {
