@@ -55,7 +55,7 @@ AI 튜터와 영어로 통화하고, 통화에서 **틀린 말을 틀린 그대�
 - 1인당 한도: 1분 60회, 하루 1,500회 Gemini 호출, 하루 60번 통화 시작(`server/rateLimit.ts`, 서버 메모리 기준).
 
 ## 알아 둘 한계
-- 아침 강의 음성, 그록봇 피드 설정, 서버 예비 녹음은 서버 안 `.data/` 폴더에 저장됩니다. AI Studio 배포(Cloud Run)에서는 서버가 다시 켜지면 지워질 수 있습니다. 피드 설정과 설정에 저장한 Gemini 키는 Firestore `feeds/{id}`에 암호화 백업되어, 새로 켜진 서버가 그록봇 요청만으로 복원합니다(v2.8.1). 강의 음성·예비 녹음은 여전히 지워질 수 있습니다.
+- 아침 강의 음성, 그록봇 피드 설정, 서버 예비 녹음은 서버 안 `.data/` 폴더에 저장됩니다. AI Studio 배포(Cloud Run)에서는 서버가 다시 켜지면 지워질 수 있습니다. 피드 설정과 설정에 저장한 Gemini 키는 Firestore `feeds/{id}`에 암호화 백업되어, 새로 켜진 서버가 그록봇 요청만으로 복원합니다(v2.8.1). 강의 음성·예비 녹음은 여전히 지워질 수 있습니다. `.data/`는 배포 이미지에 넣지 않습니다(`.dockerignore`·`.gcloudignore`). 개발 작업공간의 옛 데이터가 게시본에 섞이지 않게 하기 위해서입니다. 로컬 `feed.json`이 이미 있어도 서버는 5분에 한 번 Firestore 백업을 다시 확인합니다. 백업의 sync가 더 새로우면 그 상태와 키로 바꿉니다(2026-11-25).
 - 허용 계정 이메일이 `firestore.rules`, `server/auth.ts`, `src/services/firebase/auth.ts`에 고정돼 있습니다(베타 전에 바꿔야 함).
 - `npm audit`에 10건(high 8, moderate 2, 2026-11-10 기준)이 나옵니다. Firebase가 쓰는 `@grpc/grpc-js`(서버용 통신 라이브러리), 개발 서버용 `vite`·`esbuild`, `qs`·`re2js`·`source-map-js` 등입니다. `npm audit fix`는 Firebase SDK 버전을 올리므로 실기기 QC 뒤에 따로 적용하는 것을 권장합니다.
 - 설정 → 사용량의 "예상 비용"은 `src/config/models.ts`의 단가표로 계산한 추정치입니다. 통화 단가(`livePerMinute`)는 공식 단가로 확인되지 않은 값이라 실제 청구액보다 낮게 나올 수 있습니다.

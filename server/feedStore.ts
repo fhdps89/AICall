@@ -217,7 +217,7 @@ export async function deleteFeedBackup(idToken: string, secret: string): Promise
 export async function loadFeedBackup(secret: string): Promise<FeedBackup | null> {
   const url = firestoreDocUrl(`feeds/${feedDocId(secret)}`);
   if (!url) return null;
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
   if (res.status === 404 || res.status === 403) return null;
   if (!res.ok) throw new Error(`Firestore ${res.status}`);
   const json: any = await res.json();

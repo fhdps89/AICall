@@ -23,7 +23,7 @@ import {
 } from './lecture.ts';
 import type { LectureMistakeInput, LectureState, LectureSynthesizeFn } from './lecture.ts';
 import { safeEqual } from './auth.ts';
-import { loadFeedBackup, loadLectureBackup, persistLectureBackups } from './feedStore.ts';
+import { loadFeedBackup, loadLectureBackup, persistLectureBackups, type FeedBackup } from './feedStore.ts';
 import { loadLectureAudioBackup } from './lectureAudioBackup.ts';
 import { setUserKeyFromFeed } from './userKey.ts';
 
@@ -76,23 +76,71 @@ export function feedForUid(uid: string): FeedSyncState | null {
   return st;
 }
 
+export const FEED_BACKUP_RECHECK_MS = 5 * 60 * 1000;
+const feedBackupLastCheck = new Map<string, number>();
+
+export function resetFeedBackupCheckCache(): void {
+  feedBackupLastCheck.clear();
+}
+
+export interface LoadFeedDeps {
+  loadBackup?: (secret: string) => Promise<FeedBackup | null>;
+  setUserKey?: (uid: string, key: string) => void;
+  now?: number;
+}
+
 /**
  * Like feedForSecret, but a fresh server (empty .data/) restores the state, and the user's
- * Gemini key when it was backed up, from Firestore first.
+ * Gemini key when it was backed up, from Firestore first. When local state exists, re-checks
+ * the Firestore backup at most once per FEED_BACKUP_RECHECK_MS so stale packaged .data/ or
+ * a missing in-memory key is recovered without hitting Firestore on every request.
  */
-export async function loadFeedForSecret(secret: string): Promise<FeedSyncState | null> {
+export async function loadFeedForSecret(
+  secret: string,
+  deps: LoadFeedDeps = {}
+): Promise<FeedSyncState | null> {
   const local = feedForSecret(secret);
-  if (local || !isValidFeedSecret(secret)) return local;
+  if (!isValidFeedSecret(secret)) return null;
+  const loadBackup = deps.loadBackup || loadFeedBackup;
+  const setUserKey = deps.setUserKey || setUserKeyFromFeed;
+  if (!local) {
+    try {
+      const backup = await loadBackup(secret);
+      if (!backup) return null;
+      writeFeedSync(backup.state);
+      if (backup.apiKey) setUserKey(backup.state.uid, backup.apiKey);
+      console.log('[feed] restored feed state from Firestore backup');
+      return backup.state;
+    } catch (err: any) {
+      console.warn('[feed] could not read Firestore backup:', err?.message || err);
+      return null;
+    }
+  }
+  const now = deps.now ?? Date.now();
+  const lastCheck = feedBackupLastCheck.get(secret);
+  if (lastCheck !== undefined && now >= lastCheck && now - lastCheck < FEED_BACKUP_RECHECK_MS) {
+    return local;
+  }
+  feedBackupLastCheck.set(secret, now);
   try {
-    const backup = await loadFeedBackup(secret);
-    if (!backup) return null;
-    writeFeedSync(backup.state);
-    if (backup.apiKey) setUserKeyFromFeed(backup.state.uid, backup.apiKey);
-    console.log('[feed] restored feed state from Firestore backup');
-    return backup.state;
+    const backup = await loadBackup(secret);
+    if (!backup?.state) return local;
+    if (backup.apiKey && backup.state.uid === local.uid) {
+      setUserKey(backup.state.uid, backup.apiKey);
+    }
+    const backupMs = Date.parse(backup.state.syncedAt || '');
+    const freshLocal = feedForSecret(secret);
+    const currentLocal = freshLocal ?? local;
+    const localMs = Date.parse(currentLocal.syncedAt || '');
+    if (Number.isFinite(backupMs) && (!Number.isFinite(localMs) || backupMs > localMs)) {
+      writeFeedSync(backup.state);
+      console.log('[feed] updated feed state from newer Firestore backup');
+      return backup.state;
+    }
+    return currentLocal;
   } catch (err: any) {
-    console.warn('[feed] could not read Firestore backup:', err?.message || err);
-    return null;
+    console.warn('[feed] could not recheck Firestore backup:', err?.message || err);
+    return local;
   }
 }
 
