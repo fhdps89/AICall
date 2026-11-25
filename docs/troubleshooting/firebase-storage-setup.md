@@ -36,9 +36,11 @@ curl -s -o /dev/null -w "%{http_code}\n" "https://storage.googleapis.com/storage
 
 ## (c) Storage 보안 규칙 (`storage.rules`) 및 배포 방법
 
-저장소 루트의 [`storage.rules`](../../storage.rules) 파일 내용을 Firebase 콘솔 → Storage → **규칙(Rules)** 탭에 복사해 게시한다. (`firestore.rules`와 동일하게 단일 허용 계정 `episode.kim@gmail.com` 및 이메일 인증 완료 상태만 `users/{uid}/recordings/**` 및 `users/{uid}/lectures/**` 읽기·쓰기를 허용하고, 피드 오디오 백업 `feeds/{feedId}/days/{file}`는 암호화된 24MB 이하 `application/octet-stream`만 허용한다.)
+저장소 루트의 [`storage.rules`](../../storage.rules) 파일 내용을 Firebase 콘솔 → Storage → **규칙(Rules)** 탭에 복사해 게시한다. (`firestore.rules`와 동일하게 단일 허용 계정 `episode.kim@gmail.com` 및 이메일 인증 완료 상태만 `users/{uid}/recordings/**` 및 `users/{uid}/lectures/**` 읽기·쓰기를 허용한다. 나머지 경로는 모두 거부한다.)
 
-> 참고: AI Studio Republish(코드 Pull + 게시)는 앱 서버 컨테이너만 새로 올린다. Storage 규칙은 `firebase.json` 자동 배포가 없으므로 게시로 바뀌지 않고, Firebase 콘솔 → Storage → 규칙 탭에서 직접 게시해야 한다. 규칙을 게시하기 전까지는 피드 오디오 백업 업로드·다운로드가 403으로 폴백되어 기존처럼 서버 TTS 복원으로 동작한다.
+> 2026-11-25: 아침 강의 오디오 백업은 더 이상 Storage를 쓰지 않는다. Storage 규칙은 기본(`(default)`) Firestore DB만 읽을 수 있어서(공식 문서 「Storage Security Rules can only access documents from the default Cloud Firestore database」), named DB(`ai-studio-...`)를 가리킨 `firestore.exists(...)` 조건은 참이 될 수 없었고 서버의 무인증 업로드가 늘 거부됐다. 오디오는 이제 Firestore `feeds/{feedId}/days/{date}/audio/{n}` 청크 문서에 저장하며, 규칙은 `firestore.rules`에 있다(아래 (c-2)).
+
+> 참고: AI Studio Republish(코드 Pull + 게시)는 앱 서버 컨테이너만 새로 올린다. Storage 규칙은 `firebase.json` 자동 배포가 없으므로 게시로 바뀌지 않고, Firebase 콘솔 → Storage → 규칙 탭에서 직접 게시해야 한다.
 
 ```
 rules_version = '2';
@@ -65,15 +67,6 @@ service firebase.storage {
             || request.resource.contentType == 'audio/mpeg');
     }
 
-    match /feeds/{feedId}/days/{file} {
-      allow get: if feedId.matches('^[0-9a-f]{64}$') && file.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}[.]audio[.]enc$');
-      allow create, update: if feedId.matches('^[0-9a-f]{64}$')
-        && file.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}[.]audio[.]enc$')
-        && firestore.exists(/databases/ai-studio-aicall-1bc322d0-1646-4556-a8fb-a70e9638dc34/documents/feeds/$(feedId))
-        && request.resource.size <= 24 * 1024 * 1024
-        && request.resource.contentType == 'application/octet-stream';
-      allow list, delete: if false;
-    }
 
     match /{allPaths=**} {
       allow read, write: if false;
@@ -86,8 +79,13 @@ service firebase.storage {
 
 1. [Firebase 콘솔](https://console.firebase.google.com/)에서 프로젝트 **`gen-lang-client-0592656565`** → **Storage** → **규칙(Rules)** 탭을 연다.
 2. 저장소 루트 [`storage.rules`](../../storage.rules)의 전체 내용을 붙여넣고 **게시(Publish)** 를 누른다.
-3. 처음 `firestore.exists(...)` 교차 서비스 규칙을 게시할 때 Storage 서비스 계정의 Firestore 읽기 권한(IAM) 부여 확인 창이 뜨면 승인한다.
-4. 만약 named database(`ai-studio-...`) 경로에서 `firestore.exists(...)`가 지원되지 않아 오류가 나면, `&& firestore.exists(...)` 한 줄만 빼고 경로 형식·24MB·`application/octet-stream` 제한은 유지해 게시한다. (피드 오디오는 `feedDocId`와 피드 비밀키로 AES-256-GCM 인증 암호화되어 있어 비밀키 없이는 복호화할 수 없으며, 변조 시에도 자동으로 TTS 복원으로 폴백된다.)
+3. 2026-11-24에 게시한 `feeds/{feedId}/days/{file}` 블록은 동작하지 않으므로 지금 파일 내용으로 덮어써 지운다(지우지 않아도 오디오 백업에는 영향이 없다. 쓰지 않는 공개 읽기 경로를 닫는 정리 작업이다).
+
+### (c-2) 강의 오디오 백업용 Firestore 규칙 게시 (2026-11-25, 필수)
+
+1. Firebase 콘솔 → 프로젝트 **`gen-lang-client-0592656565`** → **Firestore Database** → 상단 데이터베이스 선택에서 **`ai-studio-aicall-...`**(named DB)를 고른 뒤 **규칙(Rules)** 탭을 연다. `(default)` DB에 게시하면 효과가 없다.
+2. 저장소 루트 [`firestore.rules`](../../firestore.rules)의 전체 내용을 붙여넣고 **게시(Publish)** 를 누른다. 새로 들어간 부분은 `feeds/{feedId}/days/{date}/audio/{n}` 블록이다(부모 `feeds/{feedId}` 문서가 있을 때만 무인증 쓰기, 필드는 `data`(800,000자 이하)·`updatedAt`만, `n`은 0–7).
+3. 게시 전에는 서버의 `documents:commit`이 403으로 거부되고, 진단(`/feed/:secret/today/diag.json`)의 `audioBackup.result`가 `denied`(httpStatus 403)로 보인다. 그때도 대본 백업은 오디오 포인터 없이 저장되고 오디오는 기존처럼 TTS로 복원한다.
 
 ---
 

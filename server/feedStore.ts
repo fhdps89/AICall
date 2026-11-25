@@ -313,7 +313,7 @@ export async function persistLectureBackups(
 
 /**
  * Save failure diagnostics (audioRebuildFailedAt, audioRetryAfter, sanitized audioError)
- * without audio pointers so fresh instances honor cooldown instead of retrying TTS.
+ * while preserving any existing audioBackupId/audioChunks pointers on state.
  */
 export async function saveLectureFailureBackup(
   secret: string,
@@ -321,12 +321,7 @@ export async function saveLectureFailureBackup(
   isCurrent: () => boolean = () => true
 ): Promise<void> {
   if (!secret || !isCurrent()) return;
-  const noPointers: LectureState = {
-    ...state,
-    audioBackupId: undefined,
-    audioChunks: undefined,
-  };
-  await saveLectureBackup(secret, noPointers);
+  await saveLectureBackup(secret, state);
 }
 
 /**
@@ -352,6 +347,7 @@ export async function saveLectureBackup(secret: string, state: LectureState): Pr
           updatedAt: { stringValue: clean.updatedAt },
         },
       }),
+      signal: AbortSignal.timeout(10_000),
     });
   } catch (err: any) {
     throw new Error(err?.name ? `Firestore fetch ${err.name}` : 'Firestore fetch failed');

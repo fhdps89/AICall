@@ -103,6 +103,8 @@ const NETWORK_ERR_CODES = new Set([
   'UND_ERR_SOCKET',
 ]);
 
+export const AUDIO_CHUNK_MAX = 8;
+
 export const AUDIO_COOLDOWN_DEFAULT_MS = 30 * 60 * 1000;
 export const AUDIO_COOLDOWN_LONG_MS = 6 * 60 * 60 * 1000;
 
@@ -202,6 +204,8 @@ export function classifyLectureAudioError(
   if (/^audio rebuild timed out/.test(msg)) {
     code = 'REBUILD_TIMEOUT';
     stage = 'rebuild_timeout';
+  } else if (/^lecture job timed out/.test(msg)) {
+    code = 'REBUILD_TIMEOUT';
   } else if (/^lecture (?:TTS|script) timed out/.test(msg) || obj.name === 'TimeoutError') {
     code = 'STEP_TIMEOUT';
   } else if (/TTS 음성 데이터 없음/.test(msg)) {

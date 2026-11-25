@@ -98,7 +98,7 @@ test('1-2) encrypt/decrypt round-trip fails on wrong secret, wrong date, flipped
   });
   try {
     const mismatch = await loadLectureAudioChunks(secret, date, 'other-id', chunks.length);
-    assert.equal(mismatch, null);
+    assert.equal(mismatch.status, 'missing');
   } finally {
     (globalThis as any).fetch = realFetch;
   }
@@ -210,7 +210,7 @@ test('4-5) ensureTodayLecture installs Firestore chunk backup with 0 synth calls
       loadAudio: async (_s, _d, expectId, count) => {
         assert.equal(expectId, 'bak-match-1');
         assert.equal(count, encChunks.length);
-        return { ext: 'wav', mime: 'audio/wav', buffer: rawAudio, durationSec: 365 };
+        return { status: 'ok', ext: 'wav', mime: 'audio/wav', buffer: rawAudio, durationSec: 365 };
       },
       synthesizeFn: async () => {
         synthCalls += 1;
@@ -247,7 +247,8 @@ test('4-5) ensureTodayLecture installs Firestore chunk backup with 0 synth calls
         };
       };
       const loadedOk = await loadLectureAudioChunks(secret, date, 'bak-match-1', encChunks.length);
-      assert.deepEqual(loadedOk?.buffer, rawAudio);
+      assert.equal(loadedOk.status, 'ok');
+      if (loadedOk.status === 'ok') assert.deepEqual(loadedOk.buffer, rawAudio);
     } finally {
       (globalThis as any).fetch = realFetch;
     }
@@ -292,7 +293,7 @@ test('6) ensureTodayLecture refuses to install downloaded audio if a job started
           }
         );
         await new Promise((r) => setTimeout(r, 20));
-        return { ext: 'wav', mime: 'audio/wav', buffer: rawAudio, durationSec: 365 };
+        return { status: 'ok', ext: 'wav', mime: 'audio/wav', buffer: rawAudio, durationSec: 365 };
       },
     });
     const final = readLectureState(uid, date);

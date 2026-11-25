@@ -14,6 +14,7 @@ import { TEXT_MODEL, GEMINI_TTS_MODEL } from '../src/config/models.ts';
 import { stripSpeechDirections, cleanLectureScriptItem } from './speechText.ts';
 import { encodeLectureAudio, mimeForAudioFile, type LectureEncodeFn } from './lectureAudioEncode.ts';
 import {
+  AUDIO_CHUNK_MAX,
   classifyLectureAudioError,
   cooldownMsFor,
   retryableFor,
@@ -78,6 +79,33 @@ export const LECTURE_AUDIO_REBUILD_TIMEOUT_MS = 30 * 60 * 1000;
 export const LECTURE_AUDIO_RETRY_COOLDOWN_MS = 30 * 60 * 1000;
 export const LECTURE_AUDIO_REBUILD_TIMED_OUT = 'AUDIO_REBUILD_TIMED_OUT';
 const JOB_TIMED_OUT_RE = /^(lecture job|audio rebuild) timed out/;
+const SAFE_ERR_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,40}$/;
+
+function safeErrName(err: unknown): string | undefined {
+  if (!err || typeof err !== 'object') return undefined;
+  const obj = err as { name?: unknown; constructor?: { name?: unknown } };
+  const raw =
+    typeof obj.name === 'string' && obj.name
+      ? obj.name
+      : typeof obj.constructor?.name === 'string'
+      ? obj.constructor.name
+      : '';
+  return SAFE_ERR_NAME_RE.test(raw) ? raw : undefined;
+}
+
+export function retryCooldownUntilMs(
+  state: Pick<LectureState, 'audioRetryAfter' | 'audioRebuildFailedAt'>
+): number | null {
+  if (state.audioRetryAfter) {
+    const t = Date.parse(state.audioRetryAfter);
+    if (Number.isFinite(t)) return t;
+  }
+  if (state.audioRebuildFailedAt) {
+    const t = Date.parse(state.audioRebuildFailedAt);
+    if (Number.isFinite(t)) return t + LECTURE_AUDIO_RETRY_COOLDOWN_MS;
+  }
+  return null;
+}
 
 export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -302,6 +330,7 @@ export interface LectureAudioScriptPayload {
   createdAt?: string;
   textTokens?: number;
   audioBackupId?: string;
+  audioChunks?: number;
   durationFit?: LectureDurationFit;
 }
 
@@ -398,6 +427,13 @@ export function sanitizeLectureScriptPayload(raw: unknown): LectureScriptSanitiz
   const ids = (list: unknown) =>
     (Array.isArray(list) ? list : []).filter((x) => typeof x === 'string').map((x) => String(x).slice(0, 80));
   const durationFit = sanitizeDurationFit(obj.durationFit);
+  const audioChunks =
+    typeof obj.audioChunks === 'number' &&
+    Number.isInteger(obj.audioChunks) &&
+    obj.audioChunks >= 1 &&
+    obj.audioChunks <= AUDIO_CHUNK_MAX
+      ? obj.audioChunks
+      : undefined;
   return {
     ok: true,
     payload: {
@@ -414,6 +450,7 @@ export function sanitizeLectureScriptPayload(raw: unknown): LectureScriptSanitiz
       createdAt: typeof obj.createdAt === 'string' ? obj.createdAt : undefined,
       textTokens: typeof obj.textTokens === 'number' && Number.isFinite(obj.textTokens) ? obj.textTokens : undefined,
       ...(typeof obj.audioBackupId === 'string' && obj.audioBackupId ? { audioBackupId: obj.audioBackupId } : {}),
+      ...(audioChunks !== undefined ? { audioChunks } : {}),
       ...(durationFit ? { durationFit } : {}),
     },
   };
@@ -432,6 +469,7 @@ export interface StartLectureAudioRebuildOpts {
   onFailed?: (state: LectureState, isCurrent: () => boolean) => void | Promise<void>;
   now?: number;
   ignoreCooldown?: boolean;
+  clearAudioBackupPointers?: boolean;
   /** Test hook: shorten the audio rebuild cap. */
   rebuildTimeoutMs?: number;
 }
@@ -518,7 +556,13 @@ export function installBackupLectureWithoutAudio(
     status: 'ready',
     audioStatus: 'missing',
     ...(backup.audioError
-      ? { audioError: { ...backup.audioError, origin: opts?.origin ?? 'backup' } }
+      ? {
+          audioError: { ...backup.audioError, origin: opts?.origin ?? 'backup' },
+          error:
+            backup.audioError.code === 'REBUILD_TIMEOUT'
+              ? LECTURE_AUDIO_REBUILD_TIMED_OUT
+              : 'GENERATION_FAILED',
+        }
       : {}),
   };
   delete next.audioFile;
@@ -580,8 +624,8 @@ export function startLectureAudioRebuild(
     if (existing.error !== LECTURE_AUDIO_REBUILD_TIMED_OUT) {
       return { ...existing, audioStatus: 'rebuilding' };
     }
-    const failedAt = existing.audioRebuildFailedAt ? Date.parse(existing.audioRebuildFailedAt) : NaN;
-    if (!opts.ignoreCooldown && Number.isFinite(failedAt) && nowMs - failedAt < LECTURE_AUDIO_RETRY_COOLDOWN_MS) {
+    const cooldownUntil = retryCooldownUntilMs(existing);
+    if (!opts.ignoreCooldown && cooldownUntil !== null && nowMs < cooldownUntil) {
       return existing;
     }
     abortCurrentJob(key);
@@ -598,6 +642,8 @@ export function startLectureAudioRebuild(
   let ttsEngine: 'gemini' | 'elevenlabs' = existing?.ttsEngine || 'gemini';
   let createdAt = existing?.createdAt;
   let textTokens = existing?.textTokens;
+  let audioBackupId = existing?.audioBackupId;
+  let audioChunks = existing?.audioChunks;
 
   if ((!scriptItems || scriptItems.length === 0) && payload !== undefined) {
     const sanitized = sanitizeLectureScriptPayload(payload);
@@ -632,6 +678,8 @@ export function startLectureAudioRebuild(
     ttsEngine = sanitized.payload.ttsEngine || ttsEngine;
     createdAt = sanitized.payload.createdAt || createdAt;
     textTokens = sanitized.payload.textTokens ?? textTokens;
+    audioBackupId = sanitized.payload.audioBackupId ?? audioBackupId;
+    audioChunks = sanitized.payload.audioChunks ?? audioChunks;
   }
 
   if (!scriptItems || scriptItems.length === 0) {
@@ -675,6 +723,8 @@ export function startLectureAudioRebuild(
     ...(inputLatestCreatedAt ? { inputLatestCreatedAt } : {}),
     ttsEngine,
     textTokens,
+    ...(audioBackupId ? { audioBackupId } : {}),
+    ...(audioChunks !== undefined ? { audioChunks } : {}),
     createdAt: createdAt || existing?.createdAt || nowIso,
     updatedAt: nowIso,
     audioStatus: 'rebuilding',
@@ -687,6 +737,11 @@ export function startLectureAudioRebuild(
   delete state.audioMime;
   delete state.audioProgress;
   delete state.audioRebuildFailedAt;
+  delete state.audioBackup;
+  if (opts.clearAudioBackupPointers) {
+    delete state.audioBackupId;
+    delete state.audioChunks;
+  }
   const ctx: LectureJobContext = {
     key,
     epoch,
@@ -716,7 +771,7 @@ export function startLectureAudioRebuild(
           console.warn('[Lecture] rebuild onReady failed:', err?.name || 'error');
         }
       },
-      async (err) => {
+      (err) => {
         const currentFn = () => isCurrentJob(key, epoch);
         if (!currentFn()) return;
         const timedOut = JOB_TIMED_OUT_RE.test(String(err?.message || err));
@@ -727,6 +782,7 @@ export function startLectureAudioRebuild(
           at: failedAtIso,
           origin: 'local',
         });
+        const errName = safeErrName(err);
         console.error(
           '[Lecture] audio rebuild failed:',
           JSON.stringify({
@@ -737,6 +793,7 @@ export function startLectureAudioRebuild(
             attempts: classified.attempts,
             completed: classified.completed,
             total: classified.total,
+            ...(errName ? { errName } : {}),
           })
         );
         try { ac.abort(); } catch { /* ignore */ }
@@ -746,9 +803,16 @@ export function startLectureAudioRebuild(
         state.audioError = classified;
         state.audioRetryAfter = new Date(failedNowMs + cooldownMsFor(classified.code)).toISOString();
         ctx.write(state);
+        if (isCurrentJob(key, epoch)) {
+          running.delete(key);
+          rebuildDone.delete(key);
+          if (jobAbort.get(key) === ac) jobAbort.delete(key);
+        }
         if (opts.onFailed) {
           try {
-            await opts.onFailed(state, currentFn);
+            Promise.resolve(opts.onFailed(state, currentFn)).catch((onFailErr: any) => {
+              console.warn('[Lecture] rebuild onFailed failed:', onFailErr?.name || 'error');
+            });
           } catch (onFailErr: any) {
             console.warn('[Lecture] rebuild onFailed failed:', onFailErr?.name || 'error');
           }
@@ -979,7 +1043,7 @@ export function startLectureJob(
           console.warn('[Lecture] onReady failed:', err?.message || err);
         }
       },
-      async (err) => {
+      (err) => {
         const currentFn = () => isCurrentJob(key, epoch);
         if (!currentFn()) return;
         const timedOut = JOB_TIMED_OUT_RE.test(String(err?.message || err));
@@ -987,10 +1051,11 @@ export function startLectureJob(
         const failedAtIso = new Date(failedNowMs).toISOString();
         const fallbackStage: AudioErrorStage = state.audioProgress ? 'tts' : 'script';
         const classified = classifyLectureAudioError(err, {
-          stage: timedOut ? 'rebuild_timeout' : fallbackStage,
+          stage: fallbackStage,
           at: failedAtIso,
           origin: 'local',
         });
+        const errName = safeErrName(err);
         console.error(
           '[Lecture] job failed:',
           JSON.stringify({
@@ -1001,6 +1066,7 @@ export function startLectureJob(
             attempts: classified.attempts,
             completed: classified.completed,
             total: classified.total,
+            ...(errName ? { errName } : {}),
           })
         );
         running.delete(key);
@@ -1014,7 +1080,9 @@ export function startLectureJob(
         writeLectureState(state);
         if (opts.onFailed) {
           try {
-            await opts.onFailed(state, currentFn);
+            Promise.resolve(opts.onFailed(state, currentFn)).catch((onFailErr: any) => {
+              console.warn('[Lecture] onFailed failed:', onFailErr?.name || 'error');
+            });
           } catch (onFailErr: any) {
             console.warn('[Lecture] onFailed failed:', onFailErr?.name || 'error');
           }
@@ -1298,10 +1366,11 @@ export async function synthesizeGemini(
       let delayMs: number;
       if (classified.code === 'QUOTA') {
         const delaySec =
-          classified.retryDelaySec !== null ? Math.min(60, Math.max(0, classified.retryDelaySec)) : 20;
+          classified.retryDelaySec !== null ? Math.min(60, Math.max(1, classified.retryDelaySec)) : 20;
         delayMs = delaySec * 1000;
-        ttsPauseUntil = Math.max(ttsPauseUntil, nowFn() + delayMs);
-        lastSleptUntil = ttsPauseUntil;
+        const until = nowFn() + delayMs;
+        ttsPauseUntil = Math.max(ttsPauseUntil, until);
+        lastSleptUntil = until;
       } else {
         delayMs = 1500 * (attempt + 1);
       }

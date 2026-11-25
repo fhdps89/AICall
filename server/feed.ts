@@ -19,9 +19,9 @@ import {
   installRestoredLectureAudio,
   installBackupLectureWithoutAudio,
   recordLectureBackupResult,
+  retryCooldownUntilMs,
   maxCreatedAtIso,
   LECTURE_AUDIO_MISSING,
-  LECTURE_AUDIO_RETRY_COOLDOWN_MS,
 } from './lecture.ts';
 import type { LectureMistakeInput, LectureState, LectureSynthesizeFn } from './lecture.ts';
 import { safeEqual } from './auth.ts';
@@ -32,7 +32,7 @@ import {
   saveLectureFailureBackup,
   type FeedBackup,
 } from './feedStore.ts';
-import { loadLectureAudioChunks } from './lectureAudioBackup.ts';
+import { loadLectureAudioChunks, type LoadLectureAudioResult } from './lectureAudioBackup.ts';
 import {
   sanitizeAudioBackupResult,
   sanitizeAudioError,
@@ -301,18 +301,6 @@ export async function ensureTodayLecture(
   return work;
 }
 
-function retryCooldownUntilMs(cand: LectureState): number | null {
-  if (cand.audioRetryAfter) {
-    const t = Date.parse(cand.audioRetryAfter);
-    if (Number.isFinite(t)) return t;
-  }
-  if (cand.audioRebuildFailedAt) {
-    const t = Date.parse(cand.audioRebuildFailedAt);
-    if (Number.isFinite(t)) return t + LECTURE_AUDIO_RETRY_COOLDOWN_MS;
-  }
-  return null;
-}
-
 async function ensureTodayLectureOnce(
   ai: GoogleGenAI | null,
   st: FeedSyncState,
@@ -348,23 +336,36 @@ async function ensureTodayLectureOnce(
   }
 
   const cooldownUntil = retryCooldownUntilMs(cand);
-  if (cooldownUntil !== null && now < cooldownUntil) {
-    if (cand !== local || local?.audioStatus !== 'missing') {
-      installBackupLectureWithoutAudio(st.uid, date, cand, {
+  const inCooldown = cooldownUntil !== null && now < cooldownUntil;
+  const hasAudioPointers = Boolean(
+    cand.audioBackupId && typeof cand.audioChunks === 'number' && cand.audioChunks >= 1
+  );
+  const installWithoutAudio = (c: LectureState) => {
+    if (c !== local || local?.audioStatus !== 'missing') {
+      installBackupLectureWithoutAudio(st.uid, date, c, {
         expectedEpoch: epochBefore,
         expectedCreatedAt: localCreatedAtBefore,
-        origin: cand === local ? (cand.audioError?.origin ?? 'local') : 'backup',
+        origin: c === local ? (c.audioError?.origin ?? 'local') : 'backup',
       });
     }
+  };
+  // Cooldown only gates TTS. A backup fetched on a cold start may still point at valid audio
+  // chunks (downloading them costs no TTS quota), so try them once before honoring cooldown.
+  if (inCooldown && (cand === local || !hasAudioPointers)) {
+    installWithoutAudio(cand);
     return;
   }
 
-  if (cand.audioBackupId && typeof cand.audioChunks === 'number' && cand.audioChunks >= 1) {
+  let pointersConfirmedMissing = false;
+  if (hasAudioPointers && cand.audioBackupId && typeof cand.audioChunks === 'number') {
+    const wasLocal = cand === local;
     const loadAudio = deps.loadAudio ?? loadLectureAudioChunks;
-    const audio = await loadAudio(st.secret, date, cand.audioBackupId, cand.audioChunks).catch(() => null);
+    const audioRes = await loadAudio(st.secret, date, cand.audioBackupId, cand.audioChunks).catch(
+      (): LoadLectureAudioResult => ({ status: 'transient' })
+    );
     if (
-      audio &&
-      installRestoredLectureAudio(st.uid, date, cand, audio, {
+      audioRes.status === 'ok' &&
+      installRestoredLectureAudio(st.uid, date, cand, audioRes, {
         expectedEpoch: epochBefore,
         expectedCreatedAt: localCreatedAtBefore,
       })
@@ -377,6 +378,25 @@ async function ensureTodayLectureOnce(
     ) {
       return;
     }
+    if (audioRes.status === 'missing') {
+      pointersConfirmedMissing = true;
+      cand = { ...cand };
+      delete cand.audioBackupId;
+      delete cand.audioChunks;
+      if (wasLocal && !ai && !deps.synthesizeFn) {
+        installBackupLectureWithoutAudio(st.uid, date, cand, {
+          expectedEpoch: epochBefore,
+          expectedCreatedAt: localCreatedAtBefore,
+          origin: cand.audioError?.origin ?? 'local',
+        });
+        return;
+      }
+    }
+  }
+
+  if (inCooldown) {
+    installWithoutAudio(cand);
+    return;
   }
 
   if (!ai && !deps.synthesizeFn) return;
@@ -386,6 +406,7 @@ async function ensureTodayLectureOnce(
     onReady: feedOnReady(st),
     onFailed: feedOnFailed(st),
     now,
+    ...(pointersConfirmedMissing ? { clearAudioBackupPointers: true } : {}),
   });
 }
 

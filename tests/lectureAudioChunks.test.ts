@@ -344,10 +344,11 @@ test('5) loadLectureAudioChunks returns null on 404 chunk, mixed chunk from anot
       };
     };
     const ok = await loadLectureAudioChunks(secret, date, 'id-A', 2);
-    assert.deepEqual(ok?.buffer, raw);
+    assert.equal(ok.status, 'ok');
+    if (ok.status === 'ok') assert.deepEqual(ok.buffer, raw);
 
     // id mismatch
-    assert.equal(await loadLectureAudioChunks(secret, date, 'id-wrong', 2), null);
+    assert.equal((await loadLectureAudioChunks(secret, date, 'id-wrong', 2)).status, 'missing');
 
     // chunk 1 is 404
     (globalThis as any).fetch = async (url: string) => {
@@ -359,7 +360,7 @@ test('5) loadLectureAudioChunks returns null on 404 chunk, mixed chunk from anot
         json: async () => ({ fields: { data: { stringValue: chunksA[idx] } } }),
       };
     };
-    assert.equal(await loadLectureAudioChunks(secret, date, 'id-A', 2), null);
+    assert.equal((await loadLectureAudioChunks(secret, date, 'id-A', 2)).status, 'missing');
 
     // chunk 1 mixed from upload B
     (globalThis as any).fetch = async (url: string) => {
@@ -371,7 +372,16 @@ test('5) loadLectureAudioChunks returns null on 404 chunk, mixed chunk from anot
         json: async () => ({ fields: { data: { stringValue: data } } }),
       };
     };
-    assert.equal(await loadLectureAudioChunks(secret, date, 'id-A', 2), null);
+    assert.equal((await loadLectureAudioChunks(secret, date, 'id-A', 2)).status, 'missing');
+
+    // 503 and TimeoutError return transient (not missing)
+    (globalThis as any).fetch = async () => ({ ok: false, status: 503 });
+    assert.equal((await loadLectureAudioChunks(secret, date, 'id-A', 2)).status, 'transient');
+
+    (globalThis as any).fetch = async () => {
+      throw Object.assign(new Error('aborted'), { name: 'TimeoutError' });
+    };
+    assert.equal((await loadLectureAudioChunks(secret, date, 'id-A', 2)).status, 'transient');
   } finally {
     (globalThis as any).fetch = realFetch;
   }
@@ -454,6 +464,112 @@ test('6) ensureTodayLecture installs chunk backup with 0 synth calls, and calls 
       }) as any,
     });
     assert.equal(restoreCalls, 1);
+  } finally {
+    (globalThis as any).fetch = realFetch;
+    cleanup(uid);
+  }
+});
+
+test('7) chunk boundary: 8 chunks commits ok, 9 chunks falls back as too_large', async () => {
+  const uid = uidFor('boundary_8_9');
+  const date = '2026-11-25';
+  const secret = 'b'.repeat(48);
+  const dir = path.join(DATA_DIR, 'lectures', uid);
+  const audioPath = path.join(dir, `${date}.m4a`);
+  const realFetch = globalThis.fetch;
+
+  let commitCalls = 0;
+  let commitWrites = 0;
+  let patchBody: any = null;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    // 4,500,000 raw bytes -> ~4,500,180 encrypted bytes -> ceil(4.5M / 600,000) = 8 chunks
+    fs.writeFileSync(audioPath, Buffer.alloc(4_500_000));
+    const st8 = sampleState(uid, date, 'bak-8chunks');
+    fs.writeFileSync(path.join(dir, `${date}.json`), JSON.stringify(st8));
+
+    (globalThis as any).fetch = async (url: string, init: any = {}) => {
+      if (String(url).endsWith(':commit') && init.method === 'POST') {
+        commitCalls += 1;
+        commitWrites = JSON.parse(init.body).writes.length;
+        return { ok: true, status: 200 };
+      }
+      if (init.method === 'PATCH') {
+        patchBody = JSON.parse(init.body);
+        return { ok: true, status: 200 };
+      }
+      return { ok: false, status: 404 };
+    };
+
+    const res8 = await persistLectureBackups(secret, st8, () => true);
+    assert.equal(res8.result, 'ok');
+    assert.equal(res8.chunks, 8);
+    assert.equal(commitCalls, 1);
+    assert.equal(commitWrites, 9); // 8 chunks + 1 days doc
+    assert.equal(patchBody, null);
+
+    // 4,800,500 raw bytes -> > 4,800,000 encrypted bytes -> 9 chunks -> too_large
+    fs.writeFileSync(audioPath, Buffer.alloc(4_800_500));
+    const st9 = sampleState(uid, date, 'bak-9chunks');
+    const res9 = await persistLectureBackups(secret, st9, () => true);
+    assert.equal(res9.result, 'too_large');
+    assert.equal(res9.chunks, 9);
+    assert.equal(commitCalls, 1); // unchanged: no commit for 9 chunks
+    assert.ok(patchBody);
+    const body9: any = patchBody;
+    const dec = decryptLectureBackup(
+      secret,
+      body9.fields.iv.stringValue,
+      body9.fields.data.stringValue
+    );
+    assert.equal(dec.audioBackupId, undefined);
+    assert.equal(dec.audioBackup?.result, 'too_large');
+  } finally {
+    (globalThis as any).fetch = realFetch;
+    cleanup(uid);
+  }
+});
+
+test('8) commit TimeoutError maps to result timeout and falls back to pointer-free days PATCH', async () => {
+  const uid = uidFor('commit_timeout');
+  const date = '2026-11-25';
+  const secret = 't'.repeat(48);
+  const dir = path.join(DATA_DIR, 'lectures', uid);
+  const audioPath = path.join(dir, `${date}.m4a`);
+  const realFetch = globalThis.fetch;
+
+  let patchBody: any = null;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(audioPath, Buffer.from('m4a-timeout-test'));
+    const st = sampleState(uid, date, 'bak-timeout');
+    fs.writeFileSync(path.join(dir, `${date}.json`), JSON.stringify(st));
+
+    (globalThis as any).fetch = async (url: string, init: any = {}) => {
+      if (String(url).endsWith(':commit')) {
+        throw Object.assign(new Error('timed out'), { name: 'TimeoutError' });
+      }
+      if (init.method === 'PATCH') {
+        assert.ok(init.signal instanceof AbortSignal);
+        patchBody = JSON.parse(init.body);
+        return { ok: true, status: 200 };
+      }
+      return { ok: false, status: 404 };
+    };
+
+    const res = await persistLectureBackups(secret, st, () => true);
+    assert.equal(res.result, 'timeout');
+    assert.equal(res.httpStatus, null);
+    assert.equal(res.chunks, 1);
+    assert.ok(patchBody);
+    const body9: any = patchBody;
+    const dec = decryptLectureBackup(
+      secret,
+      body9.fields.iv.stringValue,
+      body9.fields.data.stringValue
+    );
+    assert.equal(dec.audioBackupId, undefined);
+    assert.equal(dec.audioBackup?.result, 'timeout');
   } finally {
     (globalThis as any).fetch = realFetch;
     cleanup(uid);

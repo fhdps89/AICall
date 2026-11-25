@@ -5,13 +5,14 @@
  */
 import crypto from 'crypto';
 import fs from 'fs';
+import { AUDIO_CHUNK_MAX } from './lectureAudioError.ts';
 import { feedDocId, feedCipherKey } from './feedStore.ts';
 import { mimeForAudioFile } from './lectureAudioEncode.ts';
 import { firestoreDocName, firestoreDocUrl } from './userKey.ts';
 import type { LectureState } from './lecture.ts';
 
 export const AUDIO_CHUNK_RAW_BYTES = 600_000;
-export const AUDIO_CHUNK_MAX = 8;
+export { AUDIO_CHUNK_MAX };
 export const AUDIO_BACKUP_COMMIT_TIMEOUT_MS = 60_000;
 export const AUDIO_BACKUP_DOWNLOAD_TIMEOUT_MS = 30_000;
 
@@ -180,45 +181,68 @@ export function prepareLectureAudioChunks(
   return { ok: true, chunks, bytes: blob.length };
 }
 
+export interface LoadedLectureAudio {
+  ext: 'm4a' | 'mp3' | 'wav';
+  mime: string;
+  buffer: Buffer;
+  durationSec: number;
+}
+
+export type LoadLectureAudioResult =
+  | ({ status: 'ok' } & LoadedLectureAudio)
+  | { status: 'missing' }
+  | { status: 'transient' };
+
 export async function loadLectureAudioChunks(
   secret: string,
   date: string,
   expectId: string,
   count: number
-): Promise<{ ext: 'm4a' | 'mp3' | 'wav'; mime: string; buffer: Buffer; durationSec: number } | null> {
-  if (!secret || !expectId || !DATE_RE.test(date)) return null;
-  if (!Number.isInteger(count) || count < 1 || count > AUDIO_CHUNK_MAX) return null;
+): Promise<LoadLectureAudioResult> {
+  if (!secret || !expectId || !DATE_RE.test(date)) return { status: 'missing' };
+  if (!Number.isInteger(count) || count < 1 || count > AUDIO_CHUNK_MAX) return { status: 'missing' };
 
   const docId = feedDocId(secret);
   const urls: string[] = [];
   for (let n = 0; n < count; n++) {
     const url = firestoreDocUrl(`feeds/${docId}/days/${date}/audio/${n}`);
-    if (!url) return null;
+    if (!url) return { status: 'transient' };
     urls.push(url);
   }
 
   try {
     const signal = AbortSignal.timeout(AUDIO_BACKUP_DOWNLOAD_TIMEOUT_MS);
-    const b64Chunks = await Promise.all(
+    const chunkResults = await Promise.all(
       urls.map(async (url) => {
         const res = await fetch(url, { signal });
-        if (!res.ok) return null;
+        if (!res.ok) {
+          await res.body?.cancel?.().catch(() => {});
+          return res.status === 404
+            ? ({ status: 'missing' } as const)
+            : ({ status: 'transient' } as const);
+        }
         const json: any = await res.json();
         const data = json?.fields?.data?.stringValue;
-        return typeof data === 'string' && data.length > 0 ? data : null;
+        if (typeof data !== 'string' || data.length === 0) {
+          return { status: 'missing' } as const;
+        }
+        return { status: 'ok', data } as const;
       })
     );
-    if (b64Chunks.some((c) => c === null)) return null;
-    const blob = joinAudioChunks(b64Chunks as string[]);
+    if (chunkResults.some((c) => c.status === 'missing')) return { status: 'missing' };
+    if (chunkResults.some((c) => c.status === 'transient')) return { status: 'transient' };
+    const b64Chunks = chunkResults.map((c) => (c as { status: 'ok'; data: string }).data);
+    const blob = joinAudioChunks(b64Chunks);
     const dec = decryptLectureAudio(secret, date, blob);
-    if (!dec || dec.header.audioBackupId !== expectId) return null;
+    if (!dec || dec.header.audioBackupId !== expectId) return { status: 'missing' };
     return {
+      status: 'ok',
       ext: dec.header.ext,
       mime: dec.header.mime,
       buffer: dec.audio,
       durationSec: dec.header.durationSec,
     };
   } catch {
-    return null;
+    return { status: 'transient' };
   }
 }
