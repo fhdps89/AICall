@@ -1707,8 +1707,15 @@ export async function synthesizeGemini(
       const part = response.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData?.data);
       if (!part?.inlineData?.data) throw new Error('TTS 음성 데이터 없음');
       return parseAudio(part.inlineData.data, part.inlineData.mimeType || '');
-    } catch (err) {
-      lastErr = attachErrorMeta(err, { stage: 'tts' });
+    } catch (err: any) {
+      const isAbortOrTimeout = err?.name === 'AbortError' || err?.name === 'TimeoutError';
+      const normalized =
+        timeoutSig.aborted && !signal?.aborted && isAbortOrTimeout
+          ? Object.assign(new Error(`lecture TTS timed out after ${stepTimeoutMs}ms`, { cause: err }), {
+              name: 'TimeoutError',
+            })
+          : err;
+      lastErr = attachErrorMeta(normalized, { stage: 'tts' });
       (lastErr as any).attempts = attempt + 1;
       if (signal?.aborted) throw lastErr;
       const classified = classifyLectureAudioError(lastErr, { stage: 'tts', attempts: attempt + 1 });

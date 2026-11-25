@@ -1,8 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
+import http from 'node:http';
+import type { AddressInfo, Socket } from 'node:net';
 import path from 'path';
-import type { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI } from '@google/genai';
 import {
   DATA_DIR,
   LECTURE_AUDIO_REBUILD_TIMED_OUT,
@@ -1034,4 +1036,204 @@ test('17) cold-start backup in cooldown still restores valid audio chunks (0 TTS
     cleanup(uidOk);
     cleanup(uidTr);
   }
+});
+
+test('18) synthesizeGemini stepTimeoutMs AbortError normalizes to TimeoutError -> STEP_TIMEOUT with 3 attempts and [1500, 3000] sleeps', async () => {
+  let calls = 0;
+  const sleeps: number[] = [];
+  let caught: any;
+  try {
+    await synthesizeGemini(
+      {
+        models: {
+          generateContent: (req: any) => {
+            calls += 1;
+            const sig = req.config.abortSignal as AbortSignal;
+            return new Promise((_resolve, reject) => {
+              if (sig.aborted) {
+                reject(new DOMException('This operation was aborted', 'AbortError'));
+                return;
+              }
+              sig.addEventListener(
+                'abort',
+                () => reject(new DOMException('This operation was aborted', 'AbortError')),
+                { once: true }
+              );
+            });
+          },
+        },
+      } as unknown as GoogleGenAI,
+      'Coach: hi',
+      false,
+      undefined,
+      {
+        stepTimeoutMs: 50,
+        sleepFn: async (ms) => {
+          sleeps.push(ms);
+        },
+      }
+    );
+    assert.fail('expected synthesizeGemini to throw');
+  } catch (err) {
+    caught = err;
+  }
+  assert.equal(calls, 3);
+  assert.deepEqual(sleeps, [1500, 3000]);
+  assert.match(caught.message, /^lecture TTS timed out/);
+  assert.equal(caught.name, 'TimeoutError');
+  assert.ok(
+    caught.cause?.name === 'AbortError' ||
+      /^lecture TTS timed out/.test(String(caught.cause?.message ?? ''))
+  );
+  const classified = classifyLectureAudioError(caught, { stage: 'tts' });
+  assert.equal(classified.code, 'STEP_TIMEOUT');
+  assert.equal(classified.stage, 'tts');
+  assert.equal(classified.attempts, 3);
+});
+
+test('19) synthesizeGemini real GoogleGenAI SDK against unresponsive local server classifies STEP_TIMEOUT after 3 attempts', async () => {
+  const sockets = new Set<Socket>();
+  const server = http.createServer((_req, _res) => {
+    // Intentionally never respond so SDK step abort fires
+  });
+  server.on('connection', (sock) => {
+    sockets.add(sock);
+    sock.once('close', () => sockets.delete(sock));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const addr = server.address() as AddressInfo;
+    const sdkAi = new GoogleGenAI({
+      apiKey: 'test-not-a-key',
+      httpOptions: { baseUrl: `http://127.0.0.1:${addr.port}` },
+    });
+    let caught: any;
+    try {
+      await synthesizeGemini(sdkAi, 'Coach: hi', false, undefined, {
+        stepTimeoutMs: 200,
+        sleepFn: async () => {},
+      });
+      assert.fail('expected synthesizeGemini to throw');
+    } catch (err) {
+      caught = err;
+    }
+    const classified = classifyLectureAudioError(caught, { stage: 'tts' });
+    assert.equal(classified.code, 'STEP_TIMEOUT');
+    assert.equal(classified.attempts, 3);
+  } finally {
+    for (const sock of sockets) sock.destroy();
+    server.closeAllConnections?.();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('20) synthesizeGemini caller abort mid-call keeps superseded behavior (not STEP_TIMEOUT, 1 attempt)', async () => {
+  const ac = new AbortController();
+  let calls = 0;
+  let caught: any;
+  try {
+    await synthesizeGemini(
+      {
+        models: {
+          generateContent: (req: any) => {
+            calls += 1;
+            const sig = req.config.abortSignal as AbortSignal;
+            setTimeout(() => ac.abort(), 15);
+            return new Promise((_resolve, reject) => {
+              sig.addEventListener(
+                'abort',
+                () => reject(new DOMException('This operation was aborted', 'AbortError')),
+                { once: true }
+              );
+            });
+          },
+        },
+      } as unknown as GoogleGenAI,
+      'Coach: hi',
+      false,
+      ac.signal,
+      { stepTimeoutMs: 5000, sleepFn: async () => {} }
+    );
+    assert.fail('expected synthesizeGemini to throw');
+  } catch (err) {
+    caught = err;
+  }
+  assert.equal(calls, 1);
+  assert.equal(caught.attempts, 1);
+  assert.match(caught.message, /superseded/);
+  const classified = classifyLectureAudioError(caught, { stage: 'tts' });
+  assert.notEqual(classified.code, 'STEP_TIMEOUT');
+});
+
+test('21) synthesizeGemini non-timeout generic error still classifies UNKNOWN with 3 attempts', async () => {
+  let calls = 0;
+  let caught: any;
+  try {
+    await synthesizeGemini(
+      {
+        models: {
+          generateContent: async () => {
+            calls += 1;
+            throw new Error('boom');
+          },
+        },
+      } as unknown as GoogleGenAI,
+      'Coach: hi',
+      false,
+      undefined,
+      { stepTimeoutMs: 5000, sleepFn: async () => {} }
+    );
+    assert.fail('expected synthesizeGemini to throw');
+  } catch (err) {
+    caught = err;
+  }
+  assert.equal(calls, 3);
+  const classified = classifyLectureAudioError(caught, { stage: 'tts' });
+  assert.equal(classified.code, 'UNKNOWN');
+  assert.equal(classified.attempts, 3);
+});
+
+test('22) synthesizeGemini 429 RESOURCE_EXHAUSTED after timeoutSig aborts preserves QUOTA (1 attempt, no sleeps)', async () => {
+  let calls = 0;
+  const sleeps: number[] = [];
+  let caught: any;
+  try {
+    await synthesizeGemini(
+      {
+        models: {
+          generateContent: (req: any) => {
+            calls += 1;
+            const sig = req.config.abortSignal as AbortSignal;
+            const makeQuotaErr = () =>
+              Object.assign(new Error('RESOURCE_EXHAUSTED: quota exceeded'), { status: 429 });
+            return new Promise((_resolve, reject) => {
+              if (sig.aborted) {
+                reject(makeQuotaErr());
+                return;
+              }
+              sig.addEventListener('abort', () => reject(makeQuotaErr()), { once: true });
+            });
+          },
+        },
+      } as unknown as GoogleGenAI,
+      'Coach: hi',
+      false,
+      undefined,
+      {
+        stepTimeoutMs: 50,
+        sleepFn: async (ms) => {
+          sleeps.push(ms);
+        },
+      }
+    );
+    assert.fail('expected synthesizeGemini to throw');
+  } catch (err) {
+    caught = err;
+  }
+  assert.equal(calls, 1);
+  assert.deepEqual(sleeps, []);
+  const classified = classifyLectureAudioError(caught, { stage: 'tts' });
+  assert.equal(classified.code, 'QUOTA');
+  assert.equal(classified.attempts, 1);
 });
