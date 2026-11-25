@@ -1,6 +1,13 @@
 import React, { useEffect, useState } from "react";
 import { Loader2, Flame } from "lucide-react";
-import { getUsageMonths, lectureAudioCostPerMinute, liveCostPerMinute, priceUsage, UsageMonth } from "../../services/usage/usageService";
+import {
+  getUsageMonths,
+  lectureAudioCostPerMinute,
+  liveCostPerMinute,
+  priceUsage,
+  USAGE_COST_COMPONENTS,
+  UsageMonth,
+} from "../../services/usage/usageService";
 import {
   getRecentMonthKeys,
   isActiveLearningDay,
@@ -72,11 +79,11 @@ export const UsagePanel: React.FC<{ userId?: string }> = ({ userId }) => {
       ? ([
           ["텍스트 토큰", `${Math.round(usage?.textTokens || 0).toLocaleString()}`, `${Math.round(d?.textTokens || 0).toLocaleString()}`],
           ["TTS 글자 수", `${Math.round(usage?.ttsChars || 0).toLocaleString()}`, `${Math.round(d?.ttsChars || 0).toLocaleString()}`],
-          ["통화 비용", usd(monthCost.live), usd(dayCost.live)],
-          ["QA 통화 비용", usd(monthCost.qaLive), usd(dayCost.qaLive)],
-          ["받아쓰기 비용", usd(monthCost.stt), usd(dayCost.stt)],
-          ["텍스트 비용", usd(monthCost.text), usd(dayCost.text)],
-          ["강의 음성 TTS 비용", usd(monthCost.tts), usd(dayCost.tts)],
+          ...USAGE_COST_COMPONENTS.map(({ key, label }): [string, string, string] => [
+            label,
+            usd(monthCost[key]),
+            usd(dayCost[key]),
+          ]),
         ] as [string, string, string][])
       : []),
     ["예상 비용", usd(monthCost.total), usd(dayCost.total)],

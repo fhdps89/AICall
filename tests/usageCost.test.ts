@@ -7,6 +7,7 @@ import {
   buildUsageFields,
   estimateCostUsd,
   priceUsage,
+  USAGE_COST_COMPONENTS,
   type UsageDay,
   type UsageMonth,
 } from '../src/services/usage/usageService.ts';
@@ -398,4 +399,46 @@ test('legacy live lower bound uses calls x capped Sq at the average call length'
   assert.ok(Math.abs(legacy.live - explicit.live) < 1e-12);
   // the average (100 min) is past the cap, so the bound is below the uncapped calls x avg²
   assert.ok(2 * liveContextMinutesSq(100) < 2 * 100 * 100);
+});
+
+test('USAGE_COST_COMPONENTS keys match non-total keys of priceUsage output exactly', () => {
+  const breakdownKeys = Object.keys(priceUsage(null)).filter((k) => k !== 'total');
+  const componentKeys = USAGE_COST_COMPONENTS.map((c) => c.key);
+  assert.equal(new Set(componentKeys).size, componentKeys.length);
+  assert.deepEqual([...componentKeys].sort(), [...breakdownKeys].sort());
+});
+
+test('USAGE_COST_COMPONENTS sum equals total for a sample month with all components non-zero', () => {
+  const sampleMonth: UsageMonth = {
+    calls: 4,
+    liveMinutes: 12,
+    liveMinutesSq: 40,
+    qaLiveMinutes: 3,
+    qaLiveMinutesSq: 9,
+    sttMinutes: 5,
+    textTokens: 6000,
+    textInputTokens: 4000,
+    textOutputTokens: 2000,
+    ttsChars: 1200,
+    ttsAudioSec: 80,
+    ttsAudioChars: 1200,
+    sieEmbeddingTokens: 25000,
+    estCostUsd: 0,
+  };
+  const breakdown = priceUsage(sampleMonth);
+  let sum = 0;
+  for (const { key } of USAGE_COST_COMPONENTS) {
+    assert.ok(breakdown[key] > 0, `expected ${key} > 0, got ${breakdown[key]}`);
+    sum += breakdown[key];
+  }
+  assert.ok(Math.abs(sum - breakdown.total) < 1e-12, `expected sum ${sum} === total ${breakdown.total}`);
+});
+
+test('USAGE_COST_COMPONENTS labels are non-empty Korean strings without internal identifiers', () => {
+  for (const { key, label } of USAGE_COST_COMPONENTS) {
+    assert.equal(typeof label, 'string');
+    assert.ok(label.trim().length > 0, `empty label for ${key}`);
+    assert.match(label, /[\uAC00-\uD7AF]/, `expected Korean text in label for ${key}: ${label}`);
+    assert.doesNotMatch(label, /[a-z_]/, `unexpected identifier-like token in label for ${key}: ${label}`);
+  }
 });

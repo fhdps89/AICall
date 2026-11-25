@@ -80,6 +80,31 @@ export interface UsageCostBreakdown {
   total: number;
 }
 
+type UsageCostComponentKey = Exclude<keyof UsageCostBreakdown, "total">;
+
+const USAGE_COST_COMPONENT_LABELS = {
+  live: "통화 비용",
+  qaLive: "QA 통화 비용",
+  stt: "받아쓰기 비용",
+  text: "텍스트 비용",
+  tts: "강의 음성 TTS 비용",
+  sie: "실수 묶기 임베딩 비용",
+} as const satisfies Record<UsageCostComponentKey, string>;
+
+/** Ordered breakdown components (excluding total) shown in dev-mode usage cost tables. */
+export const USAGE_COST_COMPONENTS: ReadonlyArray<{
+  key: UsageCostComponentKey;
+  label: string;
+}> = (Object.keys(USAGE_COST_COMPONENT_LABELS) as UsageCostComponentKey[]).map((key) => ({
+  key,
+  label: USAGE_COST_COMPONENT_LABELS[key],
+}));
+
+/** Sum of every breakdown component; the single place the total is formed, so the UI rows always add up. */
+export function sumUsageCostComponents(parts: Record<UsageCostComponentKey, number>): number {
+  return USAGE_COST_COMPONENTS.reduce((acc, { key }) => acc + parts[key], 0);
+}
+
 function nonNeg(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
 }
@@ -145,8 +170,8 @@ export function priceUsage(u: UsageDay | UsageMonth | null | undefined): UsageCo
     1_000_000;
 
   const sie = (nonNeg(u?.sieEmbeddingTokens) * r.sieEmbedPer1MTokens) / 1_000_000;
-  const total = live + qaLive + stt + text + tts + sie;
-  return { live, qaLive, stt, text, tts, sie, total };
+  const parts = { live, qaLive, stt, text, tts, sie };
+  return { ...parts, total: sumUsageCostComponents(parts) };
 }
 
 /**
@@ -197,7 +222,7 @@ export function estimateCostUsd(d: UsageDelta): number {
       ? (nonNeg(d.ttsChars) / 1000) * PRICING_RATES.ttsPer1kCharsElevenLabs
       : base.tts;
 
-  return base.live + base.qaLive + stt + base.text + tts + base.sie;
+  return sumUsageCostComponents({ ...base, stt, tts });
 }
 
 export interface UsageFields<T> {
