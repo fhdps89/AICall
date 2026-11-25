@@ -4,6 +4,16 @@
 
 ---
 
+### [2026-11-26 KST] 아침 강의 TTS 조각·시도별 소요시간 진단 기록
+- **배경**: 아침 강의 TTS 조각이 3회 시도 후 실패했을 때 소요시간 정보가 없어 "Gemini TTS 지연"과 "서버 CPU 스로틀링 / 본문 읽기 정체"를 구분할 수 없었다.
+- **수정**:
+  - `server/lecture.ts` `synthesizeGemini`: `opts.now ?? Date.now`로 시도별 소요시간(`attemptMs: number[]`)을 측정하고, 매 실패 시도마다 `[Lecture] TTS attempt failed:` 경고 로그(`attempt`·`elapsedMs`·`loopDelayMaxMs`·`errName`·`code`, 원문 메시지 비노출)를 남기며 최종 예외에 `attemptMs` 사본을 첨부한다. 호출자 취소(`signal?.aborted`) 시에는 `attemptMs` 기록 후 분류·경고 로그 전에 예외를 던져 가짜 `UNKNOWN` 경고를 남기지 않는다.
+  - `server/lecture.ts` CPU 스로틀링 근거 계측: 시도마다 `perf_hooks.monitorEventLoopDelay({ resolution: 20 })`(테스트 주입 `opts.loopDelayMonitor`)를 시작·`finally`에서 정지해 `loopDelayMaxMs`(정수 ms, 상한 `3_600_000`)를 시도 로그에 기록하고 시도 간 최댓값을 최종 예외의 `loopDelayMaxMs`로 첨부한다.
+  - `server/lecture.ts` `createCachedSegmentSynth`·`renderAndSaveAudio`: `onHit` 콜백으로 디스크 캐시 적중 여부를 전달하고, 음성 조각마다 벽시계 소요시간을 측정해 성공 시 `[Lecture] TTS segment ok:`(`segIndex`·`segChars`·`elapsedMs`·`cached`), 실패 시 `firstErr`에 `segIndex`·`segChars`·`segElapsedMs`를 붙인다.
+  - `server/lectureAudioError.ts`: `LectureAudioError`에 선택 필드(`segIndex`·`segChars`·`elapsedMs`·`attemptMs`·`loopDelayMaxMs`·`errName`)를 추가하고 `classifyLectureAudioError`·`sanitizeAudioError`에서 정수 상한·길이(최대 3)·안전한 이름 정규식을 검증해 유효할 때만 유지한다(`diag.json`·days 백업 반영). `[Lecture] job failed:` 및 `[Lecture] audio rebuild failed:` 로그에도 존재 시 함께 출력한다. 재시도 횟수(3)·대기(1500/3000ms)·쿨다운·일일 상한·타임아웃 등 동작은 변경 없음.
+- **한계**: 헤더 도착(TTFB)과 본문 읽기 완료는 아직 따로 재지 않는다 (`attemptMs`가 90,000 근처 + `loopDelayMaxMs` 작음 → TTS/네트워크 쪽, `loopDelayMaxMs` 큼 또는 `attemptMs`가 90,000을 크게 넘음 → CPU 제한 쪽으로 해석).
+- **방어 조치**: `tests/lectureTtsTiming.test.ts` 신규 추가 — 가짜 `now` 기반 `attemptMs` 기록, 불완전 JSON 본문 정체 로컬 HTTP 서버(요청 3회·`TimeoutError`·시도별 `attemptMs < 600`) + 실제 `GoogleGenAI` SDK `STEP_TIMEOUT`·`attemptMs` 검증, `sanitizeAudioError` 유효/무효 필드 처리(`loopDelayMaxMs` 포함), `startLectureJob` 3번째 음성 조각 실패 E2E(`segIndex`·`segChars`·`elapsedMs`·`loopDelayMaxMs`), 일반 오류 3회·`[1500, 3000]`ms 재시도 불변 확인, 호출자 취소(`signal?.aborted`) 시 경고 로그 미출력, 주입 `loopDelayMonitor` 최댓값 전파·무효값 제거 검증.
+
 ### [2026-11-26 KST] 아침 강의 TTS 조각 시간 초과 진단 오류 수정 (`UNKNOWN` → `STEP_TIMEOUT`)
 - **증상**: 아침 강의 TTS 조각(`synthesizeGemini`) 시간 초과가 `audioError.code = 'UNKNOWN'`으로 기록됐다.
 - **원인**: `@google/genai` 2.24.0(`createAttemptSignal`)이 호출 측 `AbortSignal`을 자체 `AbortController`에 연결해 이유 없이 `abort()`하므로, 단계 시간 초과 시 `withTimeout`보다 SDK의 `AbortError`가 먼저 발생해 `STEP_TIMEOUT`으로 분류되지 않았다.

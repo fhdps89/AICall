@@ -67,6 +67,12 @@ export interface LectureAudioError {
   total: number;
   at: string;
   origin: 'local' | 'backup';
+  segIndex?: number;
+  segChars?: number;
+  elapsedMs?: number;
+  attemptMs?: number[];
+  loopDelayMaxMs?: number;
+  errName?: string;
 }
 
 export interface AudioBackupResult {
@@ -107,6 +113,39 @@ export const AUDIO_CHUNK_MAX = 8;
 
 export const AUDIO_COOLDOWN_DEFAULT_MS = 30 * 60 * 1000;
 export const AUDIO_COOLDOWN_LONG_MS = 6 * 60 * 60 * 1000;
+
+export const SAFE_ERR_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,40}$/;
+
+export function safeErrName(err: unknown): string | undefined {
+  if (!err || typeof err !== 'object') return undefined;
+  const obj = err as { name?: unknown; constructor?: { name?: unknown } };
+  const raw =
+    typeof obj.name === 'string' && obj.name
+      ? obj.name
+      : typeof obj.constructor?.name === 'string'
+      ? obj.constructor.name
+      : '';
+  return SAFE_ERR_NAME_RE.test(raw) ? raw : undefined;
+}
+
+function validOptInt(v: unknown, max: number): number | undefined {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= max ? v : undefined;
+}
+
+function validAttemptMs(v: unknown): number[] | undefined {
+  if (!Array.isArray(v) || v.length === 0 || v.length > 3) return undefined;
+  const out: number[] = [];
+  for (const item of v) {
+    const n = validOptInt(item, 3_600_000);
+    if (n === undefined) return undefined;
+    out.push(n);
+  }
+  return out;
+}
+
+function validErrName(v: unknown): string | undefined {
+  return typeof v === 'string' && SAFE_ERR_NAME_RE.test(v) ? v : undefined;
+}
 
 function validHttpStatus(v: unknown): number | null {
   return typeof v === 'number' && Number.isInteger(v) && v >= 100 && v <= 599 ? v : null;
@@ -197,6 +236,13 @@ export function classifyLectureAudioError(
   const total = validNonNegInt(obj.total ?? ctx.total ?? 0);
   const at = validIsoAt(ctx.at);
   const origin: 'local' | 'backup' = ctx.origin === 'backup' ? 'backup' : 'local';
+  const segIndex = validOptInt(obj.segIndex, 10_000);
+  const segChars = validOptInt(obj.segChars, 100_000);
+  const rawElapsed = obj.segElapsedMs !== undefined ? obj.segElapsedMs : obj.elapsedMs;
+  const elapsedMs = validOptInt(rawElapsed, 3_600_000);
+  const attemptMs = validAttemptMs(obj.attemptMs);
+  const loopDelayMaxMs = validOptInt(obj.loopDelayMaxMs, 3_600_000);
+  const errName = safeErrName(err);
 
   let code: AudioErrorCode = 'UNKNOWN';
   let quota: 'minute' | 'day' | null = null;
@@ -257,6 +303,12 @@ export function classifyLectureAudioError(
     total,
     at,
     origin,
+    ...(segIndex !== undefined ? { segIndex } : {}),
+    ...(segChars !== undefined ? { segChars } : {}),
+    ...(elapsedMs !== undefined ? { elapsedMs } : {}),
+    ...(attemptMs !== undefined ? { attemptMs } : {}),
+    ...(loopDelayMaxMs !== undefined ? { loopDelayMaxMs } : {}),
+    ...(errName !== undefined ? { errName } : {}),
   };
 }
 
@@ -280,6 +332,12 @@ export function sanitizeAudioError(raw: unknown): LectureAudioError | undefined 
   const total = validNonNegInt(r.total);
   const at = validIsoAt(r.at);
   const origin: 'local' | 'backup' = r.origin === 'backup' ? 'backup' : 'local';
+  const segIndex = validOptInt(r.segIndex, 10_000);
+  const segChars = validOptInt(r.segChars, 100_000);
+  const elapsedMs = validOptInt(r.elapsedMs, 3_600_000);
+  const attemptMs = validAttemptMs(r.attemptMs);
+  const loopDelayMaxMs = validOptInt(r.loopDelayMaxMs, 3_600_000);
+  const errName = validErrName(r.errName);
 
   return {
     stage,
@@ -293,6 +351,12 @@ export function sanitizeAudioError(raw: unknown): LectureAudioError | undefined 
     total,
     at,
     origin,
+    ...(segIndex !== undefined ? { segIndex } : {}),
+    ...(segChars !== undefined ? { segChars } : {}),
+    ...(elapsedMs !== undefined ? { elapsedMs } : {}),
+    ...(attemptMs !== undefined ? { attemptMs } : {}),
+    ...(loopDelayMaxMs !== undefined ? { loopDelayMaxMs } : {}),
+    ...(errName !== undefined ? { errName } : {}),
   };
 }
 
