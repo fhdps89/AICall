@@ -335,6 +335,7 @@ export function cooldownMsFor(code: AudioErrorCode): number {
 
 export function retryableFor(code: AudioErrorCode): boolean {
   return (
+    code !== 'QUOTA' &&
     code !== 'AUTH' &&
     code !== 'MODEL_NOT_FOUND' &&
     code !== 'BAD_REQUEST' &&

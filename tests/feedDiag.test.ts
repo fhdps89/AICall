@@ -38,6 +38,12 @@ const EXPECTED_DIAG_KEYS = [
   'audioError',
   'audioRetryAfter',
   'audioBackup',
+  'dailyGenCount',
+  'dailyGenCap',
+  'genSkipReason',
+  'genSkipAt',
+  'genBlockedUntil',
+  'genLeaseMode',
 ];
 
 const EXPECTED_AUDIO_ERROR_KEYS = [
@@ -305,6 +311,7 @@ test('4) buildFeedDiag is strictly read-only on a ready lecture with missing aud
     const filesAfter = fs.readdirSync(dir);
 
     assert.deepEqual(filesAfter, filesBefore);
+    assert.equal(fs.existsSync(path.join(dir, `${date}.gen.json`)), false);
     assert.equal(diag.status, 'ready');
     assert.equal(diag.hasAudio, false);
     assert.equal(diag.audioRestoring, false);

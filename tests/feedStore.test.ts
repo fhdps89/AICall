@@ -10,7 +10,18 @@ import {
   resetFeedBackupCheckCache,
   writeFeedSync,
 } from '../server/feed.ts';
-import { saveFeedBackup, deleteFeedBackup, decryptFeed, saveLectureBackup, loadLectureBackup, decryptLectureBackup } from '../server/feedStore.ts';
+import {
+  feedDocId,
+  saveFeedBackup,
+  deleteFeedBackup,
+  decryptFeed,
+  saveLectureBackup,
+  loadLectureBackup,
+  decryptLectureBackup,
+  acquireLectureGenLease,
+  releaseLectureGenLease,
+  createFeedGenRemote,
+} from '../server/feedStore.ts';
 import type { LectureState } from '../server/lecture.ts';
 import { getUserSuppliedKey } from '../server/userKey.ts';
 
@@ -338,4 +349,256 @@ test('loadFeedForSecret: concurrent newer local sync during backup fetch is pres
     assert.equal(feedForSecret(secret)?.syncedAt, '2026-11-24T09:00:00.000Z');
     assert.equal(feedForSecret(secret)?.newMistakes[0].id, 'concurrent1');
   });
+});
+
+/** CAS-aware Firestore REST fake for feeds/{id}/days/{date}. */
+function fakeCasFirestore() {
+  let seq = 0;
+  const docs: Record<string, { fields: any; updateTime: string }> = {};
+  const fetchFn = async (url: string, init: any = {}) => {
+    const rawUrl = String(url);
+    const [pathPart, queryPart = ''] = rawUrl.split('?');
+    const id = pathPart.split('/feeds/')[1];
+    const method = init.method || 'GET';
+    if (method === 'GET') {
+      if (!docs[id]) return { ok: false, status: 404 };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ...docs[id] }),
+      };
+    }
+    if (method === 'PATCH') {
+      const params = new URLSearchParams(queryPart);
+      if (params.has('currentDocument.exists')) {
+        const wantExists = params.get('currentDocument.exists') === 'true';
+        const actuallyExists = Boolean(docs[id]);
+        if (wantExists !== actuallyExists) {
+          return {
+            ok: false,
+            status: 400,
+            text: async () => JSON.stringify({ error: { status: 'FAILED_PRECONDITION' } }),
+          };
+        }
+      } else if (params.has('currentDocument.updateTime')) {
+        const wantTime = params.get('currentDocument.updateTime');
+        if (!docs[id] || docs[id].updateTime !== wantTime) {
+          return {
+            ok: false,
+            status: 400,
+            text: async () => JSON.stringify({ error: { status: 'FAILED_PRECONDITION' } }),
+          };
+        }
+      }
+      seq += 1;
+      const body = JSON.parse(init.body);
+      docs[id] = {
+        fields: body.fields,
+        updateTime: `2026-11-25T00:00:${String(seq).padStart(2, '0')}.000Z`,
+      };
+      return { ok: true, status: 200 };
+    }
+    return { ok: false, status: 404 };
+  };
+  return { docs, fetchFn };
+}
+
+function sampleReadyLectureForCas(uid: string, date: string): LectureState {
+  const now = '2026-11-25T00:00:00.000Z';
+  return {
+    uid,
+    date,
+    status: 'ready',
+    title: '기존 준비된 강의',
+    script: [
+      {
+        mistakeId: 'm1',
+        kind: 'new',
+        myPhrase: 'I go',
+        naturalPhrase: 'I went',
+        explanation: '과거 시제',
+        dialogue: [{ speaker: 'Coach', line: 'I went.' }],
+        meaningKo: '갔다',
+        answerEnglish: 'I went',
+      },
+    ],
+    coachNote: '첫 문장. 둘째 문장.',
+    itemCount: 1,
+    newMistakeIds: ['m1'],
+    reviewMistakeIds: [],
+    ttsEngine: 'gemini',
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+test('gen lease: concurrent acquire of two owners lets one succeed and preserves existing ready backup', async () => {
+  const realFetch = globalThis.fetch;
+  const { docs, fetchFn } = fakeCasFirestore();
+  (globalThis as any).fetch = fetchFn;
+  try {
+    const secret = 'k'.repeat(48);
+    const date = '2026-11-25';
+    const ready = sampleReadyLectureForCas(`u_cas_${process.pid}`, date);
+    await saveLectureBackup(secret, ready);
+
+    const now = Date.parse('2026-11-25T01:00:00.000Z');
+    const [a, b] = await Promise.all([
+      acquireLectureGenLease(secret, date, {
+        owner: 'owner-A',
+        token: 'tok-A',
+        kind: 'rebuild',
+        ttlMs: 60_000,
+        cap: 2,
+        now,
+        ignoreCooldown: false,
+      }),
+      acquireLectureGenLease(secret, date, {
+        owner: 'owner-B',
+        token: 'tok-B',
+        kind: 'rebuild',
+        ttlMs: 60_000,
+        cap: 2,
+        now,
+        ignoreCooldown: false,
+      }),
+    ]);
+
+    const oks = [a, b].filter((r) => r.ok === true);
+    const skips = [a, b].filter((r) => r.ok === false);
+    assert.equal(oks.length, 1);
+    assert.equal(skips.length, 1);
+    if (skips[0].ok === false) {
+      assert.equal(skips[0].skip.reason, 'lease');
+    }
+
+    const doc = Object.values(docs)[0];
+    assert.deepEqual(Object.keys(doc.fields).sort(), ['data', 'iv', 'updatedAt']);
+    const dec = decryptLectureBackup(secret, doc.fields.iv.stringValue, doc.fields.data.stringValue) as any;
+    assert.equal(dec.title, '기존 준비된 강의');
+    assert.equal(dec.script.length, 1);
+    assert.equal(dec.genControl.genCount, 1);
+  } finally {
+    (globalThis as any).fetch = realFetch;
+  }
+});
+
+test('ready backup write preserves cached genControl and loadLectureBackup never exposes genControl', async () => {
+  const realFetch = globalThis.fetch;
+  const { docs, fetchFn } = fakeCasFirestore();
+  (globalThis as any).fetch = fetchFn;
+  try {
+    const secret = 'l'.repeat(48);
+    const date = '2026-11-25';
+    const now = Date.parse('2026-11-25T01:00:00.000Z');
+    const acq = await acquireLectureGenLease(secret, date, {
+      owner: 'owner-cache',
+      token: 'tok-cache',
+      kind: 'job',
+      ttlMs: 60_000,
+      cap: 2,
+      now,
+      ignoreCooldown: false,
+    });
+    assert.equal(acq.ok, true);
+
+    const ready = sampleReadyLectureForCas(`u_cache_${process.pid}`, date);
+    await saveLectureBackup(secret, ready);
+
+    const doc = Object.values(docs)[0];
+    const dec = decryptLectureBackup(secret, doc.fields.iv.stringValue, doc.fields.data.stringValue) as any;
+    assert.equal(dec.title, '기존 준비된 강의');
+    assert.equal(dec.genControl.genCount, 1);
+    assert.equal(dec.genControl.lease.token, 'tok-cache');
+
+    const loaded = await loadLectureBackup(secret, date);
+    assert.ok(loaded);
+    assert.equal('genControl' in loaded, false);
+  } finally {
+    (globalThis as any).fetch = realFetch;
+  }
+});
+
+test('gen lease release keeps lease on token mismatch, takes over expired foreign lease, and treats undecryptable doc as unavailable', async () => {
+  const realFetch = globalThis.fetch;
+  const { docs, fetchFn } = fakeCasFirestore();
+  (globalThis as any).fetch = fetchFn;
+  try {
+    const secret = 'm'.repeat(48);
+    const date = '2026-11-25';
+    const t0 = Date.parse('2026-11-25T01:00:00.000Z');
+    await acquireLectureGenLease(secret, date, {
+      owner: 'owner-1',
+      token: 'tok-1',
+      kind: 'job',
+      ttlMs: 60_000,
+      cap: 2,
+      now: t0,
+      ignoreCooldown: false,
+    });
+
+    // Release with wrong token -> lease remains, refund and cooldown apply
+    const cdIso = new Date(t0 + 1800_000).toISOString();
+    await releaseLectureGenLease(secret, date, {
+      token: 'tok-wrong',
+      refund: true,
+      success: false,
+      cooldownUntil: cdIso,
+      cooldownCode: 'QUOTA',
+    });
+    const doc = Object.values(docs)[0];
+    const dec = decryptLectureBackup(secret, doc.fields.iv.stringValue, doc.fields.data.stringValue) as any;
+    assert.equal(dec.genControl.genCount, 0);
+    assert.equal(dec.genControl.lease.token, 'tok-1');
+    assert.equal(dec.genControl.cooldownUntil, cdIso);
+
+    // Expired foreign lease (now = t0 + 120s > t0 + 60s) can be taken over (with ignoreCooldown)
+    const takeover = await acquireLectureGenLease(secret, date, {
+      owner: 'owner-2',
+      token: 'tok-2',
+      kind: 'job',
+      ttlMs: 60_000,
+      cap: 2,
+      now: t0 + 120_000,
+      ignoreCooldown: true,
+    });
+    assert.equal(takeover.ok, true);
+    if (takeover.ok) {
+      assert.equal(takeover.gc.lease?.owner, 'owner-2');
+      assert.equal(takeover.gc.lease?.token, 'tok-2');
+    }
+
+    // Undecryptable doc -> unavailable and NOT overwritten
+    const badSecret = 'n'.repeat(48);
+    const badKey = `${feedDocId(badSecret)}/days/${date}`;
+    docs[badKey] = {
+      updateTime: '2026-11-25T00:00:99.000Z',
+      fields: {
+        iv: { stringValue: Buffer.from('123456789012').toString('base64') },
+        data: { stringValue: Buffer.from('corrupt-ciphertext-payload').toString('base64') },
+        updatedAt: { stringValue: '2026-11-25T00:00:00.000Z' },
+      },
+    };
+    const beforeSnapshot = JSON.stringify(docs[badKey]);
+    const resBad = await acquireLectureGenLease(badSecret, date, {
+      owner: 'owner-x',
+      token: 'tok-x',
+      kind: 'job',
+      ttlMs: 60_000,
+      cap: 2,
+      now: t0,
+      ignoreCooldown: false,
+    });
+    assert.deepEqual(resBad, { ok: 'unavailable' });
+    assert.equal(JSON.stringify(docs[badKey]), beforeSnapshot);
+
+    // LECTURE_GEN_LEASE=off disables remote
+    const prevLeaseEnv = process.env.LECTURE_GEN_LEASE;
+    process.env.LECTURE_GEN_LEASE = 'off';
+    assert.equal(createFeedGenRemote(secret), null);
+    if (prevLeaseEnv === undefined) delete process.env.LECTURE_GEN_LEASE;
+    else process.env.LECTURE_GEN_LEASE = prevLeaseEnv;
+  } finally {
+    (globalThis as any).fetch = realFetch;
+  }
 });

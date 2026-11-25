@@ -21,11 +21,16 @@ import {
   recordLectureBackupResult,
   retryCooldownUntilMs,
   maxCreatedAtIso,
+  lectureGenDiag,
+  lectureInputIdSet,
+  peekLectureGenGate,
   LECTURE_AUDIO_MISSING,
 } from './lecture.ts';
 import type { LectureMistakeInput, LectureState, LectureSynthesizeFn } from './lecture.ts';
+import type { GenRemote, GenSkipReason } from './lectureGenGuard.ts';
 import { safeEqual } from './auth.ts';
 import {
+  createFeedGenRemote,
   loadFeedBackup,
   loadLectureBackup,
   persistLectureBackups,
@@ -194,6 +199,12 @@ export interface FeedDiag {
   audioError: LectureAudioError | null;
   audioRetryAfter: string | null;
   audioBackup: AudioBackupResult | null;
+  dailyGenCount: number;
+  dailyGenCap: number;
+  genSkipReason: GenSkipReason | null;
+  genSkipAt: string | null;
+  genBlockedUntil: string | null;
+  genLeaseMode: 'firestore' | 'local' | null;
 }
 
 export function feedOnReady(st: FeedSyncState) {
@@ -224,17 +235,6 @@ export function feedOnFailed(st: FeedSyncState) {
   };
 }
 
-function lectureInputIdSet(lecture: LectureState): Set<string> {
-  if (lecture.inputNewIds) {
-    return new Set([...lecture.inputNewIds, ...(lecture.inputReviewIds ?? [])]);
-  }
-  return new Set([
-    ...(lecture.newMistakeIds || []),
-    ...(lecture.reviewMistakeIds || []),
-    ...(lecture.inputReviewIds ?? []),
-  ]);
-}
-
 export function shouldAutoRegenerate(
   lecture: LectureState | null,
   st: FeedSyncState,
@@ -255,17 +255,20 @@ export function maybeAutoRegenerateToday(
   ai: GoogleGenAI | null,
   st: FeedSyncState,
   date: string,
-  opts: { now?: number; startJob?: typeof startLectureJob } = {}
+  opts: { now?: number; startJob?: typeof startLectureJob; genRemote?: GenRemote | null } = {}
 ): boolean {
   if (!ai) return false;
   const now = opts.now ?? Date.now();
   const lecture = readLectureState(st.uid, date, now);
+  if (!lecture || lecture.status === 'generating' || lectureRebuildInFlight(st.uid, date)) return false;
   if (!shouldAutoRegenerate(lecture, st, now)) return false;
   const startJob = opts.startJob || startLectureJob;
+  const genRemote = opts.genRemote !== undefined ? opts.genRemote : createFeedGenRemote(st.secret);
   startJob(ai, st.uid, date, st.newMistakes, st.reviewMistakes, {
     force: true,
     onReady: feedOnReady(st),
     onFailed: feedOnFailed(st),
+    genRemote,
   });
   return true;
 }
@@ -275,6 +278,7 @@ export interface EnsureTodayLectureDeps {
   loadAudio?: typeof loadLectureAudioChunks;
   restoreLecture?: typeof restoreReadyLecture;
   synthesizeFn?: LectureSynthesizeFn;
+  genRemote?: GenRemote | null;
   now?: number;
 }
 
@@ -315,24 +319,41 @@ async function ensureTodayLectureOnce(
   if (lectureRebuildInFlight(st.uid, date) && local?.audioStatus === 'rebuilding') return;
   const epochBefore = lectureJobEpoch(st.uid, date);
   const localCreatedAtBefore = local?.createdAt;
+  const genRemote = deps.genRemote !== undefined ? deps.genRemote : createFeedGenRemote(st.secret);
+
+  const hasScript = (s: LectureState | null | undefined): s is LectureState =>
+    Boolean(s?.status === 'ready' && Array.isArray(s.script) && s.script.length > 0);
+  const hasPointers = (s: LectureState | null | undefined): boolean =>
+    Boolean(s?.audioBackupId && typeof s.audioChunks === 'number' && s.audioChunks >= 1);
+  const isOlderThan = (backupCreatedAt: string | undefined, localCreatedAt: string | undefined): boolean => {
+    if (!hasScript(local) || !localCreatedAt || !backupCreatedAt) return false;
+    const bMs = Date.parse(backupCreatedAt);
+    const lMs = Date.parse(localCreatedAt);
+    return Number.isFinite(bMs) && Number.isFinite(lMs) && bMs < lMs;
+  };
 
   let cand: LectureState | null = null;
-  if (local?.status === 'ready' && Array.isArray(local.script) && local.script.length > 0) {
+  if (hasScript(local) && hasPointers(local)) {
     cand = local;
   } else {
     const load = deps.loadBackup || loadLectureBackup;
-    const backup = await load(st.secret, date);
-    if (
-      !backup ||
-      backup.uid !== st.uid ||
-      backup.date !== date ||
-      backup.status !== 'ready' ||
-      !Array.isArray(backup.script) ||
-      backup.script.length === 0
-    ) {
+    let backup: LectureState | null = null;
+    try {
+      backup = await load(st.secret, date);
+    } catch (err) {
+      if (!hasScript(local)) throw err;
+    }
+    const validBackup =
+      backup && backup.uid === st.uid && backup.date === date && hasScript(backup) ? backup : null;
+    if (validBackup && hasPointers(validBackup) && !isOlderThan(validBackup.createdAt, local?.createdAt)) {
+      cand = validBackup;
+    } else if (hasScript(local)) {
+      cand = local;
+    } else if (validBackup) {
+      cand = validBackup;
+    } else {
       return;
     }
-    cand = backup;
   }
 
   const cooldownUntil = retryCooldownUntilMs(cand);
@@ -399,6 +420,11 @@ async function ensureTodayLectureOnce(
     return;
   }
 
+  if (peekLectureGenGate(st.uid, date, now, { ignoreCooldown: false })) {
+    installWithoutAudio(cand);
+    return;
+  }
+
   if (!ai && !deps.synthesizeFn) return;
   const restore = deps.restoreLecture || restoreReadyLecture;
   restore(ai as GoogleGenAI, st.uid, date, cand, {
@@ -406,6 +432,7 @@ async function ensureTodayLectureOnce(
     onReady: feedOnReady(st),
     onFailed: feedOnFailed(st),
     now,
+    genRemote,
     ...(pointersConfirmedMissing ? { clearAudioBackupPointers: true } : {}),
   });
 }
@@ -441,6 +468,7 @@ export interface BuildFeedTodayOpts {
   date?: string;
   skipStart?: boolean;
   startJob?: typeof startLectureJob;
+  genRemote?: GenRemote | null;
   now?: number;
 }
 
@@ -466,17 +494,21 @@ export function buildFeedToday(
   // A job cut off by a server restart did not fail on its own, so it is retried right away.
   const interrupted = lecture?.status === 'failed' && (lecture.error === 'INTERRUPTED' || lecture.error === 'TIMED_OUT');
   const startJob = opts.startJob || startLectureJob;
+  const genRemote = opts.genRemote !== undefined ? opts.genRemote : createFeedGenRemote(st.secret);
   const beforeStart = isBeforeFeedStartKst(now);
 
   if (!opts.skipStart && !beforeStart && (!lecture || failedLongAgo || interrupted) && hasCandidates && ai) {
     lecture = startJob(ai, st.uid, date, st.newMistakes, st.reviewMistakes, {
       onReady: feedOnReady(st),
       onFailed: feedOnFailed(st),
+      genRemote,
+      now,
     });
   } else if (!opts.skipStart && ai) {
     let regenState: LectureState | undefined;
     const regen = maybeAutoRegenerateToday(ai, st, date, {
       now,
+      genRemote,
       startJob: (...args) => {
         regenState = startJob(...args);
         return regenState;
@@ -596,6 +628,7 @@ export function buildFeedDiag(
       ? new Date(Date.parse(lecture.audioRetryAfter)).toISOString()
       : null;
   const audioBackup = lecture?.audioBackup ? (sanitizeAudioBackupResult(lecture.audioBackup) ?? null) : null;
+  const gen = lectureGenDiag(st.uid, date, now);
 
   return {
     date,
@@ -620,6 +653,12 @@ export function buildFeedDiag(
     audioError,
     audioRetryAfter,
     audioBackup,
+    dailyGenCount: gen.dailyGenCount,
+    dailyGenCap: gen.dailyGenCap,
+    genSkipReason: gen.genSkipReason,
+    genSkipAt: gen.genSkipAt,
+    genBlockedUntil: gen.genBlockedUntil,
+    genLeaseMode: gen.genLeaseMode,
   };
 }
 

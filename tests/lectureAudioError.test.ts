@@ -11,7 +11,6 @@ import {
   lectureAudioPath,
   lectureRebuildInFlight,
   readLectureState,
-  resetTtsPause,
   startLectureAudioRebuild,
   startLectureJob,
   synthesizeGemini,
@@ -169,88 +168,65 @@ test('7) classifyLectureAudioError maps all categories, matches exact allow-list
   }
 });
 
-test('8) synthesizeGemini retry policy: 404 & QUOTA_DAILY stop at 1, 429 retryDelay 2s sleeps 2000ms, generic sleeps [1500, 3000]', async () => {
-  const validInline = {
-    candidates: [
+test('8) synthesizeGemini retry policy: 404, QUOTA_DAILY, and 429 (QUOTA) stop at 1 with 0 sleeps; generic sleeps [1500, 3000]', async () => {
+  // 404 -> 1 call, 0 sleeps
+  let calls404 = 0;
+  const sleeps404: number[] = [];
+  await assert.rejects(
+    synthesizeGemini(
       {
-        content: {
-          parts: [
-            {
-              inlineData: {
-                data: Buffer.alloc(240).toString('base64'),
-                mimeType: 'audio/pcm;rate=24000',
-              },
-            },
-          ],
+        models: {
+          generateContent: async () => {
+            calls404 += 1;
+            throw Object.assign(new Error('NOT_FOUND'), { status: 404 });
+          },
         },
-      },
-    ],
-  };
+      } as unknown as GoogleGenAI,
+      'Coach: hi',
+      false,
+      undefined,
+      { sleepFn: async (ms) => { sleeps404.push(ms); }, now: () => 1_000_000 }
+    ),
+    (err: any) => err?.attempts === 1
+  );
+  assert.equal(calls404, 1);
+  assert.deepEqual(sleeps404, []);
 
-  try {
-    // 404 -> 1 call, 0 sleeps
-    resetTtsPause();
-    let calls404 = 0;
-    const sleeps404: number[] = [];
-    await assert.rejects(
-      synthesizeGemini(
-        {
-          models: {
-            generateContent: async () => {
-              calls404 += 1;
-              throw Object.assign(new Error('NOT_FOUND'), { status: 404 });
-            },
+  // QUOTA_DAILY -> 1 call, 0 sleeps
+  let callsDaily = 0;
+  const sleepsDaily: number[] = [];
+  await assert.rejects(
+    synthesizeGemini(
+      {
+        models: {
+          generateContent: async () => {
+            callsDaily += 1;
+            throw Object.assign(new Error('RESOURCE_EXHAUSTED PerDay'), { status: 429 });
           },
-        } as unknown as GoogleGenAI,
-        'Coach: hi',
-        false,
-        undefined,
-        { sleepFn: async (ms) => { sleeps404.push(ms); }, now: () => 1_000_000 }
-      ),
-      (err: any) => err?.attempts === 1
-    );
-    assert.equal(calls404, 1);
-    assert.deepEqual(sleeps404, []);
+        },
+      } as unknown as GoogleGenAI,
+      'Coach: hi',
+      false,
+      undefined,
+      { sleepFn: async (ms) => { sleepsDaily.push(ms); }, now: () => 1_000_000 }
+    ),
+    (err: any) => err?.attempts === 1
+  );
+  assert.equal(callsDaily, 1);
+  assert.deepEqual(sleepsDaily, []);
 
-    // QUOTA_DAILY -> 1 call, 0 sleeps
-    resetTtsPause();
-    let callsDaily = 0;
-    const sleepsDaily: number[] = [];
-    await assert.rejects(
-      synthesizeGemini(
-        {
-          models: {
-            generateContent: async () => {
-              callsDaily += 1;
-              throw Object.assign(new Error('RESOURCE_EXHAUSTED PerDay'), { status: 429 });
-            },
-          },
-        } as unknown as GoogleGenAI,
-        'Coach: hi',
-        false,
-        undefined,
-        { sleepFn: async (ms) => { sleepsDaily.push(ms); }, now: () => 1_000_000 }
-      ),
-      (err: any) => err?.attempts === 1
-    );
-    assert.equal(callsDaily, 1);
-    assert.deepEqual(sleepsDaily, []);
-
-    // 429 retryDelay 2s -> sleep(2000) then succeed
-    resetTtsPause();
-    let calls429 = 0;
-    const sleeps429: number[] = [];
-    const pcm = await synthesizeGemini(
+  // 429 (QUOTA) -> 1 call, 0 sleeps, throws immediately
+  let calls429 = 0;
+  const sleeps429: number[] = [];
+  await assert.rejects(
+    synthesizeGemini(
       {
         models: {
           generateContent: async () => {
             calls429 += 1;
-            if (calls429 === 1) {
-              throw Object.assign(new Error('{"status":"RESOURCE_EXHAUSTED","retryDelay":"2s"}'), {
-                status: 429,
-              });
-            }
-            return validInline;
+            throw Object.assign(new Error('{"status":"RESOURCE_EXHAUSTED","retryDelay":"2s"}'), {
+              status: 429,
+            });
           },
         },
       } as unknown as GoogleGenAI,
@@ -258,37 +234,34 @@ test('8) synthesizeGemini retry policy: 404 & QUOTA_DAILY stop at 1, 429 retryDe
       false,
       undefined,
       { sleepFn: async (ms) => { sleeps429.push(ms); }, now: () => 1_000_000 }
-    );
-    assert.equal(calls429, 2);
-    assert.deepEqual(sleeps429, [2000]);
-    assert.equal(pcm.rate, 24000);
+    ),
+    (err: any) => err?.attempts === 1
+  );
+  assert.equal(calls429, 1);
+  assert.deepEqual(sleeps429, []);
 
-    // Generic error -> 3 calls, sleeps [1500, 3000]
-    resetTtsPause();
-    let callsGen = 0;
-    const sleepsGen: number[] = [];
-    await assert.rejects(
-      synthesizeGemini(
-        {
-          models: {
-            generateContent: async () => {
-              callsGen += 1;
-              throw new Error('transient boom');
-            },
+  // Generic error -> 3 calls, sleeps [1500, 3000]
+  let callsGen = 0;
+  const sleepsGen: number[] = [];
+  await assert.rejects(
+    synthesizeGemini(
+      {
+        models: {
+          generateContent: async () => {
+            callsGen += 1;
+            throw new Error('transient boom');
           },
-        } as unknown as GoogleGenAI,
-        'Coach: hi',
-        false,
-        undefined,
-        { sleepFn: async (ms) => { sleepsGen.push(ms); }, now: () => 1_000_000 }
-      ),
-      (err: any) => err?.attempts === 3
-    );
-    assert.equal(callsGen, 3);
-    assert.deepEqual(sleepsGen, [1500, 3000]);
-  } finally {
-    resetTtsPause();
-  }
+        },
+      } as unknown as GoogleGenAI,
+      'Coach: hi',
+      false,
+      undefined,
+      { sleepFn: async (ms) => { sleepsGen.push(ms); }, now: () => 1_000_000 }
+    ),
+    (err: any) => err?.attempts === 3
+  );
+  assert.equal(callsGen, 3);
+  assert.deepEqual(sleepsGen, [1500, 3000]);
 });
 
 test('9) rebuild 429 keeps error=GENERATION_FAILED, records audioError & audioRetryAfter, onFailed PATCHes without pointers, superseded skips PATCH', async () => {
@@ -407,6 +380,7 @@ test('9) rebuild 429 keeps error=GENERATION_FAILED, records audioError & audioRe
       [],
       {
         force: true,
+        ignoreCooldown: true,
         runJobFn: async () => {},
       }
     );
@@ -585,41 +559,21 @@ test('11) succeeding after failure clears audioError and audioRetryAfter', async
   }
 });
 
-test('12) synthesizeGemini retryDelay bounds (60s cap, 20s default, 1s floor), shared ttsPauseUntil, and pause calculation', async () => {
-  const validInline = {
-    candidates: [
-      {
-        content: {
-          parts: [
-            {
-              inlineData: {
-                data: Buffer.alloc(240).toString('base64'),
-                mimeType: 'audio/pcm;rate=24000',
-              },
-            },
-          ],
-        },
-      },
-    ],
-  };
-
-  try {
-    // retryDelay > 60s -> capped at 60s; absent -> 20s; "0s" -> 1s floor
-    for (const [msg, expectedSleep] of [
-      ['{"status":"RESOURCE_EXHAUSTED","retryDelay":"120s"}', 60_000],
-      ['{"status":"RESOURCE_EXHAUSTED"}', 20_000],
-      ['{"status":"RESOURCE_EXHAUSTED","retryDelay":"0s"}', 1_000],
-    ] as const) {
-      resetTtsPause();
-      let calls = 0;
-      const sleeps: number[] = [];
-      await synthesizeGemini(
+test('12) synthesizeGemini 429 (QUOTA) always fails on 1st attempt with 0 sleep regardless of retryDelay', async () => {
+  for (const msg of [
+    '{"status":"RESOURCE_EXHAUSTED","retryDelay":"120s"}',
+    '{"status":"RESOURCE_EXHAUSTED"}',
+    '{"status":"RESOURCE_EXHAUSTED","retryDelay":"0s"}',
+  ]) {
+    let calls = 0;
+    const sleeps: number[] = [];
+    await assert.rejects(
+      synthesizeGemini(
         {
           models: {
             generateContent: async () => {
               calls += 1;
-              if (calls === 1) throw Object.assign(new Error(msg), { status: 429 });
-              return validInline;
+              throw Object.assign(new Error(msg), { status: 429 });
             },
           },
         } as unknown as GoogleGenAI,
@@ -627,197 +581,62 @@ test('12) synthesizeGemini retryDelay bounds (60s cap, 20s default, 1s floor), s
         false,
         undefined,
         { sleepFn: async (ms) => { sleeps.push(ms); }, now: () => 1_000_000 }
-      );
-      assert.deepEqual(sleeps, [expectedSleep]);
-    }
-
-    // Shared ttsPauseUntil: worker 1's 429 delays worker 2 before worker 2 calls generateContent
-    resetTtsPause();
-    let releaseW1Sleep!: () => void;
-    let releaseW2Sleep!: () => void;
-    let w1Calls = 0;
-    let w2Calls = 0;
-    const w2Sleeps: number[] = [];
-
-    const p1 = synthesizeGemini(
-      {
-        models: {
-          generateContent: async () => {
-            w1Calls += 1;
-            if (w1Calls === 1) {
-              throw Object.assign(new Error('RESOURCE_EXHAUSTED retryDelay:"10s"'), { status: 429 });
-            }
-            return validInline;
-          },
-        },
-      } as unknown as GoogleGenAI,
-      'Coach: one',
-      false,
-      undefined,
-      {
-        now: () => 1_000_000,
-        sleepFn: () => new Promise<void>((r) => { releaseW1Sleep = r; }),
-      }
+      ),
+      (err: any) => err?.attempts === 1
     );
-
-    // Wait one microtask so worker 1 hits 429 and enters sleepFn
-    await new Promise((r) => setTimeout(r, 10));
-
-    const p2 = synthesizeGemini(
-      {
-        models: {
-          generateContent: async () => {
-            w2Calls += 1;
-            return validInline;
-          },
-        },
-      } as unknown as GoogleGenAI,
-      'Coach: two',
-      false,
-      undefined,
-      {
-        now: () => 1_000_000,
-        sleepFn: (ms) => {
-          w2Sleeps.push(ms);
-          return new Promise<void>((r) => { releaseW2Sleep = r; });
-        },
-      }
-    );
-
-    await new Promise((r) => setTimeout(r, 10));
-    assert.deepEqual(w2Sleeps, [10_000]);
-    assert.equal(w2Calls, 0); // delayed until pause expires
-
-    releaseW1Sleep();
-    releaseW2Sleep();
-    await Promise.all([p1, p2]);
-    assert.equal(w2Calls, 1);
-
-    // Pause calculation (lastSleptUntil = nowFn() + delayMs):
-    // If another worker already raised ttsPauseUntil to 1,030,000 and this worker sleeps 5,000ms
-    // starting at 1,000,000, on the next iteration at now=1,005,000 it must still sleep the remaining 25,000ms.
-    resetTtsPause();
-    let t = 1_000_000;
-    let callsA = 0;
-    let callsB = 0;
-    const sleepsB: number[] = [];
-    let releaseASleep!: () => void;
-    let releaseBSleep!: () => void;
-    let bEnteredAttempt1 = false;
-
-    const workerB = synthesizeGemini(
-      {
-        models: {
-          generateContent: async () => {
-            callsB += 1;
-            if (callsB === 1) {
-              bEnteredAttempt1 = true;
-              await new Promise((r) => setTimeout(r, 20));
-              throw Object.assign(new Error('RESOURCE_EXHAUSTED retryDelay:"5s"'), { status: 429 });
-            }
-            return validInline;
-          },
-        },
-      } as unknown as GoogleGenAI,
-      'Coach: b',
-      false,
-      undefined,
-      {
-        now: () => t,
-        sleepFn: async (ms) => {
-          sleepsB.push(ms);
-          t += ms;
-          if (sleepsB.length === 1) await new Promise<void>((r) => { releaseBSleep = r; });
-        },
-      }
-    );
-    while (!bEnteredAttempt1) await new Promise((r) => setTimeout(r, 2));
-
-    // Worker A gets a 30s 429 while Worker B is in-flight
-    const workerA = synthesizeGemini(
-      {
-        models: {
-          generateContent: async () => {
-            callsA += 1;
-            if (callsA === 1) {
-              throw Object.assign(new Error('RESOURCE_EXHAUSTED retryDelay:"30s"'), { status: 429 });
-            }
-            return validInline;
-          },
-        },
-      } as unknown as GoogleGenAI,
-      'Coach: a',
-      false,
-      undefined,
-      {
-        now: () => 1_000_000,
-        sleepFn: () => new Promise<void>((r) => { releaseASleep = r; }),
-      }
-    );
-
-    await new Promise((r) => setTimeout(r, 40));
-    releaseBSleep();
-    releaseASleep();
-    await Promise.all([workerA, workerB]);
-    assert.deepEqual(sleepsB, [5_000, 25_000]);
-  } finally {
-    resetTtsPause();
+    assert.equal(calls, 1);
+    assert.deepEqual(sleeps, []);
   }
 });
 
 test('13) synthesizeGemini aborts per-attempt generateContent abortSignal on stepTimeoutMs', async () => {
-  resetTtsPause();
   const capturedSignals: AbortSignal[] = [];
   let attempt = 0;
-  try {
-    const pcm = await synthesizeGemini(
-      {
-        models: {
-          generateContent: async (req: any) => {
-            attempt += 1;
-            const sig = req.config.abortSignal as AbortSignal;
-            capturedSignals.push(sig);
-            if (attempt === 1) {
-              return new Promise((_, reject) => {
-                sig.addEventListener(
-                  'abort',
-                  () => reject(Object.assign(new Error('aborted by step timeout'), { name: 'TimeoutError' })),
-                  { once: true }
-                );
-              });
-            }
-            return {
-              candidates: [
-                {
-                  content: {
-                    parts: [
-                      {
-                        inlineData: {
-                          data: Buffer.alloc(240).toString('base64'),
-                          mimeType: 'audio/pcm;rate=24000',
-                        },
+  const pcm = await synthesizeGemini(
+    {
+      models: {
+        generateContent: async (req: any) => {
+          attempt += 1;
+          const sig = req.config.abortSignal as AbortSignal;
+          capturedSignals.push(sig);
+          if (attempt === 1) {
+            return new Promise((_, reject) => {
+              sig.addEventListener(
+                'abort',
+                () => reject(Object.assign(new Error('aborted by step timeout'), { name: 'TimeoutError' })),
+                { once: true }
+              );
+            });
+          }
+          return {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      inlineData: {
+                        data: Buffer.alloc(240).toString('base64'),
+                        mimeType: 'audio/pcm;rate=24000',
                       },
-                    ],
-                  },
+                    },
+                  ],
                 },
-              ],
-            };
-          },
+              },
+            ],
+          };
         },
-      } as unknown as GoogleGenAI,
-      'Coach: timeout test',
-      false,
-      undefined,
-      { stepTimeoutMs: 25, sleepFn: async () => {} }
-    );
-    assert.equal(pcm.rate, 24000);
-    assert.equal(capturedSignals.length, 2);
-    assert.equal(capturedSignals[0].aborted, true);
-    assert.notEqual(capturedSignals[0], capturedSignals[1]);
-    assert.equal(capturedSignals[1].aborted, false);
-  } finally {
-    resetTtsPause();
-  }
+      },
+    } as unknown as GoogleGenAI,
+    'Coach: timeout test',
+    false,
+    undefined,
+    { stepTimeoutMs: 25, sleepFn: async () => {} }
+  );
+  assert.equal(pcm.rate, 24000);
+  assert.equal(capturedSignals.length, 2);
+  assert.equal(capturedSignals[0].aborted, true);
+  assert.notEqual(capturedSignals[0], capturedSignals[1]);
+  assert.equal(capturedSignals[1].aborted, false);
 });
 
 test('14) startLectureJob calls onFailed on failure and skips abortCurrentJob when onFailed starts a new job', async () => {

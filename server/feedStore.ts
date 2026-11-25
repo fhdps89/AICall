@@ -31,6 +31,16 @@ import {
   sanitizeAudioError,
   type AudioBackupResult,
 } from './lectureAudioError.ts';
+import {
+  applyGenRelease,
+  decideGenAcquire,
+  sanitizeGenControl,
+  type GenAcquireReq,
+  type GenControl,
+  type GenReleaseReq,
+  type GenRemote,
+  type GenSkip,
+} from './lectureGenGuard.ts';
 
 export interface FeedBackup {
   state: FeedSyncState;
@@ -39,9 +49,14 @@ export interface FeedBackup {
 }
 
 const sha256 = (s: string) => crypto.createHash('sha256').update(s, 'utf8').digest();
+const genControlCache = new Map<string, GenControl>();
 
 export function feedDocId(secret: string): string {
   return sha256(`aicall-feed-id:${secret}`).toString('hex');
+}
+
+function gcCacheKey(secret: string, date: string): string {
+  return `${feedDocId(secret)}:${date}`;
 }
 
 export function feedCipherKey(secret: string): Buffer {
@@ -283,7 +298,9 @@ export async function persistLectureBackups(
       at: nowIso,
     };
   }
-  const { iv, data } = encryptLectureBackup(secret, clean);
+  await ensureGenControlCache(secret, clean.date);
+  const cached = genControlCache.get(gcCacheKey(secret, clean.date));
+  const { iv, data } = encryptJson(secret, cached ? { ...clean, genControl: cached } : clean);
   if (!isCurrent()) return notCurrentResult();
 
   let failResult: AudioBackupResult;
@@ -354,13 +371,20 @@ export async function saveLectureFailureBackup(
  * Write (or replace) a ready lecture script/state backup without user login.
  * Firestore rules gate writes on a valid parent feed doc and strictly typed {iv, data, updatedAt}.
  */
+async function ensureGenControlCache(secret: string, date: string): Promise<void> {
+  if (genControlCache.has(gcCacheKey(secret, date))) return;
+  await casDaysDoc(secret, date, (_raw, _gc) => ({ write: false, result: undefined }));
+}
+
 export async function saveLectureBackup(secret: string, state: LectureState): Promise<void> {
   if (!secret) return;
   const clean = sanitizeReadyLectureForBackup(state);
   if (!clean) return;
   const url = firestoreDocUrl(`feeds/${feedDocId(secret)}/days/${clean.date}`);
   if (!url) return;
-  const { iv, data } = encryptLectureBackup(secret, clean);
+  await ensureGenControlCache(secret, clean.date);
+  const cached = genControlCache.get(gcCacheKey(secret, clean.date));
+  const { iv, data } = encryptJson(secret, cached ? { ...clean, genControl: cached } : clean);
   let res: Response;
   try {
     res = await fetch(url, {
@@ -379,6 +403,177 @@ export async function saveLectureBackup(secret: string, state: LectureState): Pr
     throw new Error(err?.name ? `Firestore fetch ${err.name}` : 'Firestore fetch failed');
   }
   if (!res.ok) throw new Error(`Firestore ${res.status}`);
+}
+
+const GEN_CAS_TIMEOUT_MS = 5000;
+const GEN_CAS_MAX_ATTEMPTS = 3;
+
+type CasMutateResult<T> =
+  | { write: false; result: T }
+  | { write: true; next: GenControl; result: T };
+
+async function isCasConflict(res: Response): Promise<boolean> {
+  if (res.status === 409 || res.status === 412) return true;
+  if (res.status !== 400) return false;
+  try {
+    const text = typeof (res as any).text === 'function' ? await (res as any).text() : '';
+    if (!text) return true;
+    return /FAILED_PRECONDITION|ALREADY_EXISTS|ABORTED/i.test(text);
+  } catch {
+    return true;
+  }
+}
+
+async function casDaysDoc<T>(
+  secret: string,
+  date: string,
+  mutate: (raw: Record<string, unknown>, gc: GenControl) => CasMutateResult<T>
+): Promise<{ ok: true; gc: GenControl; result: T } | { ok: 'unavailable' } | { ok: false; conflict: true }> {
+  if (!secret || !DATE_RE.test(date)) return { ok: 'unavailable' };
+  const baseUrl = firestoreDocUrl(`feeds/${feedDocId(secret)}/days/${date}`);
+  if (!baseUrl) return { ok: 'unavailable' };
+
+  for (let attempt = 0; attempt < GEN_CAS_MAX_ATTEMPTS; attempt++) {
+    let getRes: Response;
+    try {
+      getRes = await fetch(baseUrl, { signal: AbortSignal.timeout(GEN_CAS_TIMEOUT_MS) });
+    } catch {
+      return { ok: 'unavailable' };
+    }
+
+    let exists = false;
+    let updateTime: string | undefined;
+    let raw: Record<string, unknown> = { date };
+
+    if (getRes.status === 404) {
+      exists = false;
+    } else if (!getRes.ok) {
+      return { ok: 'unavailable' };
+    } else {
+      exists = true;
+      let json: any;
+      try {
+        json = await getRes.json();
+      } catch {
+        return { ok: 'unavailable' };
+      }
+      updateTime = typeof json?.updateTime === 'string' && json.updateTime ? json.updateTime : undefined;
+      const iv = String(json?.fields?.iv?.stringValue || '');
+      const data = String(json?.fields?.data?.stringValue || '');
+      if (!iv || !data) return { ok: 'unavailable' };
+      let dec: unknown;
+      try {
+        dec = decryptJson<Record<string, unknown>>(secret, iv, data);
+      } catch {
+        return { ok: 'unavailable' };
+      }
+      if (!dec || typeof dec !== 'object') return { ok: 'unavailable' };
+      const decObj = dec as Record<string, unknown>;
+      raw = decObj.date === date ? decObj : { date };
+    }
+
+    const gc = sanitizeGenControl(raw.genControl);
+    const mut = mutate(raw, gc);
+    if (!mut.write) {
+      genControlCache.set(gcCacheKey(secret, date), gc);
+      return { ok: true, gc, result: mut.result };
+    }
+
+    const nextPayload = { ...raw, genControl: mut.next };
+    const { iv, data } = encryptJson(secret, nextPayload);
+    const nowIso = new Date().toISOString();
+    const precond = updateTime
+      ? `currentDocument.updateTime=${encodeURIComponent(updateTime)}`
+      : exists
+      ? 'currentDocument.exists=true'
+      : 'currentDocument.exists=false';
+
+    let patchRes: Response;
+    try {
+      patchRes = await fetch(`${baseUrl}?${precond}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fields: {
+            iv: { stringValue: iv },
+            data: { stringValue: data },
+            updatedAt: { stringValue: nowIso },
+          },
+        }),
+        signal: AbortSignal.timeout(GEN_CAS_TIMEOUT_MS),
+      });
+    } catch {
+      return { ok: 'unavailable' };
+    }
+
+    if (patchRes.ok) {
+      genControlCache.set(gcCacheKey(secret, date), mut.next);
+      return { ok: true, gc: mut.next, result: mut.result };
+    }
+    if (await isCasConflict(patchRes)) {
+      continue;
+    }
+    return { ok: 'unavailable' };
+  }
+
+  return { ok: false, conflict: true };
+}
+
+export async function acquireLectureGenLease(
+  secret: string,
+  date: string,
+  req: GenAcquireReq
+): Promise<
+  | { ok: true; gc: GenControl }
+  | { ok: false; skip: GenSkip; gc: GenControl }
+  | { ok: 'unavailable' }
+> {
+  const cas = await casDaysDoc<
+    { ok: true; gc: GenControl } | { ok: false; skip: GenSkip; gc: GenControl }
+  >(secret, date, (_raw, gc) => {
+    const d = decideGenAcquire(gc, req);
+    if (!d.ok) {
+      return { write: false, result: { ok: false, skip: d.skip, gc } };
+    }
+    return { write: true, next: d.next, result: { ok: true, gc: d.next } };
+  });
+  if (cas.ok === 'unavailable') return { ok: 'unavailable' };
+  if (!cas.ok) {
+    return {
+      ok: false,
+      skip: {
+        reason: 'lease',
+        at: new Date(req.now).toISOString(),
+        until: new Date(req.now + 30_000).toISOString(),
+      },
+      gc: genControlCache.get(gcCacheKey(secret, date)) ?? { genCount: 0 },
+    };
+  }
+  return cas.result;
+}
+
+export async function releaseLectureGenLease(
+  secret: string,
+  date: string,
+  rel: GenReleaseReq
+): Promise<void> {
+  const cas = await casDaysDoc<void>(secret, date, (_raw, gc) => ({
+    write: true,
+    next: applyGenRelease(gc, rel),
+    result: undefined,
+  }));
+  if (cas.ok !== true) {
+    console.warn('[feedStore] releaseLectureGenLease skipped:', cas.ok === 'unavailable' ? 'unavailable' : 'conflict');
+  }
+}
+
+export function createFeedGenRemote(secret: string): GenRemote | null {
+  if (!secret || process.env.LECTURE_GEN_LEASE === 'off') return null;
+  if (!firestoreDocUrl(`feeds/${feedDocId(secret)}/days/2000-01-01`)) return null;
+  return {
+    acquire: (date, req) => acquireLectureGenLease(secret, date, req),
+    release: (date, rel) => releaseLectureGenLease(secret, date, rel),
+  };
 }
 
 /** Read and verify a ready lecture backup for the requested date without login. */

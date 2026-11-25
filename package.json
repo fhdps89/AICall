@@ -9,7 +9,7 @@
     "start": "node server.ts",
     "lint": "tsc --noEmit",
     "preview": "vite preview --port 3000",
-    "test": "node --import tsx --test --test-force-exit tests/*.test.ts"
+    "test": "LECTURE_GEN_LEASE=off node --import tsx --test --test-force-exit tests/*.test.ts"
   },
   "dependencies": {
     "@breezystack/lamejs": "^1.2.7",

@@ -65,7 +65,12 @@ export function shouldMarkLectureDate(previousStatus: string | undefined, nextSt
 }
 
 /** Drop leftover audioUrl/listenedAt when a new generate job starts (force rebuild of a ready lecture). */
-export function shouldClearStaleLectureMedia(status: string | undefined, force: boolean): boolean {
+export function shouldClearStaleLectureMedia(
+  status: string | undefined,
+  force: boolean,
+  opts: { genSkipped?: boolean } = {}
+): boolean {
+  if (opts.genSkipped) return false;
   return force === true || status === "generating";
 }
 

@@ -8,9 +8,9 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { GoogleGenAI, Type } from '@google/genai';
 import { requireAuth, verifyFirebaseIdToken, setAfterAuthHook } from './server/auth.ts';
 import { ensureUserGeminiKey, getUserSuppliedKey } from './server/userKey.ts';
-import { saveFeedBackup, deleteFeedBackup, persistLectureBackups, saveLectureFailureBackup } from './server/feedStore.ts';
+import { saveFeedBackup, deleteFeedBackup, persistLectureBackups, saveLectureFailureBackup, createFeedGenRemote } from './server/feedStore.ts';
 import { geminiLimit, clusterLimit, checkLiveSessionStart } from './server/rateLimit.ts';
-import { DATA_DIR, startLectureJob, startLectureAudioRebuild, readLectureState, lectureAudioPath, lectureHasLocalScript, lectureStatusPayload, recordLectureBackupResult, kstToday, LECTURE_AUDIO_MISSING, LECTURE_AUDIO_SCRIPT_MISSING, LECTURE_AUDIO_REBUILD_TIMED_OUT } from './server/lecture.ts';
+import { DATA_DIR, startLectureJob, startLectureAudioRebuild, readLectureState, lectureAudioPath, lectureHasLocalScript, lectureStatusPayload, recordLectureBackupResult, kstToday, LECTURE_AUDIO_MISSING, LECTURE_AUDIO_SCRIPT_MISSING, LECTURE_AUDIO_REBUILD_TIMED_OUT, LECTURE_GEN_SKIPPED } from './server/lecture.ts';
 import type { LectureState } from './server/lecture.ts';
 import { sanitizeLectureInputs } from './server/lectureMaterial.ts';
 import { mimeForAudioFile } from './server/lectureAudioEncode.ts';
@@ -1292,6 +1292,8 @@ app.post('/api/lecture/generate', requireAuth, geminiLimit, async (req: Request,
   try {
     const state = startLectureJob(ai, uid, day, newMistakes || [], reviewMistakes || [], {
       force: isForce,
+      ignoreCooldown: isForce,
+      genRemote: feed ? createFeedGenRemote(feed.secret) : undefined,
       onReady: async (s: LectureState, isCurrent: () => boolean) => {
         const f = feedForUid(uid);
         if (!f) return;
@@ -1407,8 +1409,10 @@ app.post('/api/lecture/audio/rebuild', requireAuth, geminiLimit, (req: Request, 
           itemCount,
         }
       : undefined;
+    const feed = feedForUid(uid);
     const state = startLectureAudioRebuild(ai, uid, day, payload, {
       ignoreCooldown: true,
+      genRemote: feed ? createFeedGenRemote(feed.secret) : undefined,
       onReady: async (s, isCurrent) => {
         const f = feedForUid(uid);
         if (!f) return;
@@ -1435,7 +1439,13 @@ app.post('/api/lecture/audio/rebuild', requireAuth, geminiLimit, (req: Request, 
       res.status(409).json({ ok: false, error: '강의 대본이 없어 오디오를 다시 만들 수 없어요.', code: LECTURE_AUDIO_SCRIPT_MISSING, lecture: state });
       return;
     }
-    if (state.audioStatus === 'missing' && state.error && state.error !== 'GENERATION_FAILED' && state.error !== LECTURE_AUDIO_REBUILD_TIMED_OUT) {
+    if (
+      state.audioStatus === 'missing' &&
+      state.error &&
+      state.error !== 'GENERATION_FAILED' &&
+      state.error !== LECTURE_AUDIO_REBUILD_TIMED_OUT &&
+      state.error !== LECTURE_GEN_SKIPPED
+    ) {
       apiError(res, 400, 'BAD_REQUEST', '강의 대본 형식이 올바르지 않아요.');
       return;
     }
