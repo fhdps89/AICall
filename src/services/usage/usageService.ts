@@ -80,6 +80,26 @@ export interface UsageCostBreakdown {
   total: number;
 }
 
+type UsageCostComponentKey = Exclude<keyof UsageCostBreakdown, "total">;
+
+const USAGE_COST_COMPONENT_LABELS = {
+  live: "통화 비용",
+  qaLive: "QA 통화 비용",
+  stt: "받아쓰기 비용",
+  text: "텍스트 비용",
+  tts: "강의 음성 TTS 비용",
+  sie: "실수 묶기 임베딩 비용",
+} as const satisfies Record<UsageCostComponentKey, string>;
+
+/** Ordered breakdown components (excluding total) shown in dev-mode usage cost tables. */
+export const USAGE_COST_COMPONENTS: ReadonlyArray<{
+  key: UsageCostComponentKey;
+  label: string;
+}> = (Object.keys(USAGE_COST_COMPONENT_LABELS) as UsageCostComponentKey[]).map((key) => ({
+  key,
+  label: USAGE_COST_COMPONENT_LABELS[key],
+}));
+
 function nonNeg(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
 }
