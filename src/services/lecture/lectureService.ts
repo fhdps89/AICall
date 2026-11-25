@@ -329,7 +329,9 @@ export async function startLecture(uid: string, date = getKSTToday(), force = fa
     ttsEngine: lecture.ttsEngine,
     createdAt: lecture.createdAt,
     updatedAt: new Date().toISOString(),
-    ...(shouldClearStaleLectureMedia(lecture.status, force)
+    ...(shouldClearStaleLectureMedia(lecture.status, force, {
+        genSkipped: lecture.error === "GEN_SKIPPED",
+      })
       ? { audioUrl: null, listenedAt: null }
       : {}),
     ...(lecture.error ? { error: lecture.error } : {}),

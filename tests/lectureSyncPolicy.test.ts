@@ -53,6 +53,7 @@ test('stale lecture media is cleared when force-rebuilding or a new job is gener
   assert.equal(shouldClearStaleLectureMedia('ready', false), false);
   assert.equal(shouldClearStaleLectureMedia('failed', false), false);
   assert.equal(shouldClearStaleLectureMedia(undefined, false), false);
+  assert.equal(shouldClearStaleLectureMedia('ready', true, { genSkipped: true }), false);
 });
 
 

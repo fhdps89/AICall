@@ -49,6 +49,17 @@ import {
   type MeasuredLecture,
   type MeasuredLectureItem,
 } from './lectureDuration.ts';
+import {
+  GEN_LEASE_MARGIN_MS,
+  acquireGenSlot,
+  acquireGenSlotSync,
+  peekGenGate,
+  readGenDiag,
+  type GenDiag,
+  type GenRemote,
+  type GenSkip,
+  type GenSlot,
+} from './lectureGenGuard.ts';
 
 export type { LectureMistakeInput, LectureScriptItem } from './lectureMaterial.ts';
 export {
@@ -78,8 +89,54 @@ export const LECTURE_STEP_TIMEOUT_MS = 90 * 1000;
 export const LECTURE_AUDIO_REBUILD_TIMEOUT_MS = 30 * 60 * 1000;
 export const LECTURE_AUDIO_RETRY_COOLDOWN_MS = 30 * 60 * 1000;
 export const LECTURE_AUDIO_REBUILD_TIMED_OUT = 'AUDIO_REBUILD_TIMED_OUT';
+export const LECTURE_GEN_SKIPPED = 'GEN_SKIPPED';
 const JOB_TIMED_OUT_RE = /^(lecture job|audio rebuild) timed out/;
 const SAFE_ERR_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,40}$/;
+
+function userDirNoMkdir(uid: string): string {
+  const safe = uid.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return path.join(LECTURE_DIR, safe);
+}
+
+export function lectureGenDiag(uid: string, date: string, now = Date.now()): GenDiag {
+  safeDate(date);
+  return readGenDiag(userDirNoMkdir(uid), date, now);
+}
+
+export function peekLectureGenGate(
+  uid: string,
+  date: string,
+  now = Date.now(),
+  opts: { ignoreCooldown?: boolean } = {}
+): GenSkip | null {
+  safeDate(date);
+  return peekGenGate(userDirNoMkdir(uid), date, now, opts);
+}
+
+export function lectureInputIdSet(lecture: LectureState): Set<string> {
+  if (lecture.inputNewIds) {
+    return new Set([...lecture.inputNewIds, ...(lecture.inputReviewIds ?? [])]);
+  }
+  return new Set([
+    ...(lecture.newMistakeIds || []),
+    ...(lecture.reviewMistakeIds || []),
+    ...(lecture.inputReviewIds ?? []),
+  ]);
+}
+
+function scriptCoversInputs(existing: LectureState, newList: LectureMistakeInput[]): boolean {
+  const ids = lectureInputIdSet(existing);
+  return newList.every((m) => ids.has(m.id));
+}
+
+class GenSkipError extends Error {
+  skip: GenSkip;
+  constructor(skip: GenSkip) {
+    super(LECTURE_GEN_SKIPPED);
+    this.name = 'GenSkipError';
+    this.skip = skip;
+  }
+}
 
 function safeErrName(err: unknown): string | undefined {
   if (!err || typeof err !== 'object') return undefined;
@@ -470,6 +527,7 @@ export interface StartLectureAudioRebuildOpts {
   now?: number;
   ignoreCooldown?: boolean;
   clearAudioBackupPointers?: boolean;
+  genRemote?: GenRemote | null;
   /** Test hook: shorten the audio rebuild cap. */
   rebuildTimeoutMs?: number;
 }
@@ -668,6 +726,32 @@ export function startLectureAudioRebuild(
     abortCurrentJob(key);
   }
 
+  const dir = userDirNoMkdir(uid);
+  const blocked = peekGenGate(dir, date, nowMs, { ignoreCooldown: Boolean(opts.ignoreCooldown) });
+  if (blocked) {
+    return existing
+      ? {
+          ...existing,
+          audioStatus: 'missing',
+          error: LECTURE_GEN_SKIPPED,
+          audioRetryAfter: blocked.until ?? existing.audioRetryAfter,
+        }
+      : {
+          uid,
+          date,
+          status: 'failed',
+          newMistakeIds: [],
+          reviewMistakeIds: [],
+          ttsEngine: 'gemini',
+          audioStatus: 'missing',
+          error: LECTURE_GEN_SKIPPED,
+          audioRetryAfter:
+            blocked.until ?? new Date(nowMs + LECTURE_AUDIO_RETRY_COOLDOWN_MS).toISOString(),
+          createdAt: new Date(nowMs).toISOString(),
+          updatedAt: new Date(nowMs).toISOString(),
+        };
+  }
+
   let scriptItems = existing?.script;
   let title = existing?.title;
   let coachNote = existing?.coachNote;
@@ -784,33 +868,87 @@ export function startLectureAudioRebuild(
     epoch,
     signal: ac.signal,
     write: (st) => writeLectureStateForJob(st, key, epoch),
+    billable: { calls: 0 },
   };
   ctx.write(state);
   running.add(key);
   const cap = opts.rebuildTimeoutMs ?? LECTURE_AUDIO_REBUILD_TIMEOUT_MS;
-  const work = renderAndSaveAudio(
-    ai,
-    state,
-    { title: state.title || '오늘 아침 강의', items: scriptItems, coachNote: state.coachNote || '' },
-    opts.synthesizeFn,
-    ctx,
-    opts.encodeFn
-  );
+  let slot: GenSlot | undefined;
+  let releaseScheduled = false;
+  const work = !opts.genRemote
+    ? (() => {
+        const r = acquireGenSlotSync(dir, date, {
+          kind: 'rebuild',
+          ttlMs: cap + GEN_LEASE_MARGIN_MS,
+          ignoreCooldown: Boolean(opts.ignoreCooldown),
+          now: opts.now ?? Date.now(),
+        });
+        if (!r.ok) return Promise.reject(new GenSkipError(r.skip));
+        slot = r.slot;
+        slot.billable = ctx.billable!;
+        return renderAndSaveAudio(
+          ai,
+          state,
+          { title: state.title || '오늘 아침 강의', items: scriptItems!, coachNote: state.coachNote || '' },
+          opts.synthesizeFn,
+          ctx,
+          opts.encodeFn
+        );
+      })()
+    : (async () => {
+        const r = await acquireGenSlot(dir, date, {
+          kind: 'rebuild',
+          ttlMs: cap + GEN_LEASE_MARGIN_MS,
+          remote: opts.genRemote,
+          ignoreCooldown: Boolean(opts.ignoreCooldown),
+          now: opts.now ?? Date.now(),
+        });
+        if (!r.ok) throw new GenSkipError(r.skip);
+        slot = r.slot;
+        slot.billable = ctx.billable!;
+        if (ac.signal.aborted || !isCurrentJob(key, epoch)) return;
+        await renderAndSaveAudio(
+          ai,
+          state,
+          { title: state.title || '오늘 아침 강의', items: scriptItems!, coachNote: state.coachNote || '' },
+          opts.synthesizeFn,
+          ctx,
+          opts.encodeFn
+        );
+      })();
   const done = withTimeout(work, cap, 'audio rebuild')
     .then(
       async () => {
         const currentFn = () => isCurrentJob(key, epoch);
         if (!currentFn()) return;
-        if (!opts.onReady) return;
-        try {
-          await opts.onReady(state, currentFn);
-        } catch (err: any) {
-          console.warn('[Lecture] rebuild onReady failed:', err?.name || 'error');
+        running.delete(key);
+        if (jobAbort.get(key) === ac) jobAbort.delete(key);
+        if (opts.onReady) {
+          try {
+            await opts.onReady(state, currentFn);
+          } catch (err: any) {
+            console.warn('[Lecture] rebuild onReady failed:', err?.name || 'error');
+          }
         }
+        releaseScheduled = true;
+        await slot?.release({ success: true });
       },
-      (err) => {
+      async (err) => {
         const currentFn = () => isCurrentJob(key, epoch);
         if (!currentFn()) return;
+        if (err instanceof GenSkipError) {
+          running.delete(key);
+          rebuildDone.delete(key);
+          if (jobAbort.get(key) === ac) jobAbort.delete(key);
+          state.audioStatus = 'missing';
+          state.error = LECTURE_GEN_SKIPPED;
+          state.audioRetryAfter =
+            err.skip.until ?? new Date(Date.now() + LECTURE_AUDIO_RETRY_COOLDOWN_MS).toISOString();
+          delete state.audioRebuildStartedAt;
+          delete state.audioProgress;
+          ctx.write(state);
+          return;
+        }
         const timedOut = JOB_TIMED_OUT_RE.test(String(err?.message || err));
         const failedNowMs = Date.now();
         const failedAtIso = new Date(failedNowMs).toISOString();
@@ -845,22 +983,34 @@ export function startLectureAudioRebuild(
           rebuildDone.delete(key);
           if (jobAbort.get(key) === ac) jobAbort.delete(key);
         }
+        releaseScheduled = true;
         if (opts.onFailed) {
+          let onFailPromise: Promise<unknown>;
           try {
-            Promise.resolve(opts.onFailed(state, currentFn)).catch((onFailErr: any) => {
+            onFailPromise = Promise.resolve(opts.onFailed(state, currentFn)).catch((onFailErr: any) => {
               console.warn('[Lecture] rebuild onFailed failed:', onFailErr?.name || 'error');
             });
           } catch (onFailErr: any) {
             console.warn('[Lecture] rebuild onFailed failed:', onFailErr?.name || 'error');
+            onFailPromise = Promise.resolve();
           }
+          void onFailPromise.finally(() =>
+            slot?.release({ success: false, code: classified.code, now: failedNowMs })
+          );
+        } else {
+          await slot?.release({ success: false, code: classified.code, now: failedNowMs });
         }
       }
     )
-    .finally(() => {
+    .finally(async () => {
       if (isCurrentJob(key, epoch)) {
         running.delete(key);
         rebuildDone.delete(key);
         if (jobAbort.get(key) === ac) jobAbort.delete(key);
+      }
+      if (!releaseScheduled) {
+        releaseScheduled = true;
+        await slot?.release({ success: false });
       }
     });
   rebuildDone.set(key, done.then(() => undefined));
@@ -876,6 +1026,7 @@ export interface LectureJobContext {
   epoch: number;
   signal: AbortSignal;
   write: (state: LectureState) => boolean;
+  billable?: { calls: number };
 }
 
 function bumpJobEpoch(key: string): number {
@@ -890,6 +1041,7 @@ function abortCurrentJob(key: string): void {
     jobAbort.delete(key);
     try { ac.abort(); } catch { /* ignore */ }
   }
+  running.delete(key);
   rebuildDone.delete(key);
   bumpJobEpoch(key);
 }
@@ -934,6 +1086,9 @@ export type LectureGenerateScriptFn = (
 
 export interface StartLectureJobOpts {
   force?: boolean;
+  ignoreCooldown?: boolean;
+  genRemote?: GenRemote | null;
+  now?: number;
   /** Test hook: shorten the whole-job cap. */
   jobTimeoutMs?: number;
   /** Called once when the job finishes with status==='ready' and is still the current job. */
@@ -993,7 +1148,8 @@ export function startLectureJob(
 ): LectureState {
   safeDate(date);
   const key = `${uid}:${date}`;
-  const existing = readLectureState(uid, date);
+  const nowMs = opts.now ?? Date.now();
+  const existing = readLectureState(uid, date, nowMs);
   const { newList, reviewList } = sanitizeLectureInputs(newMistakes, reviewMistakes);
 
   if (newList.length + reviewList.length === 0) {
@@ -1001,7 +1157,7 @@ export function startLectureJob(
       return existing;
     }
     const engine = process.env.LECTURE_TTS_ENGINE === 'elevenlabs' ? 'elevenlabs' : 'gemini';
-    const now = new Date().toISOString();
+    const now = new Date(nowMs).toISOString();
     const emptyState: LectureState = {
       uid,
       date,
@@ -1025,12 +1181,63 @@ export function startLectureJob(
   if (existing?.status === 'ready' && !opts.force && !lectureRebuildInFlight(uid, date)) {
     return existing;
   }
+
+  const dir = userDirNoMkdir(uid);
+  const blocked = peekGenGate(dir, date, nowMs, { ignoreCooldown: Boolean(opts.ignoreCooldown) });
+  if (blocked) {
+    const engine = process.env.LECTURE_TTS_ENGINE === 'elevenlabs' ? 'elevenlabs' : 'gemini';
+    const nowIso = new Date(nowMs).toISOString();
+    const retryAfter =
+      blocked.until ?? new Date(nowMs + LECTURE_AUDIO_RETRY_COOLDOWN_MS).toISOString();
+    if (existing) {
+      return {
+        ...existing,
+        error: LECTURE_GEN_SKIPPED,
+        audioRetryAfter: retryAfter,
+      };
+    }
+    return {
+      uid,
+      date,
+      status: 'failed',
+      newMistakeIds: newList.map((m) => m.id),
+      reviewMistakeIds: reviewList.map((m) => m.id),
+      inputNewIds: newList.map((m) => m.id),
+      inputReviewIds: reviewList.map((m) => m.id),
+      ttsEngine: engine,
+      error: LECTURE_GEN_SKIPPED,
+      audioRetryAfter: retryAfter,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+  }
+
   if (running.has(key)) {
     abortCurrentJob(key);
   }
 
+  if (
+    !opts.force &&
+    !opts.runJobFn &&
+    existing?.status === 'failed' &&
+    Array.isArray(existing.script) &&
+    existing.script.length > 0 &&
+    scriptCoversInputs(existing, newList)
+  ) {
+    return startLectureAudioRebuild(ai, uid, date, undefined, {
+      synthesizeFn: opts.synthesizeFn,
+      encodeFn: opts.encodeFn,
+      onReady: opts.onReady,
+      onFailed: opts.onFailed,
+      genRemote: opts.genRemote,
+      ignoreCooldown: opts.ignoreCooldown,
+      now: opts.now,
+    });
+  }
+
+  const snapshot = existing;
   const engine = process.env.LECTURE_TTS_ENGINE === 'elevenlabs' ? 'elevenlabs' : 'gemini';
-  const now = new Date().toISOString();
+  const now = new Date(nowMs).toISOString();
   const inputNewIds = newList.map((m) => m.id);
   const inputReviewIds = reviewList.map((m) => m.id);
   const inputLatestCreatedAt = maxCreatedAtIso([...newList, ...reviewList]);
@@ -1056,33 +1263,91 @@ export function startLectureJob(
     epoch,
     signal: ac.signal,
     write: (st) => writeLectureStateForJob(st, key, epoch),
+    billable: { calls: 0 },
   };
   ctx.write(state);
   running.add(key);
-  const work = opts.runJobFn
-    ? opts.runJobFn(ai, state, newList, reviewList, ctx)
-    : runJob(ai, state, newList, reviewList, ctx, {
-        generateScriptFn: opts.generateScriptFn,
-        synthesizeFn: opts.synthesizeFn,
-        encodeFn: opts.encodeFn,
-      });
   const timeoutMs = opts.jobTimeoutMs ?? LECTURE_JOB_TIMEOUT_MS;
+  let slot: GenSlot | undefined;
+  let releaseScheduled = false;
+  const work = !opts.genRemote
+    ? (() => {
+        const r = acquireGenSlotSync(dir, date, {
+          kind: 'job',
+          ttlMs: timeoutMs + GEN_LEASE_MARGIN_MS,
+          ignoreCooldown: Boolean(opts.ignoreCooldown),
+          now: opts.now ?? Date.now(),
+        });
+        if (!r.ok) return Promise.reject(new GenSkipError(r.skip));
+        slot = r.slot;
+        slot.billable = ctx.billable!;
+        return opts.runJobFn
+          ? opts.runJobFn(ai, state, newList, reviewList, ctx)
+          : runJob(ai, state, newList, reviewList, ctx, {
+              generateScriptFn: opts.generateScriptFn,
+              synthesizeFn: opts.synthesizeFn,
+              encodeFn: opts.encodeFn,
+            });
+      })()
+    : (async () => {
+        const r = await acquireGenSlot(dir, date, {
+          kind: 'job',
+          ttlMs: timeoutMs + GEN_LEASE_MARGIN_MS,
+          remote: opts.genRemote,
+          ignoreCooldown: Boolean(opts.ignoreCooldown),
+          now: opts.now ?? Date.now(),
+        });
+        if (!r.ok) throw new GenSkipError(r.skip);
+        slot = r.slot;
+        slot.billable = ctx.billable!;
+        if (ac.signal.aborted || !isCurrentJob(key, epoch)) return;
+        await (opts.runJobFn
+          ? opts.runJobFn(ai, state, newList, reviewList, ctx)
+          : runJob(ai, state, newList, reviewList, ctx, {
+              generateScriptFn: opts.generateScriptFn,
+              synthesizeFn: opts.synthesizeFn,
+              encodeFn: opts.encodeFn,
+            }));
+      })();
   withTimeout(work, timeoutMs, 'lecture job')
     .then(
       async () => {
         const currentFn = () => isCurrentJob(key, epoch);
         if (!currentFn()) return;
+        running.delete(key);
+        if (jobAbort.get(key) === ac) jobAbort.delete(key);
         if (state.status !== 'ready') return;
-        if (!opts.onReady) return;
-        try {
-          await opts.onReady(state, currentFn);
-        } catch (err: any) {
-          console.warn('[Lecture] onReady failed:', err?.message || err);
+        if (opts.onReady) {
+          try {
+            await opts.onReady(state, currentFn);
+          } catch (err: any) {
+            console.warn('[Lecture] onReady failed:', err?.message || err);
+          }
         }
+        releaseScheduled = true;
+        await slot?.release({ success: true });
       },
-      (err) => {
+      async (err) => {
         const currentFn = () => isCurrentJob(key, epoch);
         if (!currentFn()) return;
+        if (err instanceof GenSkipError) {
+          running.delete(key);
+          if (jobAbort.get(key) === ac) jobAbort.delete(key);
+          if (snapshot?.status === 'ready') {
+            ctx.write(snapshot);
+          } else {
+            const skipUntil =
+              err.skip.until ??
+              new Date(Date.now() + LECTURE_AUDIO_RETRY_COOLDOWN_MS).toISOString();
+            ctx.write({
+              ...(snapshot ?? state),
+              status: 'failed',
+              error: LECTURE_GEN_SKIPPED,
+              audioRetryAfter: skipUntil,
+            });
+          }
+          return;
+        }
         const timedOut = JOB_TIMED_OUT_RE.test(String(err?.message || err));
         const failedNowMs = Date.now();
         const failedAtIso = new Date(failedNowMs).toISOString();
@@ -1115,24 +1380,36 @@ export function startLectureJob(
         state.audioError = classified;
         state.audioRetryAfter = new Date(failedNowMs + cooldownMsFor(classified.code)).toISOString();
         writeLectureState(state);
+        releaseScheduled = true;
         if (opts.onFailed) {
+          let onFailPromise: Promise<unknown>;
           try {
-            Promise.resolve(opts.onFailed(state, currentFn)).catch((onFailErr: any) => {
+            onFailPromise = Promise.resolve(opts.onFailed(state, currentFn)).catch((onFailErr: any) => {
               console.warn('[Lecture] onFailed failed:', onFailErr?.name || 'error');
             });
           } catch (onFailErr: any) {
             console.warn('[Lecture] onFailed failed:', onFailErr?.name || 'error');
+            onFailPromise = Promise.resolve();
           }
+          void onFailPromise.finally(() =>
+            slot?.release({ success: false, code: classified.code, now: failedNowMs })
+          );
+        } else {
+          await slot?.release({ success: false, code: classified.code, now: failedNowMs });
         }
         if (timedOut && currentFn()) {
           abortCurrentJob(key);
         }
       }
     )
-    .finally(() => {
+    .finally(async () => {
       if (isCurrentJob(key, epoch)) {
         running.delete(key);
         if (jobAbort.get(key) === ac) jobAbort.delete(key);
+      }
+      if (!releaseScheduled) {
+        releaseScheduled = true;
+        await slot?.release({ success: false });
       }
     });
   return state;
@@ -1325,12 +1602,6 @@ function attachErrorMeta(
   return out;
 }
 
-let ttsPauseUntil = 0;
-
-export function resetTtsPause(): void {
-  ttsPauseUntil = 0;
-}
-
 export interface SynthesizeGeminiOpts {
   sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>;
   now?: () => number;
@@ -1350,7 +1621,6 @@ export async function synthesizeGemini(
   opts: SynthesizeGeminiOpts = {}
 ): Promise<Pcm> {
   const sleepFn = opts.sleepFn || defaultSleep;
-  const nowFn = opts.now || Date.now;
   const stepTimeoutMs = opts.stepTimeoutMs ?? LECTURE_STEP_TIMEOUT_MS;
   const speechConfig: any = twoSpeakers
     ? {
@@ -1363,17 +1633,8 @@ export async function synthesizeGemini(
       }
     : { voiceConfig: { prebuiltVoiceConfig: { voiceName: VOICE_COACH } } };
   let lastErr: any;
-  let lastSleptUntil = 0;
   for (let attempt = 0; attempt < 3; attempt++) {
     if (signal?.aborted) throw new Error('lecture job superseded');
-    const nowMs = nowFn();
-    const waitBase = Math.max(nowMs, lastSleptUntil);
-    if (ttsPauseUntil > waitBase) {
-      const waitMs = Math.min(60_000, ttsPauseUntil - waitBase);
-      await withAbort(sleepFn(waitMs, signal), signal);
-      lastSleptUntil = waitBase + waitMs;
-      if (signal?.aborted) throw new Error('lecture job superseded');
-    }
     const timeoutSig = AbortSignal.timeout(stepTimeoutMs);
     const stepSig = signal ? AbortSignal.any([signal, timeoutSig]) : timeoutSig;
     try {
@@ -1400,17 +1661,7 @@ export async function synthesizeGemini(
       if (!retryableFor(classified.code) || attempt === 2) {
         throw lastErr;
       }
-      let delayMs: number;
-      if (classified.code === 'QUOTA') {
-        const delaySec =
-          classified.retryDelaySec !== null ? Math.min(60, Math.max(1, classified.retryDelaySec)) : 20;
-        delayMs = delaySec * 1000;
-        const until = nowFn() + delayMs;
-        ttsPauseUntil = Math.max(ttsPauseUntil, until);
-        lastSleptUntil = until;
-      } else {
-        delayMs = 1500 * (attempt + 1);
-      }
+      const delayMs = 1500 * (attempt + 1);
       await withAbort(sleepFn(delayMs, signal), signal);
     }
   }
@@ -1465,7 +1716,27 @@ function wavFromPcm(pcm: Buffer, rate: number): Buffer {
   return Buffer.concat([header, pcm]);
 }
 
-const drillIntroCache = new Map<string, Buffer>();
+function pruneSegmentCache(uid: string, keepDate: string, keepFp: string): void {
+  try {
+    const segRoot = path.join(userDir(uid), 'segcache');
+    if (!fs.existsSync(segRoot)) return;
+    for (const d of fs.readdirSync(segRoot)) {
+      const datePath = path.join(segRoot, d);
+      if (d !== keepDate) {
+        fs.rmSync(datePath, { recursive: true, force: true });
+        continue;
+      }
+      if (!fs.statSync(datePath).isDirectory()) continue;
+      for (const f of fs.readdirSync(datePath)) {
+        if (f !== keepFp) {
+          fs.rmSync(path.join(datePath, f), { recursive: true, force: true });
+        }
+      }
+    }
+  } catch {
+    // best-effort pruning
+  }
+}
 
 async function runJob(
   ai: GoogleGenAI,
@@ -1492,8 +1763,10 @@ async function runJob(
   } catch (err) {
     throw attachErrorMeta(err, { stage: 'script', attempts: 0, completed: 0, total: 0 });
   }
+  if (ctx?.billable) ctx.billable.calls += 1;
   if (ctx && (ctx.signal.aborted || !isCurrentJob(ctx.key, ctx.epoch))) return;
   state.title = script.title;
+  state.script = script.items;
   state.coachNote = script.coachNote;
   state.itemCount = script.items.length;
   state.newMistakeIds = script.items.filter((it) => it.kind === 'new').map((it) => it.mistakeId);
@@ -1527,6 +1800,57 @@ async function renderAndSaveAudio(
   const items = script.items.map(cleanLectureScriptItem);
   const plan = buildLectureSpeechPlan(title, items, coachNote, state.date);
 
+  const fp = crypto
+    .createHash('sha256')
+    .update(
+      JSON.stringify({
+        v: 1,
+        model: LECTURE_TTS_MODEL,
+        voices: [VOICE_COACH, VOICE_PARTNER],
+        style: TTS_STYLE,
+        engine: state.ttsEngine,
+        rate: RATE,
+        plan: plan.map((s) =>
+          s.kind === 'speech' ? ['s', s.role ?? '', s.itemIndex ?? -1, s.two ? 1 : 0, s.text] : ['q', s.sec]
+        ),
+      })
+    )
+    .digest('hex')
+    .slice(0, 24);
+  pruneSegmentCache(state.uid, state.date, fp);
+  const segDir = path.join(userDir(state.uid), 'segcache', safeDate(state.date), fp);
+
+  const cachedSynth = async (segKey: string | number, text: string, two: boolean): Promise<Buffer> => {
+    const hash = crypto
+      .createHash('sha256')
+      .update(`${two ? 2 : 1}|${text}`)
+      .digest('hex')
+      .slice(0, 16);
+    const filePath = path.join(segDir, `${segKey}-${hash}.pcm`);
+    try {
+      if (fs.existsSync(filePath)) {
+        const cached = fs.readFileSync(filePath);
+        if (cached.length > 0 && cached.length % 2 === 0) {
+          return cached;
+        }
+      }
+    } catch {
+      // ignore cache read failures and re-synthesize
+    }
+    const pcm = resample(await synth(ai, state.ttsEngine, text, two, ctx?.signal), RATE);
+    if (ctx?.billable) ctx.billable.calls += 1;
+    const tmpPath = `${filePath}.${process.pid}.${crypto.randomUUID().slice(0, 8)}.tmp`;
+    try {
+      fs.mkdirSync(segDir, { recursive: true });
+      fs.writeFileSync(tmpPath, pcm);
+      fs.renameSync(tmpPath, filePath);
+    } catch (err: any) {
+      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+      console.warn('[Lecture] segment cache write failed:', err?.name || 'error');
+    }
+    return pcm;
+  };
+
   const speechTotal = plan.filter((s) => s.kind === 'speech').length;
   let speechDone = 0;
   let chars = 0;
@@ -1536,12 +1860,14 @@ async function renderAndSaveAudio(
   const pcmParts: Buffer[] = new Array(plan.length);
   let cursor = 0;
   let aborted = false;
+  let firstErr: unknown = null;
   const workers = Math.min(2, speechTotal || 1);
   const worker = async () => {
     while (!aborted) {
       if (ctx && (ctx.signal.aborted || !isCurrentJob(ctx.key, ctx.epoch))) {
         aborted = true;
-        throw new Error('lecture job superseded');
+        if (!firstErr) firstErr = new Error('lecture job superseded');
+        return;
       }
       const i = cursor++;
       if (i >= plan.length) return;
@@ -1552,17 +1878,19 @@ async function renderAndSaveAudio(
       }
       chars += seg.text.length;
       try {
-        pcmParts[i] = resample(await synth(ai, state.ttsEngine, seg.text, seg.two, ctx?.signal), RATE);
+        pcmParts[i] = await cachedSynth(i, seg.text, seg.two);
       } catch (err) {
         aborted = true;
-        throw attachErrorMeta(err, {
-          stage: 'tts',
-          attempts: 1,
-          completed: speechDone,
-          total: speechTotal,
-        });
+        if (!firstErr) {
+          firstErr = attachErrorMeta(err, {
+            stage: 'tts',
+            attempts: 1,
+            completed: speechDone,
+            total: speechTotal,
+          });
+        }
+        return;
       }
-      if (aborted) return;
       speechDone += 1;
       state.audioProgress = { completed: speechDone, total: speechTotal };
       state.updatedAt = new Date().toISOString();
@@ -1570,6 +1898,7 @@ async function renderAndSaveAudio(
     }
   };
   await Promise.all(Array.from({ length: workers }, () => worker()));
+  if (firstErr) throw firstErr;
   ensureCurrent();
 
   // Map synthesized speech segments into MeasuredLecture for N1 duration fitting
@@ -1627,13 +1956,14 @@ async function renderAndSaveAudio(
     let drillIntroBuf: Buffer | undefined;
     const extras: Extras = {};
 
-    const synthExtraWithRetry = async (text: string): Promise<Buffer | null> => {
+    const synthExtraWithRetry = async (segKey: 'recap' | 'drill', text: string): Promise<Buffer | null> => {
       for (let attempt = 0; attempt < 2; attempt++) {
         ensureCurrent();
         try {
-          return resample(await synth(ai, state.ttsEngine, text, false, ctx?.signal), RATE);
+          return await cachedSynth(segKey, text, false);
         } catch (err) {
           if (ctx && (ctx.signal.aborted || !isCurrentJob(ctx.key, ctx.epoch))) throw err;
+          if (!retryableFor(classifyLectureAudioError(err, { stage: 'tts' }).code)) return null;
           if (attempt === 1) return null;
         }
       }
@@ -1643,7 +1973,7 @@ async function renderAndSaveAudio(
     if (fitRes.want === 'recap') {
       const keptSet = new Set(fitRes.keptItems);
       const recapText = buildRecapText(items.filter((_, idx) => keptSet.has(idx)));
-      const buf = await synthExtraWithRetry(recapText);
+      const buf = await synthExtraWithRetry('recap', recapText);
       if (buf) {
         recapBuf = buf;
         chars += recapText.length;
@@ -1654,21 +1984,13 @@ async function renderAndSaveAudio(
       fitRes = fitLectureTimeline(measured, extras);
     } else if (fitRes.want === 'drillIntro') {
       ensureCurrent();
-      const cacheKey = `${DRILL_INTRO_TEXT}::${VOICE_COACH}::${state.ttsEngine}`;
-      const cached = !synthesizeFn ? drillIntroCache.get(cacheKey) : undefined;
-      if (cached) {
-        drillIntroBuf = cached;
-        extras.drillIntro = Math.floor(cached.length / 2);
+      const buf = await synthExtraWithRetry('drill', DRILL_INTRO_TEXT);
+      if (buf) {
+        drillIntroBuf = buf;
+        chars += DRILL_INTRO_TEXT.length;
+        extras.drillIntro = Math.floor(buf.length / 2);
       } else {
-        const buf = await synthExtraWithRetry(DRILL_INTRO_TEXT);
-        if (buf) {
-          drillIntroBuf = buf;
-          chars += DRILL_INTRO_TEXT.length;
-          if (!synthesizeFn) drillIntroCache.set(cacheKey, buf);
-          extras.drillIntro = Math.floor(buf.length / 2);
-        } else {
-          extras.drillIntro = 'failed';
-        }
+        extras.drillIntro = 'failed';
       }
       fitRes = fitLectureTimeline(measured, extras);
     }
@@ -1745,4 +2067,9 @@ async function renderAndSaveAudio(
   delete state.audioRebuildStartedAt;
   delete state.audioRebuildFailedAt;
   write(state);
+  try {
+    fs.rmSync(path.join(userDir(state.uid), 'segcache', state.date), { recursive: true, force: true });
+  } catch {
+    // best-effort: the ready audio file is the source of truth
+  }
 }

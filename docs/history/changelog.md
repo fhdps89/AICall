@@ -4,6 +4,24 @@
 
 ---
 
+### [2026-11-25 KST] v2.10.0 이후 수정(미배포) — 강의 생성 비용 가드 (브랜치 `englead/lecture-gen-cost-20261125`)
+- **배경**: 평일 Flash TTS 지출이 정상 1편 대비 약 10배 수준이었고, 재시작·Republish 후 전체 TTS 재생성(A), 중간 실패 시 성공 세그먼트 폐기 및 대본부터 재시작(B·D), 다중 인스턴스 동시 생성 및 `force` 중단 499(C·G), 429 분당 QUOTA 세그먼트 재시도·전역 pause(H) 등 중복 호출 경로(A~H)가 겹쳐 낭비가 발생했다.
+- **수정**:
+  - `server/lectureGenGuard.ts`(신규): 단일 게이트 모듈(`decideGenAcquire`, `applyGenRelease`, `sanitizeGenControl`, `peekGenGate`, `acquireGenSlot`, `acquireGenSlotSync`, `readGenDiag`, `lectureDailyGenCap`). 날짜별 생성 락(인프로세스 + `GenRemote` 리스), 일일 생성 상한 `LECTURE_DAILY_GEN_CAP`(기본 2, 1..10 범위, 과금 호출 0인 실패·전체 캐시 적중은 refund), 즉시 쿨다운 기록. 상태는 `.data/lectures/{uid}/{date}.gen.json`에 저장.
+  - `server/lectureAudioError.ts`: `retryableFor`에서 `QUOTA`를 제외(`cooldownMsFor` 30분/6시간 유지).
+  - `server/lecture.ts`: `LECTURE_GEN_SKIPPED`, `lectureGenDiag`, `lectureInputIdSet`(`feed.ts`에서 이관), `scriptCoversInputs`, `peekLectureGenGate` 추가. `startLectureJob`·`startLectureAudioRebuild`가 `peekGenGate` 막힘 시 기존 ready·오디오를 보존하고 `abortCurrentJob`을 실행하지 않으며, 대본이 입력을 커버하는 비-force 실패/중단 잡은 `startLectureAudioRebuild`로 위임. `runJob`이 `generateScript` 직후 `state.script` 체크포인트와 `billable.calls++` 기록. `renderAndSaveAudio`에 플랜 지문 기반 디스크 세그먼트 캐시(`segcache/{date}/{fp}/*.pcm`)를 두고 형제 워커 완료를 기다린 뒤 첫 오류를 던지며 `drillIntroCache`는 삭제. `synthesizeGemini`의 `ttsPauseUntil`/`resetTtsPause` 및 429 재시도 제거.
+  - `server/feedStore.ts`: `genControlCache`, `casDaysDoc`(GET 5초 타임아웃, `currentDocument.updateTime`/`exists=false` 전제조건, conflict 최대 3회 재시도, 복호화 불가 문서 보존), `acquireLectureGenLease`, `releaseLectureGenLease`, `createFeedGenRemote`(`LECTURE_GEN_LEASE=off` 또는 URL 없으면 `null`). `saveLectureBackup`·`persistLectureBackups` 암호문에 캐시된 `genControl` 병합(`loadLectureBackup`은 미노출), `firestore.rules` 변경 없음.
+  - `server/feed.ts`: `ensureTodayLectureOnce`가 포인터 없는 로컬 ready 대신 동등 이상 `createdAt` 백업의 오디오 포인터를 우선하고 게이트 막힘 시 `installWithoutAudio`로 설치. `maybeAutoRegenerateToday`는 `generating`/rebuild 진행 중이면 `false`. `buildFeedDiag`에 `dailyGenCount`·`dailyGenCap`·`genSkipReason`·`genSkipAt`·`genBlockedUntil`·`genLeaseMode` 추가.
+  - `server.ts`·`package.json`: `/api/lecture/generate`에 `genRemote`·`ignoreCooldown: isForce`, `/api/lecture/audio/rebuild`에 `genRemote` 전달 및 `GEN_SKIPPED`를 `{ ok: true, lecture }`로 응답. `npm test` 스크립트에 `LECTURE_GEN_LEASE=off` 추가.
+- **방어 조치 (Safeguards)**:
+  - `tests/lectureGenCost.test.ts`(신규): 1) 중간 실패 후 비-force 재시도 세그먼트 캐시 적중·대본 1회, 2a) 동시 요청(`startLectureJob`×2 + `ensureTodayLecture`) 1벌 실행, 2b) 타 인스턴스 리스 차단·`GEN_SKIPPED`·`diag.genSkipReason=lease`·`peekGenGate` 원격 생략, 3) 재시작 시뮬 백업 복원(TTS/스크립트 0회, `dailyGenCount` 유지), 3b) `INTERRUPTED` + 로컬 대본 리빌드 위임, 4) 일일 상한 초과(로컬·원격) 및 ready/오디오 보존, 5) 429·AUTH 즉시 실패(sleep 0) 및 30분/6시간 쿨다운·`ignoreCooldown` 우회, 6) 과금 0 실패 refund.
+  - `tests/feedStore.test.ts`: CAS 동시 acquire·ready 백업 보존, `genControl` 캐시 보존·`loadLectureBackup` 비노출, 토큰 불일치 release·만료 리스 승계·복호화 불가 문서 `unavailable`·`LECTURE_GEN_LEASE=off` 추가.
+  - `tests/feedDiag.test.ts`·`tests/lectureAudioError.test.ts`: diag 허용 키 6개 추가 및 read-only `.gen.json` 미생성 확인, 429 즉시 실패 정책 반영 및 `resetTtsPause` 제거.
+- **리뷰 후 수정** (Claude CLI Opus 5.5, 7/10, blocker 1): `abortCurrentJob`이 `running`을 지워 TIMED_OUT+체크포인트 위임이 실제로 리빌드를 시작함(테스트 3c). 로컬 `leaseMode=local`의 죽은 프로세스 리스는 무시. ready 확정 후 해당 날짜 segcache 삭제. 상한에 걸린 force는 `GEN_SKIPPED`를 반환하고 클라이언트가 `audioUrl`/`listenedAt`을 지우지 않음. 백업 쓰기 전 days GET으로 캐시가 비어 있을 때도 `genControl`을 보존.
+- **검증**: `npx tsc --noEmit -p tsconfig.json`, `npx tsc --noEmit -p tsconfig.server.json`, `npm run lint`, `npm test`(534/534 통과) 통과. 머지·배포·규칙 게시 안 함.
+
+---
+
 ### [2026-11-25 KST] v2.10.0 이후 수정(미배포) — 강의 오디오를 mp3로 생성·서빙·백업 (브랜치 `englead/lecture-audio-backup-size-20261125`)
 - **배경**: PR #49 배포 후 오늘 강의 오디오는 ready였으나 파일이 wav 17,520,044 bytes(365초, 24kHz 16-bit mono PCM과 일치)라 Firestore 청크 백업이 `too_large`(30청크, 한도 8)였다. `encodeLectureAudio`는 ffmpeg가 없거나 aac·lame 시도가 모두 실패하면 wav로 폴백하고, 라이브 AI Studio 런타임에는 ffmpeg가 없는 것으로 보는 것이 가장 그럴듯하다(서버 로그는 없음).
 - **수정**: 청크 한도를 올리지 않는다. 생성·서빙·백업은 모두 mp3(48kbps). `encodeLectureAudio`는 ffmpeg `libmp3lame`이 있으면 그걸 쓰고, 없거나 실패하면 `@breezystack/lamejs`(`encodePcmToMp3`, 주기적으로 이벤트 루프에 양보)로 인코딩해 항상 mp3를 반환한다(wav 폴백·m4a 우선 시도 제거). AI Studio Republish 뒤에는 `.data`가 비워지므로 콜드 스타트 TTS 재생성이 mp3를 만든다. `persistLectureBackups`의 wav→mp3 트랜스코드는 같은 프로세스가 남겨 둔 wav(또는 테스트 스텁)를 백업하기 위한 경로다. `AUDIO_CHUNK_MAX`는 8, `firestore.rules`는 변경 없음.

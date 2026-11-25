@@ -415,7 +415,7 @@ test('4) commit 403 falls back to pointer-free PATCH with denied/403, no secret/
     const res = await persistLectureBackups(secret, st, () => true);
     assert.equal(res.result, 'denied');
     assert.equal(res.httpStatus, 403);
-    assert.equal(fetchCalls, 2); // 1 commit + 1 fallback PATCH
+    assert.equal(fetchCalls, 3); // 1 genControl GET + 1 commit + 1 fallback PATCH
     assert.ok(patchBody);
 
     const dec = decryptLectureBackup(

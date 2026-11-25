@@ -17,7 +17,7 @@ AI 튜터와 영어로 통화하고, 통화에서 **틀린 말을 틀린 그대�
 | 1단계 | 통화 후 복기: 녹음을 1분 WAV로 합쳐 `gemini-3.5-transcribe` VERBATIM 받아쓰기 → `gemini-3.8-flash` 복기(`myPhrase`는 틀린 그대로). "내가 한 말 아님" 신고 시 그 실수는 복습 목록에서 빠짐. 다시 복기해도 중복·진도 후퇴 없음. 복기 화면에서 이번 통화 성과(졸업·재복습·다음 수업 진행)도 함께 표시 | `src/services/review/reviewPipeline.ts`, `/api/review` |
 | 1단계 | Keep 실수 목록 붙여넣기 가져오기, 사용량·예상 비용, 받아쓰기 품질 시험(개발자 메뉴) | `src/ui/keep/`, `src/ui/settings/UsagePanel.tsx`, `src/ui/sttBench/` |
 | 2단계 | 간격 반복(1→3→7→14일, 보류, 졸업)과 퀴즈(말하기/타이핑, `gemini-3.8-flash` 채점) | `src/services/firebase/db.ts`, `src/ui/quiz/` |
-| 2단계 | 아침 강의(대본 `gemini-3.8-flash`, 2인 음성 `gemini-3.8-flash-tts`, 답 전 3초 무음). 서버 재시작으로 멈추면 "다시 만들기" 안내 | `server/lecture.ts`, `src/ui/lecture/` |
+| 2단계 | 아침 강의(대본 `gemini-3.8-flash`, 2인 음성 `gemini-3.8-flash-tts`, 답 전 3초 무음). 서버 재시작으로 멈추면 "다시 만들기" 안내. 아침 강의는 하루 최대 2회(환경변수 `LECTURE_DAILY_GEN_CAP`)까지만 새로 만듭니다. 그 뒤로는 백업 복원만 하며, 이유는 피드 `today/diag.json`의 `genSkipReason`에서 볼 수 있습니다. | `server/lecture.ts`, `server/lectureGenGuard.ts`, `src/ui/lecture/` |
 | 2단계 | 그록봇 피드: `/feed/{비밀키}/today` 주소로 오늘 강의 상태·음성 링크 제공 | `server/feed.ts`, `src/ui/settings/FeedSettingsPanel.tsx` |
 | 3단계 | 텍스트 코치: 일정·시험일 변경 제안 카드(승인 전에는 바뀌지 않음, 적용 전 형식 검사), 되돌리기(바꾼 항목만), 코치 메모 | `src/ui/coach/CoachModal.tsx`, `src/data/planValidation.ts`, `/api/coach/chat` |
 
