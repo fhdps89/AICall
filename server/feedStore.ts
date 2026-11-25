@@ -15,9 +15,11 @@
  * Whoever holds the feed secret can therefore recover that key.
  */
 import crypto from 'crypto';
+import fs from 'fs';
 import { firestoreCommitUrl, firestoreDocName, firestoreDocUrl } from './userKey.ts';
 import type { FeedSyncState } from './feed.ts';
-import { lectureAudioPath, type LectureState } from './lecture.ts';
+import { lectureAudioPath, replaceLectureAudioWithMp3, type LectureState } from './lecture.ts';
+import { transcodeWavToMp3 } from './lectureAudioEncode.ts';
 import {
   AUDIO_BACKUP_COMMIT_TIMEOUT_MS,
   AUDIO_CHUNK_MAX,
@@ -164,10 +166,12 @@ export async function persistLectureBackups(
   });
   if (!secret || !isCurrent()) return notCurrentResult();
 
+  let workState = state;
+
   const saveWithoutPointers = async (result: AudioBackupResult): Promise<AudioBackupResult> => {
     if (!isCurrent()) return { ...result, result: 'not_current', httpStatus: null };
     const noPointers: LectureState = {
-      ...state,
+      ...workState,
       audioBackupId: undefined,
       audioChunks: undefined,
       audioBackup: result,
@@ -180,7 +184,7 @@ export async function persistLectureBackups(
     return result;
   };
 
-  const audioPath = lectureAudioPath(state.uid, state.date);
+  let audioPath = lectureAudioPath(state.uid, state.date);
   if (!audioPath || !state.audioBackupId) {
     return saveWithoutPointers({
       target: 'firestore',
@@ -192,7 +196,29 @@ export async function persistLectureBackups(
     });
   }
 
-  const prep = prepareLectureAudioChunks(secret, state, audioPath);
+  if (audioPath.toLowerCase().endsWith('.wav')) {
+    try {
+      const wavBuf = fs.readFileSync(audioPath);
+      const mp3 = await transcodeWavToMp3(wavBuf);
+      if (!isCurrent()) return notCurrentResult();
+      const replaced = replaceLectureAudioWithMp3(workState.uid, workState.date, mp3.buffer, {
+        createdAt: workState.createdAt,
+        audioBackupId: workState.audioBackupId,
+      });
+      if (!replaced) return notCurrentResult();
+      audioPath = replaced.audioPath;
+      workState = {
+        ...workState,
+        audioFile: replaced.audioFile,
+        audioMime: replaced.audioMime,
+        updatedAt: replaced.updatedAt,
+      };
+    } catch (err: any) {
+      console.warn('[lecture] wav transcode before backup failed:', err?.name || 'error');
+    }
+  }
+
+  const prep = prepareLectureAudioChunks(secret, workState, audioPath);
   if (!prep.ok) {
     if (prep.tooLarge) {
       return saveWithoutPointers({
@@ -220,7 +246,7 @@ export async function persistLectureBackups(
     secret,
     state.date,
     prep.chunks,
-    state.updatedAt || nowIso
+    workState.updatedAt || nowIso
   );
   if (!commitUrl || !daysDocName || !chunkWrites) {
     return saveWithoutPointers({
@@ -242,7 +268,7 @@ export async function persistLectureBackups(
     at: nowIso,
   };
   const nextState: LectureState = {
-    ...state,
+    ...workState,
     audioChunks: prep.chunks.length,
     audioBackup: okResult,
   };

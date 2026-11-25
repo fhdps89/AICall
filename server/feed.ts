@@ -509,7 +509,7 @@ export function buildFeedToday(
         title: lecture.title || null,
         itemCount: lecture.itemCount || 0,
         coachNote: lecture.coachNote || null,
-        audioUrl: `${baseUrl}/feed/${st.secret}/audio/${lecture.audioFile || `${date}.wav`}`,
+        audioUrl: `${baseUrl}/feed/${st.secret}/audio/${lecture.audioFile || `${date}.mp3`}`,
         audioRestoring: false,
       };
     }

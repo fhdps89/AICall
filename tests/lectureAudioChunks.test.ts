@@ -19,8 +19,14 @@ import {
   encryptLectureAudio,
   joinAudioChunks,
   loadLectureAudioChunks,
+  prepareLectureAudioChunks,
   splitAudioBlob,
 } from '../server/lectureAudioBackup.ts';
+import {
+  encodeLectureAudio,
+  resetFfmpegCache,
+  wavFromPcm,
+} from '../server/lectureAudioEncode.ts';
 
 const ai = {} as GoogleGenAI;
 
@@ -30,6 +36,17 @@ function uidFor(name: string): string {
 
 function cleanup(uid: string) {
   fs.rmSync(path.join(DATA_DIR, 'lectures', uid), { recursive: true, force: true });
+}
+
+function withMissingFfmpeg<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = process.env.FFMPEG_PATH;
+  process.env.FFMPEG_PATH = '/no/such/ffmpeg';
+  resetFfmpegCache();
+  return fn().finally(() => {
+    if (prev === undefined) delete process.env.FFMPEG_PATH;
+    else process.env.FFMPEG_PATH = prev;
+    resetFfmpegCache();
+  });
 }
 
 function sampleState(uid: string, date: string, audioBackupId = 'chunk-bak-1'): LectureState {
@@ -94,56 +111,192 @@ test('1) 2.7MB random audio splits into 5 chunks <= 800,000 chars and decrypts b
   assert.deepEqual(dec.audio, raw);
 });
 
-test('2) 17MB audio finishes as too_large with 0 commit calls and pointer-free days PATCH', async () => {
-  const uid = uidFor('too_large');
+test('2) 17.5MB valid wav transcodes to mp3 before backup and commits <= 8 chunks (not too_large)', async () => {
+  const uid = uidFor('wav_transcode_ok');
   const date = '2026-11-25';
   const secret = 'b'.repeat(48);
   const dir = path.join(DATA_DIR, 'lectures', uid);
-  const audioPath = path.join(dir, `${date}.wav`);
+  const wavPath = path.join(dir, `${date}.wav`);
+  const mp3Path = path.join(dir, `${date}.mp3`);
   const realFetch = globalThis.fetch;
 
   let commitCalls = 0;
-  let patchBody: any = null;
+  let commitBody: any = null;
+  let patchCalls = 0;
   try {
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(audioPath, Buffer.alloc(17 * 1024 * 1024));
+    // 365s of 24kHz 16-bit mono PCM -> 17,520,044 byte WAV
+    fs.writeFileSync(wavPath, wavFromPcm(Buffer.alloc(24000 * 2 * 365), 24000));
     const st: LectureState = {
-      ...sampleState(uid, date, 'bak-17mb'),
+      ...sampleState(uid, date, 'bak-175mb-wav'),
       audioFile: `${date}.wav`,
       audioMime: 'audio/wav',
     };
     fs.writeFileSync(path.join(dir, `${date}.json`), JSON.stringify(st));
 
     (globalThis as any).fetch = async (url: string, init: any = {}) => {
-      if (String(url).endsWith(':commit')) {
+      if (String(url).endsWith(':commit') && init.method === 'POST') {
         commitCalls += 1;
+        commitBody = JSON.parse(init.body);
         return { ok: true, status: 200 };
       }
       if (init.method === 'PATCH') {
-        patchBody = JSON.parse(init.body);
+        patchCalls += 1;
         return { ok: true, status: 200 };
       }
       return { ok: false, status: 404 };
     };
 
-    const res = await persistLectureBackups(secret, st, () => true);
+    const res = await withMissingFfmpeg(() => persistLectureBackups(secret, st, () => true));
     assert.equal(res.target, 'firestore');
-    assert.equal(res.result, 'too_large');
-    assert.equal(res.httpStatus, null);
-    assert.ok((res.chunks ?? 0) > AUDIO_CHUNK_MAX);
-    assert.equal(commitCalls, 0);
-    assert.ok(patchBody);
+    assert.equal(res.result, 'ok');
+    assert.equal(res.httpStatus, 200);
+    assert.ok(res.chunks !== null && res.chunks >= 1 && res.chunks <= AUDIO_CHUNK_MAX);
+    assert.equal(commitCalls, 1);
+    assert.equal(patchCalls, 0);
+    assert.equal(fs.existsSync(wavPath), false, 'legacy wav must be removed after mp3 transcode');
+    assert.equal(fs.existsSync(mp3Path), true, 'transcoded mp3 must be saved');
 
-    const dec = decryptLectureBackup(
-      secret,
-      patchBody.fields.iv.stringValue,
-      patchBody.fields.data.stringValue
-    );
-    assert.equal(dec.audioBackupId, undefined);
-    assert.equal(dec.audioChunks, undefined);
-    assert.equal(dec.audioBackup?.result, 'too_large');
+    const local = readLectureState(uid, date);
+    assert.equal(local?.audioFile, `${date}.mp3`);
+    assert.equal(local?.audioMime, 'audio/mpeg');
+    assert.equal(st.audioFile, `${date}.wav`, 'caller state must not be mutated');
+    assert.equal(st.audioMime, 'audio/wav');
+
+    const chunkCount = res.chunks!;
+    assert.equal(commitBody.writes.length, chunkCount + 1);
+    const chunkB64 = commitBody.writes
+      .slice(0, chunkCount)
+      .map((w: any) => w.update.fields.data.stringValue);
+    const dec = decryptLectureAudio(secret, date, joinAudioChunks(chunkB64));
+    assert.ok(dec);
+    assert.equal(dec.header.ext, 'mp3');
+    assert.equal(dec.header.mime, 'audio/mpeg');
+    assert.deepEqual(dec.audio, fs.readFileSync(mp3Path));
   } finally {
     (globalThis as any).fetch = realFetch;
+    cleanup(uid);
+  }
+});
+
+test('2c) invalid 17MB wav transcode failure keeps wav and falls back as too_large', async () => {
+  const uid = uidFor('wav_transcode_fail');
+  const date = '2026-11-25';
+  const secret = 'k'.repeat(48);
+  const dir = path.join(DATA_DIR, 'lectures', uid);
+  const wavPath = path.join(dir, `${date}.wav`);
+  const mp3Path = path.join(dir, `${date}.mp3`);
+  const realFetch = globalThis.fetch;
+  let commitCalls = 0;
+  let patchCalls = 0;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(wavPath, Buffer.alloc(17 * 1024 * 1024, 7));
+    const st: LectureState = {
+      ...sampleState(uid, date, 'bak-bad-wav'),
+      audioFile: `${date}.wav`,
+      audioMime: 'audio/wav',
+    };
+    fs.writeFileSync(path.join(dir, `${date}.json`), JSON.stringify(st));
+    (globalThis as any).fetch = async (url: string, init: any = {}) => {
+      if (String(url).endsWith(':commit') && init.method === 'POST') {
+        commitCalls += 1;
+        return { ok: true, status: 200 };
+      }
+      if (init.method === 'PATCH') {
+        patchCalls += 1;
+        return { ok: true, status: 200 };
+      }
+      return { ok: false, status: 404 };
+    };
+    const res = await persistLectureBackups(secret, st, () => true);
+    assert.equal(res.result, 'too_large');
+    assert.equal(commitCalls, 0);
+    assert.ok(patchCalls >= 1);
+    assert.equal(fs.existsSync(wavPath), true);
+    assert.equal(fs.existsSync(mp3Path), false);
+  } finally {
+    (globalThis as any).fetch = realFetch;
+    cleanup(uid);
+  }
+});
+
+test('2d) isCurrent becoming false after wav transcode leaves wav in place and returns not_current', async () => {
+  const uid = uidFor('wav_transcode_stale');
+  const date = '2026-11-25';
+  const secret = 'n'.repeat(48);
+  const dir = path.join(DATA_DIR, 'lectures', uid);
+  const wavPath = path.join(dir, `${date}.wav`);
+  const mp3Path = path.join(dir, `${date}.mp3`);
+  const realFetch = globalThis.fetch;
+  let commitCalls = 0;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(wavPath, wavFromPcm(Buffer.alloc(24000 * 2 * 2), 24000));
+    const st: LectureState = {
+      ...sampleState(uid, date, 'bak-stale-wav'),
+      audioFile: `${date}.wav`,
+      audioMime: 'audio/wav',
+    };
+    fs.writeFileSync(path.join(dir, `${date}.json`), JSON.stringify(st));
+    (globalThis as any).fetch = async (url: string, init: any = {}) => {
+      if (String(url).endsWith(':commit') && init.method === 'POST') {
+        commitCalls += 1;
+        return { ok: true, status: 200 };
+      }
+      return { ok: true, status: 200 };
+    };
+    let calls = 0;
+    const res = await withMissingFfmpeg(() =>
+      persistLectureBackups(secret, st, () => {
+        calls += 1;
+        return calls === 1;
+      })
+    );
+    assert.equal(res.result, 'not_current');
+    assert.equal(commitCalls, 0);
+    assert.equal(fs.existsSync(wavPath), true);
+    assert.equal(fs.existsSync(mp3Path), false);
+    assert.equal(readLectureState(uid, date)?.audioFile, `${date}.wav`);
+  } finally {
+    (globalThis as any).fetch = realFetch;
+    cleanup(uid);
+  }
+});
+
+test('2b) 6-minute (360s) 24kHz silence encoded with pure-JS lamejs prepares <= 8 chunks and not too_large', async () => {
+  const uid = uidFor('6min_mp3_chunks');
+  const date = '2026-11-25';
+  const secret = 'm'.repeat(48);
+  const dir = path.join(DATA_DIR, 'lectures', uid);
+  const mp3Path = path.join(dir, `${date}.mp3`);
+  const prevFfmpeg = process.env.FFMPEG_PATH;
+  process.env.FFMPEG_PATH = '/no/such/ffmpeg';
+  resetFfmpegCache();
+
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const pcm = Buffer.alloc(24000 * 2 * 360);
+    const encoded = await encodeLectureAudio(pcm, 24000);
+    assert.equal(encoded.ext, 'mp3');
+    assert.equal(encoded.mime, 'audio/mpeg');
+    fs.writeFileSync(mp3Path, encoded.buffer);
+
+    const st: LectureState = {
+      ...sampleState(uid, date, 'bak-6min-mp3'),
+      durationSec: 360,
+      audioFile: `${date}.mp3`,
+      audioMime: 'audio/mpeg',
+    };
+    const prep = prepareLectureAudioChunks(secret, st, mp3Path);
+    assert.equal(prep.ok, true);
+    if (prep.ok) {
+      assert.ok(prep.chunks.length >= 1 && prep.chunks.length <= AUDIO_CHUNK_MAX);
+    }
+  } finally {
+    if (prevFfmpeg === undefined) delete process.env.FFMPEG_PATH;
+    else process.env.FFMPEG_PATH = prevFfmpeg;
+    resetFfmpegCache();
     cleanup(uid);
   }
 });
@@ -470,12 +623,12 @@ test('6) ensureTodayLecture installs chunk backup with 0 synth calls, and calls 
   }
 });
 
-test('7) chunk boundary: 8 chunks commits ok, 9 chunks falls back as too_large', async () => {
+test('7) chunk boundary: 8 chunks commits ok, 9 chunks falls back as too_large (on .mp3)', async () => {
   const uid = uidFor('boundary_8_9');
   const date = '2026-11-25';
   const secret = 'b'.repeat(48);
   const dir = path.join(DATA_DIR, 'lectures', uid);
-  const audioPath = path.join(dir, `${date}.m4a`);
+  const audioPath = path.join(dir, `${date}.mp3`);
   const realFetch = globalThis.fetch;
 
   let commitCalls = 0;
@@ -485,7 +638,11 @@ test('7) chunk boundary: 8 chunks commits ok, 9 chunks falls back as too_large',
     fs.mkdirSync(dir, { recursive: true });
     // 4,500,000 raw bytes -> ~4,500,180 encrypted bytes -> ceil(4.5M / 600,000) = 8 chunks
     fs.writeFileSync(audioPath, Buffer.alloc(4_500_000));
-    const st8 = sampleState(uid, date, 'bak-8chunks');
+    const st8: LectureState = {
+      ...sampleState(uid, date, 'bak-8chunks'),
+      audioFile: `${date}.mp3`,
+      audioMime: 'audio/mpeg',
+    };
     fs.writeFileSync(path.join(dir, `${date}.json`), JSON.stringify(st8));
 
     (globalThis as any).fetch = async (url: string, init: any = {}) => {
@@ -510,7 +667,11 @@ test('7) chunk boundary: 8 chunks commits ok, 9 chunks falls back as too_large',
 
     // 4,800,500 raw bytes -> > 4,800,000 encrypted bytes -> 9 chunks -> too_large
     fs.writeFileSync(audioPath, Buffer.alloc(4_800_500));
-    const st9 = sampleState(uid, date, 'bak-9chunks');
+    const st9: LectureState = {
+      ...sampleState(uid, date, 'bak-9chunks'),
+      audioFile: `${date}.mp3`,
+      audioMime: 'audio/mpeg',
+    };
     const res9 = await persistLectureBackups(secret, st9, () => true);
     assert.equal(res9.result, 'too_large');
     assert.equal(res9.chunks, 9);
