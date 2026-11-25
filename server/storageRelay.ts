@@ -50,13 +50,6 @@ export function storageMediaUrl(bucket: string, objectPath: string, token?: stri
   return token ? `${base}&token=${encodeURIComponent(token)}` : base;
 }
 
-/** 고정 호스트·버킷·인코딩된 객체 경로로 Firebase Storage 미디어 업로드 URL을 만든다. */
-export function storageUploadUrl(bucket: string, objectPath: string): string | null {
-  if (typeof bucket !== 'string' || !/^[a-z0-9][a-z0-9._-]{1,220}$/.test(bucket)) return null;
-  if (typeof objectPath !== 'string' || !objectPath) return null;
-  return `https://${STORAGE_HOST}/v0/b/${encodeURIComponent(bucket)}/o?uploadType=media&name=${encodeURIComponent(objectPath)}`;
-}
-
 /** Express Authorization Bearer 헤더를 Firebase Storage REST용 `Firebase <ID 토큰>` 헤더로 바꾼다. */
 export function firebaseAuthHeader(authorization?: string): string | null {
   if (typeof authorization !== 'string') return null;

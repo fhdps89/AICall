@@ -35,6 +35,32 @@ const EXPECTED_DIAG_KEYS = [
   'latestSyncCandidateAt',
   'pendingNewCount',
   'autoRegenerateEligible',
+  'audioError',
+  'audioRetryAfter',
+  'audioBackup',
+];
+
+const EXPECTED_AUDIO_ERROR_KEYS = [
+  'stage',
+  'code',
+  'httpStatus',
+  'googleStatus',
+  'quota',
+  'retryDelaySec',
+  'attempts',
+  'completed',
+  'total',
+  'at',
+  'origin',
+];
+
+const EXPECTED_AUDIO_BACKUP_KEYS = [
+  'target',
+  'result',
+  'httpStatus',
+  'chunks',
+  'bytes',
+  'at',
 ];
 
 test('1-3) buildFeedDiag matches exact allow-list, leaks no text/ids/secrets, and counts items accurately', () => {
@@ -144,6 +170,92 @@ test('1-3) buildFeedDiag matches exact allow-list, leaks no text/ids/secrets, an
     assert.equal(diag.inputReviewCount, 1);
     assert.equal(diag.pendingNewCount, 1);
     assert.equal(diag.autoRegenerateEligible, true);
+    assert.equal(diag.audioError, null);
+    assert.equal(diag.audioRetryAfter, null);
+    assert.equal(diag.audioBackup, null);
+  } finally {
+    cleanup(uid);
+  }
+});
+
+test('6) buildFeedDiag enforces nested allow-lists for audioError and audioBackup without leaking text/secrets/ids', () => {
+  const uid = uidFor('nested_allowlist');
+  const date = '2026-11-24';
+  const secret = 'secret_nested_marker_' + 'y'.repeat(30);
+  const dir = path.join(DATA_DIR, 'lectures', uid);
+
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const lecture: any = {
+      uid,
+      date,
+      status: 'ready',
+      audioStatus: 'missing',
+      title: 'NESTED_TITLE_SECRET',
+      script: [
+        {
+          mistakeId: 'm1',
+          kind: 'new',
+          myPhrase: 'a',
+          naturalPhrase: 'b',
+          explanation: 'c',
+          dialogue: [],
+          meaningKo: 'd',
+          answerEnglish: 'b',
+        },
+      ],
+      newMistakeIds: ['m1'],
+      reviewMistakeIds: [],
+      ttsEngine: 'gemini',
+      audioRetryAfter: '2026-11-24T03:00:00.000Z',
+      audioError: {
+        stage: 'tts',
+        code: 'QUOTA',
+        httpStatus: 429,
+        googleStatus: 'RESOURCE_EXHAUSTED',
+        quota: 'minute',
+        retryDelaySec: 20,
+        attempts: 3,
+        completed: 2,
+        total: 10,
+        at: '2026-11-24T02:00:00.000Z',
+        origin: 'local',
+        rawMessage: 'LEAKY_RAW_ERROR_MARKER',
+      },
+      audioBackup: {
+        target: 'firestore',
+        result: 'denied',
+        httpStatus: 403,
+        chunks: 4,
+        bytes: 2100000,
+        at: '2026-11-24T01:59:00.000Z',
+        url: 'https://leaky.example.com/' + secret,
+      },
+      createdAt: '2026-11-24T00:30:00.000Z',
+      updatedAt: '2026-11-24T02:00:00.000Z',
+    };
+    fs.writeFileSync(path.join(dir, `${date}.json`), JSON.stringify(lecture));
+    const st: FeedSyncState = {
+      uid,
+      secret,
+      quizCount: 0,
+      newMistakes: [],
+      reviewMistakes: [],
+      syncedAt: '2026-11-24T01:00:00.000Z',
+    };
+
+    const diag = buildFeedDiag(st, { date, now: Date.parse('2026-11-24T02:05:00.000Z') });
+    assert.deepEqual(Object.keys(diag), EXPECTED_DIAG_KEYS);
+    assert.ok(diag.audioError);
+    assert.deepEqual(Object.keys(diag.audioError), EXPECTED_AUDIO_ERROR_KEYS);
+    assert.ok(diag.audioBackup);
+    assert.deepEqual(Object.keys(diag.audioBackup), EXPECTED_AUDIO_BACKUP_KEYS);
+    assert.equal(diag.audioRetryAfter, '2026-11-24T03:00:00.000Z');
+
+    const raw = JSON.stringify(diag);
+    for (const forbidden of ['NESTED_TITLE_SECRET', 'LEAKY_RAW_ERROR_MARKER', secret, feedDocId(secret), uid]) {
+      assert.equal(raw.includes(forbidden), false, `diag leaked ${forbidden}`);
+    }
   } finally {
     cleanup(uid);
   }

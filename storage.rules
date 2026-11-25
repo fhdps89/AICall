@@ -22,16 +22,6 @@ service firebase.storage {
             || request.resource.contentType == 'audio/mpeg');
     }
 
-    match /feeds/{feedId}/days/{file} {
-      allow get: if feedId.matches('^[0-9a-f]{64}$') && file.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}[.]audio[.]enc$');
-      allow create, update: if feedId.matches('^[0-9a-f]{64}$')
-        && file.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}[.]audio[.]enc$')
-        && firestore.exists(/databases/ai-studio-aicall-1bc322d0-1646-4556-a8fb-a70e9638dc34/documents/feeds/$(feedId))
-        && request.resource.size <= 24 * 1024 * 1024
-        && request.resource.contentType == 'application/octet-stream';
-      allow list, delete: if false;
-    }
-
     match /{allPaths=**} {
       allow read, write: if false;
     }

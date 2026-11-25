@@ -17,14 +17,28 @@ import {
   lectureJobEpoch,
   lectureRebuildInFlight,
   installRestoredLectureAudio,
+  installBackupLectureWithoutAudio,
+  recordLectureBackupResult,
+  retryCooldownUntilMs,
   maxCreatedAtIso,
   LECTURE_AUDIO_MISSING,
-  LECTURE_AUDIO_RETRY_COOLDOWN_MS,
 } from './lecture.ts';
 import type { LectureMistakeInput, LectureState, LectureSynthesizeFn } from './lecture.ts';
 import { safeEqual } from './auth.ts';
-import { loadFeedBackup, loadLectureBackup, persistLectureBackups, type FeedBackup } from './feedStore.ts';
-import { loadLectureAudioBackup } from './lectureAudioBackup.ts';
+import {
+  loadFeedBackup,
+  loadLectureBackup,
+  persistLectureBackups,
+  saveLectureFailureBackup,
+  type FeedBackup,
+} from './feedStore.ts';
+import { loadLectureAudioChunks, type LoadLectureAudioResult } from './lectureAudioBackup.ts';
+import {
+  sanitizeAudioBackupResult,
+  sanitizeAudioError,
+  type AudioBackupResult,
+  type LectureAudioError,
+} from './lectureAudioError.ts';
 import { setUserKeyFromFeed } from './userKey.ts';
 
 const FEED_FILE = path.join(DATA_DIR, 'feed.json');
@@ -177,14 +191,35 @@ export interface FeedDiag {
   latestSyncCandidateAt: string | null;
   pendingNewCount: number;
   autoRegenerateEligible: boolean;
+  audioError: LectureAudioError | null;
+  audioRetryAfter: string | null;
+  audioBackup: AudioBackupResult | null;
 }
 
 export function feedOnReady(st: FeedSyncState) {
   return async (s: LectureState, isCurrent: () => boolean) => {
     try {
-      await persistLectureBackups(st.secret, s, isCurrent);
+      const result = await persistLectureBackups(st.secret, s, isCurrent);
+      if (isCurrent()) {
+        recordLectureBackupResult(
+          st.uid,
+          s.date,
+          { createdAt: s.createdAt, audioBackupId: s.audioBackupId },
+          result
+        );
+      }
     } catch (err: any) {
-      console.warn('[feed] lecture backup failed:', err?.message || err);
+      console.warn('[feed] lecture backup failed:', err?.name || 'error');
+    }
+  };
+}
+
+export function feedOnFailed(st: FeedSyncState) {
+  return async (s: LectureState, isCurrent: () => boolean) => {
+    try {
+      await saveLectureFailureBackup(st.secret, s, isCurrent);
+    } catch (err: any) {
+      console.warn('[feed] lecture failure backup failed:', err?.name || 'error');
     }
   };
 }
@@ -230,13 +265,14 @@ export function maybeAutoRegenerateToday(
   startJob(ai, st.uid, date, st.newMistakes, st.reviewMistakes, {
     force: true,
     onReady: feedOnReady(st),
+    onFailed: feedOnFailed(st),
   });
   return true;
 }
 
 export interface EnsureTodayLectureDeps {
   loadBackup?: (secret: string, date: string) => Promise<LectureState | null>;
-  loadAudio?: typeof loadLectureAudioBackup;
+  loadAudio?: typeof loadLectureAudioChunks;
   restoreLecture?: typeof restoreReadyLecture;
   synthesizeFn?: LectureSynthesizeFn;
   now?: number;
@@ -299,19 +335,37 @@ async function ensureTodayLectureOnce(
     cand = backup;
   }
 
-  if (
-    cand.audioRebuildFailedAt &&
-    now - Date.parse(cand.audioRebuildFailedAt) < LECTURE_AUDIO_RETRY_COOLDOWN_MS
-  ) {
+  const cooldownUntil = retryCooldownUntilMs(cand);
+  const inCooldown = cooldownUntil !== null && now < cooldownUntil;
+  const hasAudioPointers = Boolean(
+    cand.audioBackupId && typeof cand.audioChunks === 'number' && cand.audioChunks >= 1
+  );
+  const installWithoutAudio = (c: LectureState) => {
+    if (c !== local || local?.audioStatus !== 'missing') {
+      installBackupLectureWithoutAudio(st.uid, date, c, {
+        expectedEpoch: epochBefore,
+        expectedCreatedAt: localCreatedAtBefore,
+        origin: c === local ? (c.audioError?.origin ?? 'local') : 'backup',
+      });
+    }
+  };
+  // Cooldown only gates TTS. A backup fetched on a cold start may still point at valid audio
+  // chunks (downloading them costs no TTS quota), so try them once before honoring cooldown.
+  if (inCooldown && (cand === local || !hasAudioPointers)) {
+    installWithoutAudio(cand);
     return;
   }
 
-  if (cand.audioBackupId) {
-    const loadAudio = deps.loadAudio ?? loadLectureAudioBackup;
-    const audio = await loadAudio(st.secret, date, cand.audioBackupId).catch(() => null);
+  let pointersConfirmedMissing = false;
+  if (hasAudioPointers && cand.audioBackupId && typeof cand.audioChunks === 'number') {
+    const wasLocal = cand === local;
+    const loadAudio = deps.loadAudio ?? loadLectureAudioChunks;
+    const audioRes = await loadAudio(st.secret, date, cand.audioBackupId, cand.audioChunks).catch(
+      (): LoadLectureAudioResult => ({ status: 'transient' })
+    );
     if (
-      audio &&
-      installRestoredLectureAudio(st.uid, date, cand, audio, {
+      audioRes.status === 'ok' &&
+      installRestoredLectureAudio(st.uid, date, cand, audioRes, {
         expectedEpoch: epochBefore,
         expectedCreatedAt: localCreatedAtBefore,
       })
@@ -324,6 +378,25 @@ async function ensureTodayLectureOnce(
     ) {
       return;
     }
+    if (audioRes.status === 'missing') {
+      pointersConfirmedMissing = true;
+      cand = { ...cand };
+      delete cand.audioBackupId;
+      delete cand.audioChunks;
+      if (wasLocal && !ai && !deps.synthesizeFn) {
+        installBackupLectureWithoutAudio(st.uid, date, cand, {
+          expectedEpoch: epochBefore,
+          expectedCreatedAt: localCreatedAtBefore,
+          origin: cand.audioError?.origin ?? 'local',
+        });
+        return;
+      }
+    }
+  }
+
+  if (inCooldown) {
+    installWithoutAudio(cand);
+    return;
   }
 
   if (!ai && !deps.synthesizeFn) return;
@@ -331,7 +404,9 @@ async function ensureTodayLectureOnce(
   restore(ai as GoogleGenAI, st.uid, date, cand, {
     synthesizeFn: deps.synthesizeFn,
     onReady: feedOnReady(st),
+    onFailed: feedOnFailed(st),
     now,
+    ...(pointersConfirmedMissing ? { clearAudioBackupPointers: true } : {}),
   });
 }
 
@@ -381,8 +456,13 @@ export function buildFeedToday(
   const hasCandidates = st.newMistakes.length + st.reviewMistakes.length > 0;
   // Retry a failed lecture at most once per FAILED_RETRY_COOLDOWN_MS, so a feed that is
   // polled repeatedly does not restart a costly, failing generation on every request.
-  const failedLongAgo = lecture?.status === 'failed' && lecture.error !== 'NOTHING_TO_TEACH'
-    && now - Date.parse(lecture.updatedAt || lecture.createdAt) > FAILED_RETRY_COOLDOWN_MS;
+  const retryAfterMs = lecture?.audioRetryAfter ? Date.parse(lecture.audioRetryAfter) : NaN;
+  const failedLongAgo =
+    lecture?.status === 'failed' &&
+    lecture.error !== 'NOTHING_TO_TEACH' &&
+    (Number.isFinite(retryAfterMs)
+      ? now >= retryAfterMs
+      : now - Date.parse(lecture.updatedAt || lecture.createdAt) > FAILED_RETRY_COOLDOWN_MS);
   // A job cut off by a server restart did not fail on its own, so it is retried right away.
   const interrupted = lecture?.status === 'failed' && (lecture.error === 'INTERRUPTED' || lecture.error === 'TIMED_OUT');
   const startJob = opts.startJob || startLectureJob;
@@ -391,6 +471,7 @@ export function buildFeedToday(
   if (!opts.skipStart && !beforeStart && (!lecture || failedLongAgo || interrupted) && hasCandidates && ai) {
     lecture = startJob(ai, st.uid, date, st.newMistakes, st.reviewMistakes, {
       onReady: feedOnReady(st),
+      onFailed: feedOnFailed(st),
     });
   } else if (!opts.skipStart && ai) {
     let regenState: LectureState | undefined;
@@ -509,6 +590,13 @@ export function buildFeedDiag(
   const inputSet = lecture ? lectureInputIdSet(lecture) : new Set<string>();
   const pendingNewCount = (st.newMistakes || []).filter((m) => !inputSet.has(m.id)).length;
 
+  const audioError = lecture?.audioError ? (sanitizeAudioError(lecture.audioError) ?? null) : null;
+  const audioRetryAfter =
+    typeof lecture?.audioRetryAfter === 'string' && Number.isFinite(Date.parse(lecture.audioRetryAfter))
+      ? new Date(Date.parse(lecture.audioRetryAfter)).toISOString()
+      : null;
+  const audioBackup = lecture?.audioBackup ? (sanitizeAudioBackupResult(lecture.audioBackup) ?? null) : null;
+
   return {
     date,
     status,
@@ -529,6 +617,9 @@ export function buildFeedDiag(
     latestSyncCandidateAt: maxCreatedAtIso([...(st.newMistakes || []), ...(st.reviewMistakes || [])]) ?? null,
     pendingNewCount,
     autoRegenerateEligible: shouldAutoRegenerate(lecture, st, now),
+    audioError,
+    audioRetryAfter,
+    audioBackup,
   };
 }
 

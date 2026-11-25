@@ -13,11 +13,10 @@ import {
 import { ensureTodayLecture, type FeedSyncState } from '../server/feed.ts';
 import { decryptLectureBackup, feedDocId, persistLectureBackups } from '../server/feedStore.ts';
 import {
-  LECTURE_AUDIO_BACKUP_MAX_BYTES,
   decryptLectureAudio,
   encryptLectureAudio,
-  loadLectureAudioBackup,
-  uploadLectureAudioBackup,
+  loadLectureAudioChunks,
+  splitAudioBlob,
 } from '../server/lectureAudioBackup.ts';
 
 const ai = {} as GoogleGenAI;
@@ -90,21 +89,22 @@ test('1-2) encrypt/decrypt round-trip fails on wrong secret, wrong date, flipped
   tampered[tampered.length - 20] ^= 0xff;
   assert.equal(decryptLectureAudio(secret, date, tampered), null);
 
+  const chunks = splitAudioBlob(blob);
   const realFetch = globalThis.fetch;
   (globalThis as any).fetch = async () => ({
     ok: true,
     status: 200,
-    arrayBuffer: async () => blob,
+    json: async () => ({ fields: { data: { stringValue: chunks[0] } } }),
   });
   try {
-    const mismatch = await loadLectureAudioBackup(secret, date, 'other-id', { bucket: 'test-bucket.firebasestorage.app' });
-    assert.equal(mismatch, null);
+    const mismatch = await loadLectureAudioChunks(secret, date, 'other-id', chunks.length);
+    assert.equal(mismatch.status, 'missing');
   } finally {
     (globalThis as any).fetch = realFetch;
   }
 });
 
-test('3, 6, 7) 403 upload returns false, omits audioBackupId in Firestore backup, isCurrent=false skips fetch, logs leak no secrets', async () => {
+test('3, 6, 7) commit 403 returns denied/403, omits pointers in fallback PATCH, isCurrent=false skips fetch, logs leak no secrets', async () => {
   const uid = uidFor('upload403');
   const date = '2026-11-24';
   const secret = 'super_secret_feed_token_' + 'x'.repeat(28);
@@ -119,7 +119,7 @@ test('3, 6, 7) 403 upload returns false, omits audioBackupId in Firestore backup
   console.log = (...a: any[]) => logs.push(a.map(String).join(' '));
 
   let patchBody: any = null;
-  let storageCalls = 0;
+  let commitCalls = 0;
 
   try {
     fs.mkdirSync(dir, { recursive: true });
@@ -128,8 +128,8 @@ test('3, 6, 7) 403 upload returns false, omits audioBackupId in Firestore backup
     fs.writeFileSync(path.join(dir, `${date}.json`), JSON.stringify(st));
 
     (globalThis as any).fetch = async (url: string, init: any = {}) => {
-      if (String(url).includes('firebasestorage.googleapis.com')) {
-        storageCalls += 1;
+      if (String(url).endsWith(':commit') && init.method === 'POST') {
+        commitCalls += 1;
         return { ok: false, status: 403 };
       }
       if (init.method === 'PATCH') {
@@ -140,13 +140,16 @@ test('3, 6, 7) 403 upload returns false, omits audioBackupId in Firestore backup
     };
 
     // isCurrent() false -> 0 fetches
-    await persistLectureBackups(secret, st, () => false);
-    assert.equal(storageCalls, 0);
+    const skipped = await persistLectureBackups(secret, st, () => false);
+    assert.equal(skipped.result, 'not_current');
+    assert.equal(commitCalls, 0);
     assert.equal(patchBody, null);
 
-    // 403 upload -> false, Firestore PATCH lacks audioBackupId
-    await persistLectureBackups(secret, st, () => true);
-    assert.equal(storageCalls, 1);
+    // 403 commit -> denied/403, fallback Firestore PATCH lacks audioBackupId/audioChunks
+    const denied = await persistLectureBackups(secret, st, () => true);
+    assert.equal(denied.result, 'denied');
+    assert.equal(denied.httpStatus, 403);
+    assert.equal(commitCalls, 1);
     assert.ok(patchBody);
     const body: any = patchBody;
     const decrypted = decryptLectureBackup(
@@ -155,10 +158,12 @@ test('3, 6, 7) 403 upload returns false, omits audioBackupId in Firestore backup
       body.fields.data.stringValue
     );
     assert.equal(decrypted.audioBackupId, undefined);
+    assert.equal(decrypted.audioChunks, undefined);
 
     for (const msg of logs) {
       assert.equal(msg.includes(secret), false, 'secret leaked to log');
       assert.equal(msg.includes(docId), false, 'docId leaked to log');
+      assert.equal(msg.includes('https://'), false, 'URL leaked to log');
     }
   } finally {
     (globalThis as any).fetch = realFetch;
@@ -168,8 +173,8 @@ test('3, 6, 7) 403 upload returns false, omits audioBackupId in Firestore backup
   }
 });
 
-test('4-5) ensureTodayLecture installs Storage audio backup with 0 synth calls, and falls back to TTS on 404 or oversize', async () => {
-  const uid = uidFor('restore_storage');
+test('4-5) ensureTodayLecture installs Firestore chunk backup with 0 synth calls, and falls back to TTS on 404', async () => {
+  const uid = uidFor('restore_chunks');
   const date = '2026-11-24';
   const secret = 'h'.repeat(48);
   const st: FeedSyncState = {
@@ -180,7 +185,6 @@ test('4-5) ensureTodayLecture installs Storage audio backup with 0 synth calls, 
     reviewMistakes: [],
     syncedAt: '2026-11-24T00:00:00Z',
   };
-  const backup = sampleState(uid, date, 'bak-match-1');
   const rawAudio = Buffer.from('RIFFvalid-wav-payload');
   const encBlob = encryptLectureAudio(
     secret,
@@ -195,15 +199,18 @@ test('4-5) ensureTodayLecture installs Storage audio backup with 0 synth calls, 
     },
     rawAudio
   );
+  const encChunks = splitAudioBlob(encBlob);
+  const backup: LectureState = { ...sampleState(uid, date, 'bak-match-1'), audioChunks: encChunks.length };
 
   try {
-    // 200 Storage backup -> installed directly, 0 synth calls
+    // Firestore chunk backup -> installed directly, 0 synth calls
     let synthCalls = 0;
     await ensureTodayLecture(ai, st, date, {
       loadBackup: async () => backup,
-      loadAudio: async (_s, _d, expectId) => {
+      loadAudio: async (_s, _d, expectId, count) => {
         assert.equal(expectId, 'bak-match-1');
-        return { ext: 'wav', mime: 'audio/wav', buffer: rawAudio, durationSec: 365 };
+        assert.equal(count, encChunks.length);
+        return { status: 'ok', ext: 'wav', mime: 'audio/wav', buffer: rawAudio, durationSec: 365 };
       },
       synthesizeFn: async () => {
         synthCalls += 1;
@@ -215,11 +222,10 @@ test('4-5) ensureTodayLecture installs Storage audio backup with 0 synth calls, 
     assert.deepEqual(fs.readFileSync(lectureAudioPath(uid, date)!), rawAudio);
     assert.equal(readLectureState(uid, date)?.audioStatus, 'ready');
 
-    // Clean local files and test 404 / oversized fallback -> TTS synth called
+    // Clean local files and test 404 chunk fallback -> TTS restore called
     cleanup(uid);
     const realFetch = globalThis.fetch;
     try {
-      // 404 from Storage
       (globalThis as any).fetch = async () => ({ ok: false, status: 404 });
       let restoredCalls = 0;
       await ensureTodayLecture(ai, st, date, {
@@ -231,34 +237,18 @@ test('4-5) ensureTodayLecture installs Storage audio backup with 0 synth calls, 
       });
       assert.equal(restoredCalls, 1);
 
-      // Oversized stream from Storage -> loadLectureAudioBackup returns null -> TTS fallback
-      const overStream = new ReadableStream<Uint8Array>({
-        start(c) {
-          c.enqueue(new Uint8Array(LECTURE_AUDIO_BACKUP_MAX_BYTES + 1));
-          c.close();
-        },
-      });
-      (globalThis as any).fetch = async () => ({ ok: true, status: 200, body: overStream });
-      const loadedOver = await loadLectureAudioBackup(secret, date, 'bak-match-1', {
-        bucket: 'test-bucket.firebasestorage.app',
-      });
-      assert.equal(loadedOver, null);
-
-      // Verify valid blob decrypts via loadLectureAudioBackup
-      (globalThis as any).fetch = async () => ({
-        ok: true,
-        status: 200,
-        body: new ReadableStream<Uint8Array>({
-          start(c) {
-            c.enqueue(new Uint8Array(encBlob));
-            c.close();
-          },
-        }),
-      });
-      const loadedOk = await loadLectureAudioBackup(secret, date, 'bak-match-1', {
-        bucket: 'test-bucket.firebasestorage.app',
-      });
-      assert.deepEqual(loadedOk?.buffer, rawAudio);
+      // Verify valid chunk response decrypts via loadLectureAudioChunks
+      (globalThis as any).fetch = async (url: string) => {
+        const idx = Number(String(url).split('/audio/')[1]);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ fields: { data: { stringValue: encChunks[idx] } } }),
+        };
+      };
+      const loadedOk = await loadLectureAudioChunks(secret, date, 'bak-match-1', encChunks.length);
+      assert.equal(loadedOk.status, 'ok');
+      if (loadedOk.status === 'ok') assert.deepEqual(loadedOk.buffer, rawAudio);
     } finally {
       (globalThis as any).fetch = realFetch;
     }
@@ -279,7 +269,7 @@ test('6) ensureTodayLecture refuses to install downloaded audio if a job started
     reviewMistakes: [],
     syncedAt: '2026-11-24T00:00:00Z',
   };
-  const backup = sampleState(uid, date, 'bak-old');
+  const backup: LectureState = { ...sampleState(uid, date, 'bak-old'), audioChunks: 1 };
   const rawAudio = Buffer.from('RIFFold-backup');
 
   try {
@@ -303,7 +293,7 @@ test('6) ensureTodayLecture refuses to install downloaded audio if a job started
           }
         );
         await new Promise((r) => setTimeout(r, 20));
-        return { ext: 'wav', mime: 'audio/wav', buffer: rawAudio, durationSec: 365 };
+        return { status: 'ok', ext: 'wav', mime: 'audio/wav', buffer: rawAudio, durationSec: 365 };
       },
     });
     const final = readLectureState(uid, date);

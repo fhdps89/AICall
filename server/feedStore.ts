@@ -15,10 +15,20 @@
  * Whoever holds the feed secret can therefore recover that key.
  */
 import crypto from 'crypto';
-import { firestoreDocUrl } from './userKey.ts';
+import { firestoreCommitUrl, firestoreDocName, firestoreDocUrl } from './userKey.ts';
 import type { FeedSyncState } from './feed.ts';
 import { lectureAudioPath, type LectureState } from './lecture.ts';
-import { uploadLectureAudioBackup } from './lectureAudioBackup.ts';
+import {
+  AUDIO_BACKUP_COMMIT_TIMEOUT_MS,
+  AUDIO_CHUNK_MAX,
+  buildAudioChunkWrites,
+  prepareLectureAudioChunks,
+} from './lectureAudioBackup.ts';
+import {
+  sanitizeAudioBackupResult,
+  sanitizeAudioError,
+  type AudioBackupResult,
+} from './lectureAudioError.ts';
 
 export interface FeedBackup {
   state: FeedSyncState;
@@ -69,11 +79,36 @@ export function decryptLectureBackup(secret: string, iv: string, data: string): 
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-function sanitizeReadyLectureForBackup(state: LectureState): LectureState | null {
+function validIsoOrUndef(v: unknown): string | undefined {
+  if (typeof v !== 'string' || v.length > 40) return undefined;
+  const ms = Date.parse(v);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
+}
+
+export function sanitizeReadyLectureForBackup(
+  state: LectureState,
+  opts: { originOverride?: 'local' | 'backup' } = {}
+): LectureState | null {
   if (!state || state.status !== 'ready') return null;
   if (typeof state.uid !== 'string' || !state.uid) return null;
   if (typeof state.date !== 'string' || !DATE_RE.test(state.date)) return null;
   if (!Array.isArray(state.script) || state.script.length === 0) return null;
+  const audioChunks =
+    typeof state.audioChunks === 'number' &&
+    Number.isInteger(state.audioChunks) &&
+    state.audioChunks >= 1 &&
+    state.audioChunks <= AUDIO_CHUNK_MAX
+      ? state.audioChunks
+      : undefined;
+  const audioRebuildFailedAt = validIsoOrUndef(state.audioRebuildFailedAt);
+  const audioRetryAfter = validIsoOrUndef(state.audioRetryAfter);
+  const rawAudioError = sanitizeAudioError(state.audioError);
+  const audioError = rawAudioError
+    ? opts.originOverride
+      ? { ...rawAudioError, origin: opts.originOverride }
+      : rawAudioError
+    : undefined;
+  const audioBackup = sanitizeAudioBackupResult(state.audioBackup);
   return {
     uid: state.uid,
     date: state.date,
@@ -96,6 +131,11 @@ function sanitizeReadyLectureForBackup(state: LectureState): LectureState | null
     ...(typeof state.audioBackupId === 'string' && state.audioBackupId
       ? { audioBackupId: state.audioBackupId }
       : {}),
+    ...(audioChunks !== undefined ? { audioChunks } : {}),
+    ...(audioRebuildFailedAt ? { audioRebuildFailedAt } : {}),
+    ...(audioRetryAfter ? { audioRetryAfter } : {}),
+    ...(audioError ? { audioError } : {}),
+    ...(audioBackup ? { audioBackup } : {}),
     ...(state.durationFit && typeof state.durationFit === 'object'
       ? { durationFit: state.durationFit }
       : {}),
@@ -105,23 +145,183 @@ function sanitizeReadyLectureForBackup(state: LectureState): LectureState | null
 }
 
 /**
- * Upload encrypted lecture audio to Storage first (best-effort), then save script backup.
- * So the Firestore script backup never points at an audioBackupId that wasn't uploaded.
+ * Commit encrypted audio chunks + days backup atomically via Firestore `documents:commit`.
+ * Falls back to pointer-free days PATCH on commit failure or when audio exceeds 8 chunks.
  */
 export async function persistLectureBackups(
   secret: string,
   state: LectureState,
   isCurrent: () => boolean = () => true
+): Promise<AudioBackupResult> {
+  const nowIso = new Date().toISOString();
+  const notCurrentResult = (): AudioBackupResult => ({
+    target: 'firestore',
+    result: 'not_current',
+    httpStatus: null,
+    chunks: null,
+    bytes: null,
+    at: nowIso,
+  });
+  if (!secret || !isCurrent()) return notCurrentResult();
+
+  const saveWithoutPointers = async (result: AudioBackupResult): Promise<AudioBackupResult> => {
+    if (!isCurrent()) return { ...result, result: 'not_current', httpStatus: null };
+    const noPointers: LectureState = {
+      ...state,
+      audioBackupId: undefined,
+      audioChunks: undefined,
+      audioBackup: result,
+    };
+    try {
+      await saveLectureBackup(secret, noPointers);
+    } catch (err: any) {
+      console.warn('[lecture] fallback days backup failed:', err?.name || 'error');
+    }
+    return result;
+  };
+
+  const audioPath = lectureAudioPath(state.uid, state.date);
+  if (!audioPath || !state.audioBackupId) {
+    return saveWithoutPointers({
+      target: 'firestore',
+      result: 'no_file',
+      httpStatus: null,
+      chunks: null,
+      bytes: null,
+      at: nowIso,
+    });
+  }
+
+  const prep = prepareLectureAudioChunks(secret, state, audioPath);
+  if (!prep.ok) {
+    if (prep.tooLarge) {
+      return saveWithoutPointers({
+        target: 'firestore',
+        result: 'too_large',
+        httpStatus: null,
+        chunks: prep.chunks,
+        bytes: prep.bytes,
+        at: nowIso,
+      });
+    }
+    return saveWithoutPointers({
+      target: 'firestore',
+      result: 'no_file',
+      httpStatus: null,
+      chunks: null,
+      bytes: null,
+      at: nowIso,
+    });
+  }
+
+  const commitUrl = firestoreCommitUrl();
+  const daysDocName = firestoreDocName(`feeds/${feedDocId(secret)}/days/${state.date}`);
+  const chunkWrites = buildAudioChunkWrites(
+    secret,
+    state.date,
+    prep.chunks,
+    state.updatedAt || nowIso
+  );
+  if (!commitUrl || !daysDocName || !chunkWrites) {
+    return saveWithoutPointers({
+      target: 'firestore',
+      result: 'http_error',
+      httpStatus: null,
+      chunks: prep.chunks.length,
+      bytes: prep.bytes,
+      at: nowIso,
+    });
+  }
+
+  const okResult: AudioBackupResult = {
+    target: 'firestore',
+    result: 'ok',
+    httpStatus: 200,
+    chunks: prep.chunks.length,
+    bytes: prep.bytes,
+    at: nowIso,
+  };
+  const nextState: LectureState = {
+    ...state,
+    audioChunks: prep.chunks.length,
+    audioBackup: okResult,
+  };
+  const clean = sanitizeReadyLectureForBackup(nextState);
+  if (!clean) {
+    return {
+      target: 'firestore',
+      result: 'http_error',
+      httpStatus: null,
+      chunks: prep.chunks.length,
+      bytes: prep.bytes,
+      at: nowIso,
+    };
+  }
+  const { iv, data } = encryptLectureBackup(secret, clean);
+  if (!isCurrent()) return notCurrentResult();
+
+  let failResult: AudioBackupResult;
+  try {
+    const res = await fetch(commitUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        writes: [
+          ...chunkWrites,
+          {
+            update: {
+              name: daysDocName,
+              fields: {
+                iv: { stringValue: iv },
+                data: { stringValue: data },
+                updatedAt: { stringValue: clean.updatedAt },
+              },
+            },
+          },
+        ],
+      }),
+      signal: AbortSignal.timeout(AUDIO_BACKUP_COMMIT_TIMEOUT_MS),
+    });
+    if (res.ok) {
+      return isCurrent() ? okResult : { ...okResult, result: 'not_current', httpStatus: null };
+    }
+    console.warn('[lecture] audio backup commit failed', res.status);
+    failResult = {
+      target: 'firestore',
+      result: res.status === 401 || res.status === 403 ? 'denied' : 'http_error',
+      httpStatus: res.status,
+      chunks: prep.chunks.length,
+      bytes: prep.bytes,
+      at: nowIso,
+    };
+  } catch (err: any) {
+    console.warn('[lecture] audio backup commit failed', err?.name || 'error');
+    const kind =
+      err?.name === 'TimeoutError' || err?.name === 'AbortError' ? 'timeout' : 'network';
+    failResult = {
+      target: 'firestore',
+      result: kind,
+      httpStatus: null,
+      chunks: prep.chunks.length,
+      bytes: prep.bytes,
+      at: nowIso,
+    };
+  }
+
+  return saveWithoutPointers(failResult);
+}
+
+/**
+ * Save failure diagnostics (audioRebuildFailedAt, audioRetryAfter, sanitized audioError)
+ * while preserving any existing audioBackupId/audioChunks pointers on state.
+ */
+export async function saveLectureFailureBackup(
+  secret: string,
+  state: LectureState,
+  isCurrent: () => boolean = () => true
 ): Promise<void> {
   if (!secret || !isCurrent()) return;
-  const audioPath = lectureAudioPath(state.uid, state.date);
-  let uploaded = false;
-  if (audioPath && state.audioBackupId) {
-    uploaded = await uploadLectureAudioBackup(secret, state, audioPath, isCurrent).catch(() => false);
-  }
-  if (!isCurrent()) return;
-  const nextState: LectureState = uploaded ? state : { ...state, audioBackupId: undefined };
-  await saveLectureBackup(secret, nextState);
+  await saveLectureBackup(secret, state);
 }
 
 /**
@@ -147,6 +347,7 @@ export async function saveLectureBackup(secret: string, state: LectureState): Pr
           updatedAt: { stringValue: clean.updatedAt },
         },
       }),
+      signal: AbortSignal.timeout(10_000),
     });
   } catch (err: any) {
     throw new Error(err?.name ? `Firestore fetch ${err.name}` : 'Firestore fetch failed');
@@ -178,11 +379,8 @@ export async function loadLectureBackup(secret: string, date: string): Promise<L
     return null;
   }
   if (!backup || typeof backup !== 'object') return null;
-  if (typeof backup.uid !== 'string' || !backup.uid) return null;
   if (backup.date !== date) return null;
-  if (backup.status !== 'ready') return null;
-  if (!Array.isArray(backup.script) || backup.script.length === 0) return null;
-  return backup;
+  return sanitizeReadyLectureForBackup(backup, { originOverride: 'backup' });
 }
 
 /** Write (or replace) the backup as the signed-in user. */

@@ -34,11 +34,23 @@ export function getUserSuppliedKey(): string | undefined {
   return cached?.key || undefined;
 }
 
-/** Firestore REST URL for a document path like `users/{uid}/private/gemini` (null when the project is unknown). */
-export function firestoreDocUrl(docPath: string): string | null {
+/** Firestore resource name for a document path like `feeds/{id}/days/{date}` (null when the project is unknown). */
+export function firestoreDocName(docPath: string): string | null {
   if (!projectId) return null;
   const segs = docPath.split('/').map(encodeURIComponent).join('/');
-  return `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents/${segs}`;
+  return `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents/${segs}`;
+}
+
+/** Firestore REST URL for a document path like `users/{uid}/private/gemini` (null when the project is unknown). */
+export function firestoreDocUrl(docPath: string): string | null {
+  const name = firestoreDocName(docPath);
+  return name ? `https://firestore.googleapis.com/v1/${name}` : null;
+}
+
+/** Firestore REST URL for `documents:commit` batch writes (null when the project is unknown). */
+export function firestoreCommitUrl(): string | null {
+  if (!projectId) return null;
+  return `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents:commit`;
 }
 
 async function fetchKey(idToken: string, uid: string): Promise<string | null> {

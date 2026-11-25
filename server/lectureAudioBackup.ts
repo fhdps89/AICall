@@ -1,20 +1,23 @@
 /**
- * Encrypted Firebase Storage backup for morning lecture audio.
+ * Encrypted Firestore chunk backup for morning lecture audio.
  * Blob layout: "OCA1"(4) | iv(12) | ciphertext | authTag(16), AES-256-GCM with feedCipherKey(secret)
- * and AAD = `aicall-lecture-audio:${date}`. Never logs secrets, feed doc ids, or storage paths.
+ * and AAD = `aicall-lecture-audio:${date}`. Never logs secrets, feed doc ids, or URLs.
  */
 import crypto from 'crypto';
 import fs from 'fs';
+import { AUDIO_CHUNK_MAX } from './lectureAudioError.ts';
 import { feedDocId, feedCipherKey } from './feedStore.ts';
 import { mimeForAudioFile } from './lectureAudioEncode.ts';
-import { readStorageBucket, storageMediaUrl, storageUploadUrl, readStreamWithLimit } from './storageRelay.ts';
+import { firestoreDocName, firestoreDocUrl } from './userKey.ts';
 import type { LectureState } from './lecture.ts';
 
-export const LECTURE_AUDIO_BACKUP_MAX_BYTES = 24 * 1024 * 1024;
-export const AUDIO_BACKUP_UPLOAD_TIMEOUT_MS = 120_000;
+export const AUDIO_CHUNK_RAW_BYTES = 600_000;
+export { AUDIO_CHUNK_MAX };
+export const AUDIO_BACKUP_COMMIT_TIMEOUT_MS = 60_000;
 export const AUDIO_BACKUP_DOWNLOAD_TIMEOUT_MS = 30_000;
 
 const MAGIC = Buffer.from('OCA1', 'ascii');
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export interface LectureAudioBackupHeader {
   v: 1;
@@ -24,10 +27,6 @@ export interface LectureAudioBackupHeader {
   mime: string;
   durationSec: number;
   bytes: number;
-}
-
-export function lectureAudioObjectPath(secret: string, date: string): string {
-  return `feeds/${feedDocId(secret)}/days/${date}.audio.enc`;
 }
 
 export function encryptLectureAudio(
@@ -91,24 +90,73 @@ function extForFile(filePath: string): 'm4a' | 'mp3' | 'wav' {
   return 'wav';
 }
 
-export async function uploadLectureAudioBackup(
+export function splitAudioBlob(blob: Buffer): string[] {
+  if (!Buffer.isBuffer(blob) || blob.length === 0) return [];
+  const chunks: string[] = [];
+  for (let off = 0; off < blob.length; off += AUDIO_CHUNK_RAW_BYTES) {
+    chunks.push(blob.subarray(off, off + AUDIO_CHUNK_RAW_BYTES).toString('base64'));
+  }
+  return chunks;
+}
+
+export function joinAudioChunks(chunks: string[]): Buffer {
+  return Buffer.concat(chunks.map((c) => Buffer.from(c, 'base64')));
+}
+
+export interface FirestoreChunkWrite {
+  update: {
+    name: string;
+    fields: {
+      data: { stringValue: string };
+      updatedAt: { stringValue: string };
+    };
+  };
+}
+
+export function buildAudioChunkWrites(
+  secret: string,
+  date: string,
+  chunks: string[],
+  updatedAt: string
+): FirestoreChunkWrite[] | null {
+  if (!secret || !DATE_RE.test(date)) return null;
+  if (chunks.length > AUDIO_CHUNK_MAX) return null;
+  const docId = feedDocId(secret);
+  const writes: FirestoreChunkWrite[] = [];
+  for (let n = 0; n < chunks.length; n++) {
+    const name = firestoreDocName(`feeds/${docId}/days/${date}/audio/${n}`);
+    if (!name) return null;
+    writes.push({
+      update: {
+        name,
+        fields: {
+          data: { stringValue: chunks[n] },
+          updatedAt: { stringValue: updatedAt },
+        },
+      },
+    });
+  }
+  return writes;
+}
+
+export type PreparedLectureAudioChunks =
+  | { ok: true; chunks: string[]; bytes: number }
+  | { ok: false; tooLarge: true; chunks: number; bytes: number }
+  | { ok: false; tooLarge: false };
+
+export function prepareLectureAudioChunks(
   secret: string,
   state: LectureState,
-  audioPath: string,
-  isCurrent: () => boolean,
-  opts: { bucket?: string } = {}
-): Promise<boolean> {
-  if (!secret || !state.audioBackupId || !isCurrent()) return false;
-  const bucket = opts.bucket ?? readStorageBucket();
-  if (!bucket) return false;
-  const url = storageUploadUrl(bucket, lectureAudioObjectPath(secret, state.date));
-  if (!url) return false;
-
+  audioPath: string
+): PreparedLectureAudioChunks {
+  if (!secret || !state.audioBackupId || !DATE_RE.test(state.date)) {
+    return { ok: false, tooLarge: false };
+  }
   let audio: Buffer;
   try {
     audio = fs.readFileSync(audioPath);
   } catch {
-    return false;
+    return { ok: false, tooLarge: false };
   }
   const ext = extForFile(audioPath);
   const mime = state.audioMime || mimeForAudioFile(audioPath);
@@ -125,69 +173,76 @@ export async function uploadLectureAudioBackup(
     },
     audio
   );
-  if (blob.length > LECTURE_AUDIO_BACKUP_MAX_BYTES) return false;
-  if (!isCurrent()) return false;
-
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), AUDIO_BACKUP_UPLOAD_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: new Uint8Array(blob),
-      signal: ac.signal,
-    });
-    if (!res.ok) {
-      console.warn('[lecture] audio backup upload failed', res.status);
-      return false;
-    }
-    return true;
-  } catch (err: any) {
-    console.warn('[lecture] audio backup upload failed', err?.name || 'error');
-    return false;
-  } finally {
-    clearTimeout(timer);
+  const chunks = splitAudioBlob(blob);
+  if (chunks.length === 0) return { ok: false, tooLarge: false };
+  if (chunks.length > AUDIO_CHUNK_MAX) {
+    return { ok: false, tooLarge: true, chunks: chunks.length, bytes: blob.length };
   }
+  return { ok: true, chunks, bytes: blob.length };
 }
 
-export async function loadLectureAudioBackup(
+export interface LoadedLectureAudio {
+  ext: 'm4a' | 'mp3' | 'wav';
+  mime: string;
+  buffer: Buffer;
+  durationSec: number;
+}
+
+export type LoadLectureAudioResult =
+  | ({ status: 'ok' } & LoadedLectureAudio)
+  | { status: 'missing' }
+  | { status: 'transient' };
+
+export async function loadLectureAudioChunks(
   secret: string,
   date: string,
   expectId: string,
-  opts: { bucket?: string } = {}
-): Promise<{ ext: 'm4a' | 'mp3' | 'wav'; mime: string; buffer: Buffer; durationSec: number } | null> {
-  if (!secret || !expectId) return null;
-  const bucket = opts.bucket ?? readStorageBucket();
-  if (!bucket) return null;
-  const url = storageMediaUrl(bucket, lectureAudioObjectPath(secret, date));
-  if (!url) return null;
+  count: number
+): Promise<LoadLectureAudioResult> {
+  if (!secret || !expectId || !DATE_RE.test(date)) return { status: 'missing' };
+  if (!Number.isInteger(count) || count < 1 || count > AUDIO_CHUNK_MAX) return { status: 'missing' };
 
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), AUDIO_BACKUP_DOWNLOAD_TIMEOUT_MS);
+  const docId = feedDocId(secret);
+  const urls: string[] = [];
+  for (let n = 0; n < count; n++) {
+    const url = firestoreDocUrl(`feeds/${docId}/days/${date}/audio/${n}`);
+    if (!url) return { status: 'transient' };
+    urls.push(url);
+  }
+
   try {
-    const res = await fetch(url, { signal: ac.signal });
-    if (!res.ok) return null;
-    let blob: Buffer;
-    if (res.body) {
-      blob = await readStreamWithLimit(res.body, LECTURE_AUDIO_BACKUP_MAX_BYTES);
-    } else if (typeof (res as any).arrayBuffer === 'function') {
-      const ab = await res.arrayBuffer();
-      if (ab.byteLength > LECTURE_AUDIO_BACKUP_MAX_BYTES) return null;
-      blob = Buffer.from(ab);
-    } else {
-      return null;
-    }
+    const signal = AbortSignal.timeout(AUDIO_BACKUP_DOWNLOAD_TIMEOUT_MS);
+    const chunkResults = await Promise.all(
+      urls.map(async (url) => {
+        const res = await fetch(url, { signal });
+        if (!res.ok) {
+          await res.body?.cancel?.().catch(() => {});
+          return res.status === 404
+            ? ({ status: 'missing' } as const)
+            : ({ status: 'transient' } as const);
+        }
+        const json: any = await res.json();
+        const data = json?.fields?.data?.stringValue;
+        if (typeof data !== 'string' || data.length === 0) {
+          return { status: 'missing' } as const;
+        }
+        return { status: 'ok', data } as const;
+      })
+    );
+    if (chunkResults.some((c) => c.status === 'missing')) return { status: 'missing' };
+    if (chunkResults.some((c) => c.status === 'transient')) return { status: 'transient' };
+    const b64Chunks = chunkResults.map((c) => (c as { status: 'ok'; data: string }).data);
+    const blob = joinAudioChunks(b64Chunks);
     const dec = decryptLectureAudio(secret, date, blob);
-    if (!dec || dec.header.audioBackupId !== expectId) return null;
+    if (!dec || dec.header.audioBackupId !== expectId) return { status: 'missing' };
     return {
+      status: 'ok',
       ext: dec.header.ext,
       mime: dec.header.mime,
       buffer: dec.audio,
       durationSec: dec.header.durationSec,
     };
   } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
+    return { status: 'transient' };
   }
 }

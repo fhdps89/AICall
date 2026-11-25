@@ -4,6 +4,25 @@
 
 ---
 
+### [2026-11-25 KST] v2.10.0 이후 수정(미배포) — 아침 강의 오디오 백업을 Firestore 청크로 이전·TTS 재생성 실패 진단 (브랜치 `englead/lecture-audio-backup-20261125`)
+- **배경**:
+  - 11/25 강의(08:08 ready, 5항목)는 08:30 PR #48 배포 뒤 TTS 재생성으로 한 번 되살아났지만(days 백업 `updatedAt` 08:36 KST), 컨테이너가 다시 켜진 뒤 09:45 확인 때 오디오 없이 `GENERATION_FAILED`였다.
+  - 증상 1(백업 없음): PR #47의 Storage 백업 규칙은 `firestore.exists(/databases/ai-studio-.../...)`를 썼다. Firebase 공식 문서상 Storage 규칙은 기본 `(default)` DB만 읽을 수 있어 이 조건은 참이 될 수 없고, 서버의 무인증 업로드는 늘 거부됐다. 규칙 자체는 게시돼 있었다(공개 GET 실측: 무작위 feedId 경로 404, 다른 경로 403). 11/24·11/25 days 백업 모두 `audioBackupId`가 없다(업로드 실패 시 지우는 코드 경로와 일치). 업로드의 403 응답 자체는 로그 접근이 없어 직접 보지 못했다.
+  - 증상 2(재생성 실패): 실제 11/25 대본(5항목)으로 TTS만 스텁으로 바꿔 재생성을 재현하면 길이 0.6–1.25배 모두 정상 완료됐다(대본 정리·길이 맞추기·조립 경로는 원인이 아님). 실패 처리부가 시간 초과 말고는 모든 오류를 `GENERATION_FAILED`로 덮고 원문 오류는 서버 로그에만 남겨 실제 원인은 알 수 없었다. 실패 시각이 days 백업에 남지 않아 재시작마다 조각 12개 TTS를 다시 호출했다. 같은 날 같은 키·대본이 1시간 전에 성공한 점으로 보아 TTS 쿼터(429)가 가장 유력하지만 확인되지 않았다.
+- **수정**:
+  - `server/lectureAudioBackup.ts`: Storage 업로드·다운로드 삭제. OCA1 암호 blob을 600,000바이트(base64 800,000자) 단위로 최대 8청크로 나누는 `splitAudioBlob`·`joinAudioChunks`·`buildAudioChunkWrites`·`prepareLectureAudioChunks`·`loadLectureAudioChunks`.
+  - `server/feedStore.ts`: `persistLectureBackups`가 청크 n개와 days 문서를 Firestore `documents:commit` 한 번으로 쓰고 결과(`AudioBackupResult`: ok·denied·too_large·timeout·network·http_error·no_file·not_current)를 돌려줌. 실패·8청크 초과면 포인터 없는 days PATCH로 폴백. `saveLectureFailureBackup` 추가, 백업 허용 필드에 `audioChunks`·`audioRebuildFailedAt`·`audioRetryAfter`·`audioError`·`audioBackup` 추가, `loadLectureBackup`도 같은 정리 함수를 거침.
+  - `server/lectureAudioError.ts`(신규): `classifyLectureAudioError`(QUOTA·QUOTA_DAILY·MODEL_NOT_FOUND·AUTH·BAD_REQUEST·UNAVAILABLE·STEP_TIMEOUT·REBUILD_TIMEOUT·NO_AUDIO·FIT_NO_CONVERGE·DISK·NETWORK·UNKNOWN), `sanitizeAudioError`, `sanitizeAudioBackupResult`, `cooldownMsFor`, `retryableFor`. 메시지 원문·URL·키는 결과에 넣지 않음.
+  - `server/lecture.ts`: 재생성·생성 실패 시 `error` 문자열은 그대로 두고 `audioError`·`audioRetryAfter` 기록, 로그는 분류 결과만. `onFailed` 훅. `synthesizeGemini`는 비재시도 오류 즉시 중단, 분당 QUOTA는 `retryDelay`(최대 60초, 없으면 20초) 동안 모든 워커 대기, 마지막 시도 뒤 대기 없음, 시도마다 `AbortSignal.any([작업, timeout])`로 HTTP 요청 중단. `installBackupLectureWithoutAudio`, `recordLectureBackupResult` 추가.
+  - `server/feed.ts`·`server.ts`: 쿨다운(`audioRetryAfter`, 없으면 실패 시각+30분) 중이면 TTS 대신 대본만 로컬에 설치. 복원 순서 청크 → TTS. `feedOnFailed`, 생성·재생성 라우트에 `onFailed`·백업 결과 기록. `diag.json`에 `audioError`·`audioRetryAfter`·`audioBackup`.
+  - `firestore.rules`: `feeds/{feedId}/days/{date}/audio/{n}` 블록(부모 feed 문서 존재 시 무인증 쓰기, `data`≤800,000자·`updatedAt`만, n 0–7, 삭제는 소유자). `storage.rules`: 동작하지 않던 feeds 블록 삭제. `server/storageRelay.ts`: 쓰지 않게 된 `storageUploadUrl` 삭제.
+- **방어 조치 (Safeguards)**: `tests/lectureAudioChunks.test.ts`(2.7MB 5청크 왕복, 17MB too_large, commit 200·403 폴백, isCurrent=false 0회, 로그 비노출, 청크 누락·섞임·id 불일치, ensure 청크 복원·폴백), `tests/lectureAudioError.test.ts`(분류표·키 허용 목록·마커 비노출, 재시도·백오프, 429 재생성 기록·onFailed·superseded, 쿨다운 중 restore·startJob 0회, 성공 시 오류 필드 삭제), `tests/rulesAudio.test.ts`(규칙 정적 검사), `feedDiag`·`lectureAudioBackup` 테스트 갱신.
+- **리뷰 후속 보완(Claude CLI Opus 리뷰 7.5/10 지적 반영)**: 실패 백업이 정상 오디오 포인터를 지우지 않도록 보존(청크 GET이 404·GCM 실패·id 불일치로 무효 확인된 때만 제거, 타임아웃·5xx는 유지), `onFailed`는 기다리지 않고 실행해 그동안 수동 rebuild가 무시되지 않게 함, days PATCH 10초 타임아웃, 공용 pause 계산·retryDelay 하한 1초, `lecture job timed out` 분류, rebuild 쿨다운도 `audioRetryAfter` 우선, 쿨다운 중에도 콜드 스타트 백업의 청크 복원은 시도(TTS만 막음), 로그에 `errName`만 추가. 테스트: pause 공유·상한, 시도별 abort, job 실패 순서, 8/9청크 경계, commit timeout, 포인터 보존·제거, 느린 onFailed 중 수동 rebuild, 쿨다운 중 청크 복원.
+- **검증**: `npm test` 518/518, `npx tsc --noEmit -p tsconfig.json`, `npx tsc --noEmit -p tsconfig.server.json`, `npm run lint`, `npm run build` 통과. 머지·배포 안 함.
+- **배포 시 수동 작업**: ① Firebase 콘솔 → Firestore → named DB `ai-studio-aicall-...` → 규칙에 `firestore.rules` 게시(필수, 게시 전에는 `audioBackup.result=denied`) ② Storage 규칙에 `storage.rules` 게시(선택, 쓰지 않는 feeds 경로 정리).
+
+---
+
 ### [2026-11-25 KST] v2.10.0 이후 수정(미배포) — 게시본에 섞인 옛 .data와 최신 feed 백업 무시 수정 (브랜치 `englead/feed-stale-data-20261125`)
 - **배경**:
   - 라이브 서버(AI Studio Publish → Cloud Run)가 오전 내내 피드 상태 `nothing`을 반환했다. `/feed/:secret/audio/2026-11-24.m4a`의 `Last-Modified`가 Publish(15:02 KST / 06:02Z) 이전인 `2026-11-24 03:04:46 GMT`이고 진단(`diag.json`)의 `syncedAt`이 `2026-11-24T03:03:19Z`였으며, `.dockerignore`와 `.gcloudignore`에 `.data`가 빠져 있어 개발 작업 공간의 옛 `.data/`가 게시 이미지에 그대로 포함되었다.

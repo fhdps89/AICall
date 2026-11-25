@@ -10,7 +10,6 @@ import {
   relayContentType,
   relayErrorFor,
   storageMediaUrl,
-  storageUploadUrl,
   storageObjectPath,
 } from "../server/storageRelay.ts";
 
@@ -151,15 +150,4 @@ test("readStreamWithLimit: 상한 초과 시 즉시 스트림 취소 및 Storage
   await assert.rejects(() => readStreamWithLimit(stream, 10), (err) => err instanceof StorageFileTooLargeError);
   assert.equal(cancelled, true);
   assert.ok(pulled <= 2);
-});
-
-test("storageUploadUrl: 정상 버킷·경로 허용, 잘못된 버킷·빈 경로 거부", () => {
-  const url = storageUploadUrl("my-bucket.firebasestorage.app", "feeds/abcd/days/2026-11-24.audio.enc");
-  assert.equal(
-    url,
-    "https://firebasestorage.googleapis.com/v0/b/my-bucket.firebasestorage.app/o?uploadType=media&name=feeds%2Fabcd%2Fdays%2F2026-11-24.audio.enc"
-  );
-  assert.equal(storageUploadUrl("", "feeds/abcd/days/2026-11-24.audio.enc"), null);
-  assert.equal(storageUploadUrl("BAD_BUCKET!", "feeds/abcd/days/2026-11-24.audio.enc"), null);
-  assert.equal(storageUploadUrl("my-bucket.firebasestorage.app", ""), null);
 });
