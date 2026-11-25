@@ -388,9 +388,16 @@ test('(f) superseded caller abort produces no TTS attempt failed console.warn', 
       await synthesizeGemini(
         {
           models: {
-            generateContent: async () => {
-              ac.abort();
-              throw Object.assign(new Error('aborted by caller'), { name: 'AbortError' });
+            generateContent: (req: any) => {
+              const sig = req.config.abortSignal as AbortSignal;
+              setTimeout(() => ac.abort(), 5);
+              return new Promise((_resolve, reject) => {
+                sig.addEventListener(
+                  'abort',
+                  () => reject(Object.assign(new Error('aborted by caller'), { name: 'AbortError' })),
+                  { once: true }
+                );
+              });
             },
           },
         } as unknown as GoogleGenAI,
