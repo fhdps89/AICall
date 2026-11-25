@@ -8,6 +8,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { monitorEventLoopDelay } from 'perf_hooks';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
 import { TEXT_MODEL, GEMINI_TTS_MODEL } from '../src/config/models.ts';
@@ -153,6 +154,7 @@ function formatAudioFailureLog(classified: LectureAudioError, err: unknown): str
     ...(classified.segChars !== undefined ? { segChars: classified.segChars } : {}),
     ...(classified.elapsedMs !== undefined ? { elapsedMs: classified.elapsedMs } : {}),
     ...(classified.attemptMs !== undefined ? { attemptMs: classified.attemptMs } : {}),
+    ...(classified.loopDelayMaxMs !== undefined ? { loopDelayMaxMs: classified.loopDelayMaxMs } : {}),
     ...(errName ? { errName } : {}),
   });
 }
@@ -1651,6 +1653,24 @@ export interface SynthesizeGeminiOpts {
   sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>;
   now?: () => number;
   stepTimeoutMs?: number;
+  loopDelayMonitor?: () => { stop(): number };
+}
+
+function clampLoopDelayMs(v: number): number {
+  if (!Number.isFinite(v)) return 0;
+  return Math.max(0, Math.min(3_600_000, Math.round(v)));
+}
+
+function defaultLoopDelayMonitor(): { stop(): number } {
+  const h = monitorEventLoopDelay({ resolution: 20 });
+  h.enable();
+  return {
+    stop: () => {
+      h.disable();
+      const ms = Number.isFinite(h.max) ? Math.round(h.max / 1e6) : 0;
+      return clampLoopDelayMs(ms);
+    },
+  };
 }
 
 function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -1668,6 +1688,7 @@ export async function synthesizeGemini(
   const sleepFn = opts.sleepFn || defaultSleep;
   const nowFn = opts.now ?? Date.now;
   const stepTimeoutMs = opts.stepTimeoutMs ?? LECTURE_STEP_TIMEOUT_MS;
+  const loopDelayMonitorFn = opts.loopDelayMonitor ?? defaultLoopDelayMonitor;
   const speechConfig: any = twoSpeakers
     ? {
         multiSpeakerVoiceConfig: {
@@ -1679,28 +1700,37 @@ export async function synthesizeGemini(
       }
     : { voiceConfig: { prebuiltVoiceConfig: { voiceName: VOICE_COACH } } };
   const attemptMs: number[] = [];
+  let maxLoopDelayMs: number | undefined;
   let lastErr: any;
   for (let attempt = 0; attempt < 3; attempt++) {
     if (signal?.aborted) throw new Error('lecture job superseded');
     const timeoutSig = AbortSignal.timeout(stepTimeoutMs);
     const stepSig = signal ? AbortSignal.any([signal, timeoutSig]) : timeoutSig;
     const attemptStart = nowFn();
+    const loopMonitor = loopDelayMonitorFn();
+    let loopDelayMaxMs = 0;
     try {
-      const response = await withAbort(
-        withTimeout(
-          ai.models.generateContent({
-            model: LECTURE_TTS_MODEL,
-            contents: [{ role: 'user', parts: toSpeechParts(text, twoSpeakers) }],
-            config: { abortSignal: stepSig, responseModalities: ['AUDIO'], speechConfig },
-          }),
-          stepTimeoutMs,
-          'lecture TTS'
-        ),
-        signal
-      );
-      const part = response.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData?.data);
-      if (!part?.inlineData?.data) throw new Error('TTS 음성 데이터 없음');
-      return parseAudio(part.inlineData.data, part.inlineData.mimeType || '');
+      try {
+        const response = await withAbort(
+          withTimeout(
+            ai.models.generateContent({
+              model: LECTURE_TTS_MODEL,
+              contents: [{ role: 'user', parts: toSpeechParts(text, twoSpeakers) }],
+              config: { abortSignal: stepSig, responseModalities: ['AUDIO'], speechConfig },
+            }),
+            stepTimeoutMs,
+            'lecture TTS'
+          ),
+          signal
+        );
+        const part = response.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData?.data);
+        if (!part?.inlineData?.data) throw new Error('TTS 음성 데이터 없음');
+        return parseAudio(part.inlineData.data, part.inlineData.mimeType || '');
+      } finally {
+        loopDelayMaxMs = clampLoopDelayMs(loopMonitor.stop());
+        maxLoopDelayMs =
+          maxLoopDelayMs === undefined ? loopDelayMaxMs : Math.max(maxLoopDelayMs, loopDelayMaxMs);
+      }
     } catch (err: any) {
       const elapsedMs = Math.max(0, Math.round(nowFn() - attemptStart));
       attemptMs.push(elapsedMs);
@@ -1714,6 +1744,8 @@ export async function synthesizeGemini(
       lastErr = attachErrorMeta(normalized, { stage: 'tts' });
       (lastErr as any).attempts = attempt + 1;
       (lastErr as any).attemptMs = [...attemptMs];
+      (lastErr as any).loopDelayMaxMs = maxLoopDelayMs;
+      if (signal?.aborted) throw lastErr;
       const classified = classifyLectureAudioError(lastErr, { stage: 'tts', attempts: attempt + 1 });
       const errName = safeErrName(lastErr);
       console.warn(
@@ -1721,11 +1753,11 @@ export async function synthesizeGemini(
         JSON.stringify({
           attempt: attempt + 1,
           elapsedMs,
+          loopDelayMaxMs,
           errName,
           code: classified.code,
         })
       );
-      if (signal?.aborted) throw lastErr;
       if (!retryableFor(classified.code) || attempt === 2) {
         throw lastErr;
       }

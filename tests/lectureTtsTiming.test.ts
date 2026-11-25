@@ -96,7 +96,10 @@ test('(a) synthesizeGemini records attemptMs deltas via opts.now, logs safe atte
   attemptWarns.forEach((line, idx) => {
     assert.equal(line.includes('SECRET_RAW_MSG_SHOULD_NOT_LOG'), false);
     const parsed = JSON.parse(line.replace('[Lecture] TTS attempt failed: ', ''));
-    assert.deepEqual(parsed, {
+    assert.equal(typeof parsed.loopDelayMaxMs, 'number');
+    assert.equal(Number.isInteger(parsed.loopDelayMaxMs) && parsed.loopDelayMaxMs >= 0, true);
+    const { loopDelayMaxMs: _ld, ...rest } = parsed;
+    assert.deepEqual(rest, {
       attempt: idx + 1,
       elapsedMs: 1000,
       errName: 'CustomTtsError',
@@ -113,7 +116,9 @@ test('(a) synthesizeGemini records attemptMs deltas via opts.now, logs safe atte
 
 test('(b) synthesizeGemini real GoogleGenAI SDK body stall classifies STEP_TIMEOUT after 3 attempts with attemptMs >= 150', async () => {
   const sockets = new Set<Socket>();
+  let requestCount = 0;
   const server = http.createServer((_req, res) => {
+    requestCount += 1;
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.write('{"candidates":[{"content":');
     // Intentionally never end response so body read stalls until stepTimeoutMs
@@ -141,19 +146,21 @@ test('(b) synthesizeGemini real GoogleGenAI SDK body stall classifies STEP_TIMEO
       caught = err;
     }
 
+    assert.equal(requestCount, 3);
     assert.equal(caught.attempts, 3);
     assert.ok(Array.isArray(caught.attemptMs));
     assert.equal(caught.attemptMs.length, 3);
     for (const ms of caught.attemptMs) {
-      assert.ok(ms >= 150, `expected attemptMs >= 150, got ${ms}`);
+      assert.ok(ms >= 150 && ms < 200 * 3, `expected 150 <= attemptMs < 600, got ${ms}`);
     }
 
     const classified = classifyLectureAudioError(caught, { stage: 'tts' });
     assert.equal(classified.code, 'STEP_TIMEOUT');
+    assert.equal(classified.errName, 'TimeoutError');
     assert.equal(classified.attempts, 3);
     assert.equal(classified.attemptMs?.length, 3);
     for (const ms of classified.attemptMs ?? []) {
-      assert.ok(ms >= 150, `expected classified attemptMs >= 150, got ${ms}`);
+      assert.ok(ms >= 150 && ms < 200 * 3, `expected 150 <= classified attemptMs < 600, got ${ms}`);
     }
   } finally {
     for (const sock of sockets) sock.destroy();
@@ -185,6 +192,7 @@ test('(c) sanitizeAudioError keeps valid new fields, drops invalid ones, and pre
     segChars: 85,
     elapsedMs: 90123,
     attemptMs: [90001, 90002, 90003],
+    loopDelayMaxMs: 420,
     errName: 'TimeoutError',
   };
   assert.deepEqual(sanitizeAudioError(withValid), withValid);
@@ -196,6 +204,7 @@ test('(c) sanitizeAudioError keeps valid new fields, drops invalid ones, and pre
       segChars: -5,
       elapsedMs: -10,
       attemptMs: [100, -1],
+      loopDelayMaxMs: -1,
       errName: 'https://bad-name',
     },
     {
@@ -204,6 +213,7 @@ test('(c) sanitizeAudioError keeps valid new fields, drops invalid ones, and pre
       segChars: 100_001,
       elapsedMs: 3_600_001,
       attemptMs: [10, 20, 30, 40],
+      loopDelayMaxMs: 3_600_001,
       errName: '1startsWithDigit',
     },
     {
@@ -212,6 +222,7 @@ test('(c) sanitizeAudioError keeps valid new fields, drops invalid ones, and pre
       segChars: Number.POSITIVE_INFINITY,
       elapsedMs: '123',
       attemptMs: [10, Number.NaN],
+      loopDelayMaxMs: 12.5,
       errName: 'A'.repeat(42),
     },
   ];
@@ -224,6 +235,7 @@ test('(c) sanitizeAudioError keeps valid new fields, drops invalid ones, and pre
     assert.equal('segChars' in out, false);
     assert.equal('elapsedMs' in out, false);
     assert.equal('attemptMs' in out, false);
+    assert.equal('loopDelayMaxMs' in out, false);
     assert.equal('errName' in out, false);
   }
 });
@@ -290,6 +302,7 @@ test('(d) end-to-end startLectureJob/renderAndSaveAudio attaches segIndex, segCh
               name: 'TimeoutError',
               attempts: 3,
               attemptMs: [40, 50, 60],
+              loopDelayMaxMs: 75,
             });
           }
           if (text === closingText) {
@@ -316,6 +329,7 @@ test('(d) end-to-end startLectureJob/renderAndSaveAudio attaches segIndex, segCh
     assert.equal(settled.audioError.completed, 2);
     assert.equal(settled.audioError.total, speechIndices.length);
     assert.deepEqual(settled.audioError.attemptMs, [40, 50, 60]);
+    assert.equal(settled.audioError.loopDelayMaxMs, 75);
     assert.equal(settled.audioError.errName, 'TimeoutError');
 
     assert.ok(segOkLogs.length >= 2);
@@ -330,6 +344,7 @@ test('(d) end-to-end startLectureJob/renderAndSaveAudio attaches segIndex, segCh
     assert.equal(parsedJobErr.segChars, thirdText.length);
     assert.equal(typeof parsedJobErr.elapsedMs, 'number');
     assert.deepEqual(parsedJobErr.attemptMs, [40, 50, 60]);
+    assert.equal(parsedJobErr.loopDelayMaxMs, 75);
   } finally {
     console.log = origLog;
     console.error = origErr;
@@ -359,4 +374,101 @@ test('(e) synthesizeGemini generic error keeps 3 attempts and [1500, 3000] sleep
   );
   assert.equal(calls, 3);
   assert.deepEqual(sleeps, [1500, 3000]);
+});
+
+test('(f) superseded caller abort produces no TTS attempt failed console.warn', async () => {
+  const ac = new AbortController();
+  const origWarn = console.warn;
+  const warnLogs: string[] = [];
+  console.warn = (...args: unknown[]) => warnLogs.push(args.map(String).join(' '));
+  let clock = 5000;
+  let caught: any;
+  try {
+    try {
+      await synthesizeGemini(
+        {
+          models: {
+            generateContent: async () => {
+              ac.abort();
+              throw Object.assign(new Error('aborted by caller'), { name: 'AbortError' });
+            },
+          },
+        } as unknown as GoogleGenAI,
+        'Coach: hi',
+        false,
+        ac.signal,
+        {
+          sleepFn: async () => {},
+          now: () => (clock += 250),
+          loopDelayMonitor: () => ({ stop: () => 5 }),
+        }
+      );
+      assert.fail('expected synthesizeGemini to throw');
+    } catch (err) {
+      caught = err;
+    }
+  } finally {
+    console.warn = origWarn;
+  }
+  assert.equal(caught.attempts, 1);
+  assert.deepEqual(caught.attemptMs, [250]);
+  const attemptWarns = warnLogs.filter((l) => l.startsWith('[Lecture] TTS attempt failed: '));
+  assert.equal(attemptWarns.length, 0);
+});
+
+test('(g) injected loopDelayMonitor values flow into error.loopDelayMaxMs (max across attempts) and classify/sanitize', async () => {
+  const samples = [25, 180, 60];
+  let monitorIdx = 0;
+  const origWarn = console.warn;
+  const warnLogs: string[] = [];
+  console.warn = (...args: unknown[]) => warnLogs.push(args.map(String).join(' '));
+  let caught: any;
+  try {
+    try {
+      await synthesizeGemini(
+        {
+          models: {
+            generateContent: async () => {
+              throw new Error('transient boom');
+            },
+          },
+        } as unknown as GoogleGenAI,
+        'Coach: hi',
+        false,
+        undefined,
+        {
+          sleepFn: async () => {},
+          now: () => 10_000,
+          loopDelayMonitor: () => ({ stop: () => samples[monitorIdx++] ?? 0 }),
+        }
+      );
+      assert.fail('expected synthesizeGemini to throw');
+    } catch (err) {
+      caught = err;
+    }
+  } finally {
+    console.warn = origWarn;
+  }
+
+  assert.equal(caught.loopDelayMaxMs, 180);
+  const attemptWarns = warnLogs.filter((l) => l.startsWith('[Lecture] TTS attempt failed: '));
+  assert.equal(attemptWarns.length, 3);
+  attemptWarns.forEach((line, idx) => {
+    const parsed = JSON.parse(line.replace('[Lecture] TTS attempt failed: ', ''));
+    assert.equal(parsed.loopDelayMaxMs, samples[idx]);
+  });
+
+  const classified = classifyLectureAudioError(caught, { stage: 'tts' });
+  assert.equal(classified.loopDelayMaxMs, 180);
+  const sanitized = sanitizeAudioError(classified);
+  assert.equal(sanitized?.loopDelayMaxMs, 180);
+
+  const droppedNeg = sanitizeAudioError({ ...classified, loopDelayMaxMs: -1 });
+  assert.equal('loopDelayMaxMs' in (droppedNeg ?? {}), false);
+  const droppedHuge = sanitizeAudioError({ ...classified, loopDelayMaxMs: 3_600_001 });
+  assert.equal('loopDelayMaxMs' in (droppedHuge ?? {}), false);
+  const droppedFloat = sanitizeAudioError({ ...classified, loopDelayMaxMs: 12.3 });
+  assert.equal('loopDelayMaxMs' in (droppedFloat ?? {}), false);
+  const droppedStr = sanitizeAudioError({ ...classified, loopDelayMaxMs: '180' as any });
+  assert.equal('loopDelayMaxMs' in (droppedStr ?? {}), false);
 });

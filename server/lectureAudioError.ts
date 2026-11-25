@@ -71,6 +71,7 @@ export interface LectureAudioError {
   segChars?: number;
   elapsedMs?: number;
   attemptMs?: number[];
+  loopDelayMaxMs?: number;
   errName?: string;
 }
 
@@ -240,6 +241,7 @@ export function classifyLectureAudioError(
   const rawElapsed = obj.segElapsedMs !== undefined ? obj.segElapsedMs : obj.elapsedMs;
   const elapsedMs = validOptInt(rawElapsed, 3_600_000);
   const attemptMs = validAttemptMs(obj.attemptMs);
+  const loopDelayMaxMs = validOptInt(obj.loopDelayMaxMs, 3_600_000);
   const errName = safeErrName(err);
 
   let code: AudioErrorCode = 'UNKNOWN';
@@ -305,6 +307,7 @@ export function classifyLectureAudioError(
     ...(segChars !== undefined ? { segChars } : {}),
     ...(elapsedMs !== undefined ? { elapsedMs } : {}),
     ...(attemptMs !== undefined ? { attemptMs } : {}),
+    ...(loopDelayMaxMs !== undefined ? { loopDelayMaxMs } : {}),
     ...(errName !== undefined ? { errName } : {}),
   };
 }
@@ -333,6 +336,7 @@ export function sanitizeAudioError(raw: unknown): LectureAudioError | undefined 
   const segChars = validOptInt(r.segChars, 100_000);
   const elapsedMs = validOptInt(r.elapsedMs, 3_600_000);
   const attemptMs = validAttemptMs(r.attemptMs);
+  const loopDelayMaxMs = validOptInt(r.loopDelayMaxMs, 3_600_000);
   const errName = validErrName(r.errName);
 
   return {
@@ -351,6 +355,7 @@ export function sanitizeAudioError(raw: unknown): LectureAudioError | undefined 
     ...(segChars !== undefined ? { segChars } : {}),
     ...(elapsedMs !== undefined ? { elapsedMs } : {}),
     ...(attemptMs !== undefined ? { attemptMs } : {}),
+    ...(loopDelayMaxMs !== undefined ? { loopDelayMaxMs } : {}),
     ...(errName !== undefined ? { errName } : {}),
   };
 }

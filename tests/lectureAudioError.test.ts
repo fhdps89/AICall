@@ -99,6 +99,7 @@ const ALLOWED_ERROR_KEYS = new Set([
   'segChars',
   'elapsedMs',
   'attemptMs',
+  'loopDelayMaxMs',
   'errName',
 ]);
 
