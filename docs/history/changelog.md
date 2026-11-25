@@ -12,7 +12,7 @@
   - `src/ui/settings/UsagePanel.tsx`: 예상 비용을 저장값 대신 재계산값으로 표시(옛 기록 재평가), 개발자 모드 항목별 비용 행과 새 각주.
   - `server/usageMeta.ts`(신규) `tokensFromUsageMetadata`: 출력 = candidates + thoughts. `server.ts`·`server/mistakeClusters.ts`·`server/lectureSupplement.ts`·`server/lecture.ts`에 적용.
   - `server/lecture.ts`: 대본 입력/출력 토큰 분리, `createCachedSegmentSynth`로 캐시 미스 TTS만 `ttsAudioSec`·`ttsAudioChars`에 누적. `server/feedStore.ts` 백업·`lectureService.ts` 기록에 새 필드 전달.
-  - `learningLog.ts` `callUsageDelta`·`recoveredUsage.ts`·`SttBenchmarkModal.tsx`: 통화 분² 기록.
+  - `learningLog.ts` `liveContextMinutesSq`(컨텍스트 창 128k 토큰 상한 반영)·`callUsageDelta`·`recoveredUsage.ts`·`SttBenchmarkModal.tsx`: 통화 유효 분² 기록. 각주의 강의 음성 단가는 단가표에서 계산(`lectureAudioCostPerMinute`), 미사용 lite TTS 단가 제거.
 - **결과(이번 달 같은 기록 기준)**: $0.3669 → 약 $4.03(Live $2.40·받아쓰기 $0.35·텍스트 $0.53·TTS $0.76). 남은 차이는 QA봇 통화(옛 기록엔 분 미저장)·재생성 낭비·피드 강의 등 범위 밖 항목.
 - **방어 조치**: `tests/usageCost.test.ts`(신규) — 빈 문서 0·NaN 없음, 이번 달 옛 기록 ≈ $4.03, Sq 가산성, 옛+새 혼합 하한, 새 필드 저장, QA 델타, 복구 사용량 Sq, thinking 토큰 합산, 캐시 미스만 과금. `tests/lectureGenCost.test.ts`·`tests/lecturePersist.test.ts`의 피드 테스트가 00~05시 KST에 실패하던 벽시계 의존을 `now` 고정으로 해소.
 

@@ -4,6 +4,7 @@ import { User } from "firebase/auth";
 import { X, Mic, Square, Loader2, ChevronRight, Copy, Save } from "lucide-react";
 import { getUserMistakes, MistakeData } from "../../services/firebase/db";
 import { recordUsage } from "../../services/usage/usageService";
+import { liveContextMinutesSq } from "../../services/usage/learningLog";
 import {
   BENCH_ENGINES,
   BenchEngine,
@@ -102,7 +103,7 @@ export const SttBenchmarkModal: React.FC<{ user: User; onClose: () => void }> = 
           const suggested = suggestPreserved(out.output || "", cur.myPhrase, cur.naturalPhrase);
           setResults((r) => ({ ...r, [engine]: { status: "done", output: out.output, suggested, judged: suggested } }));
           if (engine !== "live") recordUsage(user.uid, { sttMinutes: minutes, sttEngine: engine === "assemblyai" ? "assemblyai" : "gemini" });
-          else recordUsage(user.uid, { liveMinutes: minutes, liveMinutesSq: minutes * minutes });
+          else recordUsage(user.uid, { liveMinutes: minutes, liveMinutesSq: liveContextMinutesSq(minutes) });
         } else {
           setResults((r) => ({ ...r, [engine]: { status: out.skipped ? "skipped" : "error", error: out.error } }));
         }

@@ -315,3 +315,70 @@ test('lecture billed TTS helper excludes cache hits and sanitizeLectureScriptPay
     assert.equal(sanitized.payload.ttsAudioChars, 410);
   }
 });
+
+test('live context re-billing is capped by the sliding context window for very long calls', async () => {
+  const { liveContextMinutesSq } = await import('../src/services/usage/learningLog.ts');
+  const { USAGE_ASSUMPTIONS } = await import('../src/config/models.ts');
+  const a = USAGE_ASSUMPTIONS;
+  const capMin = a.liveContextWindowTokens / (a.audioTokensPerSec * 60 * (1 + a.liveModelTalkShare));
+  assert.equal(liveContextMinutesSq(10), 100);
+  assert.equal(liveContextMinutesSq(0), 0);
+  assert.equal(liveContextMinutesSq(-5), 0);
+  assert.equal(liveContextMinutesSq(Number.NaN), 0);
+  const t = 180;
+  const expected = 2 * capMin * t - capMin * capMin;
+  assert.ok(Math.abs(liveContextMinutesSq(t) - expected) < 1e-9);
+  assert.ok(liveContextMinutesSq(t) < t * t);
+  // continuous at the cap
+  assert.ok(Math.abs(liveContextMinutesSq(capMin) - capMin * capMin) < 1e-9);
+});
+
+test('lecture audio cost per minute is derived from the TTS rate (1,500 tok/min x $9/M)', async () => {
+  const { lectureAudioCostPerMinute } = await import('../src/services/usage/usageService.ts');
+  assert.ok(Math.abs(lectureAudioCostPerMinute() - 0.0135) < 1e-12);
+});
+
+test('createCachedSegmentSynth: failed synth is not billed; corrupt (odd-length) cache is re-synthesized and billed', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'segsynth-edge-'));
+  try {
+    const rate = 24000;
+    let misses = 0;
+    const failing = createCachedSegmentSynth({
+      segDir: tmpDir,
+      rate,
+      synthOne: async () => {
+        throw new Error('429');
+      },
+      onMiss: () => {
+        misses += 1;
+      },
+    });
+    await assert.rejects(failing.synth(0, 'abc', false), /429/);
+    assert.equal(misses, 0);
+    assert.equal(failing.billedSamples(), 0);
+    assert.equal(failing.billedChars(), 0);
+
+    const ok = createCachedSegmentSynth({
+      segDir: tmpDir,
+      rate,
+      synthOne: async (text) => ({ data: Buffer.alloc(text.length * rate * 2), rate }),
+      onMiss: () => {
+        misses += 1;
+      },
+    });
+    await ok.synth(7, 'xy', false);
+    const cacheFile = fs.readdirSync(tmpDir).find((f) => f.startsWith('7-') && f.endsWith('.pcm'));
+    assert.ok(cacheFile);
+    fs.writeFileSync(path.join(tmpDir, cacheFile!), Buffer.alloc(3)); // corrupt: odd length
+    const again = createCachedSegmentSynth({
+      segDir: tmpDir,
+      rate,
+      synthOne: async (text) => ({ data: Buffer.alloc(text.length * rate * 2), rate }),
+    });
+    await again.synth(7, 'xy', false);
+    assert.equal(again.billedChars(), 2);
+    assert.equal(again.billedSamples(), 2 * rate);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

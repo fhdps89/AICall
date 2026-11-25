@@ -2,7 +2,7 @@
  * 끊긴 통화 복구 시 누락된 통화 횟수·통화 분을 계산하는 순수 모듈 (Firebase·React 비의존).
  */
 import type { SessionData } from "../firebase/db";
-import { callsForDuration } from "../usage/learningLog";
+import { callsForDuration, liveContextMinutesSq } from "../usage/learningLog";
 
 export const MAX_RECOVERED_CALL_SEC = 3 * 60 * 60;
 
@@ -85,7 +85,7 @@ export function recoveredCallUsage(
   const m = sec / 60;
   return {
     liveMinutes: m,
-    liveMinutesSq: m * m,
+    liveMinutesSq: liveContextMinutesSq(m),
     calls: callsForDuration(sec),
   };
 }

@@ -7,6 +7,7 @@ import { doc, getDoc, setDoc, increment, FieldValue } from "firebase/firestore";
 import { db } from "../firebase/config";
 import { PRICING_RATES, USAGE_ASSUMPTIONS } from "../../config/models";
 import { getKSTToday } from "../firebase/db";
+import { liveContextMinutesSq } from "./learningLog";
 
 export interface UsageDelta {
   liveMinutes?: number;
@@ -63,6 +64,12 @@ export interface UsageMonth {
   days?: Record<string, UsageDay>;
 }
 
+/**
+ * Re-pricing limits (documented): QA minutes recorded before qaLiveMinutes was stored and the
+ * AssemblyAI/ElevenLabs engine split are not in the usage doc, so priceUsage() prices only what is stored,
+ * with gemini rates. ttsAudioChars here means "chars already covered by ttsAudioSec" (the client sends the
+ * lecture's total chars), not the server's cache-miss char count.
+ */
 export interface UsageCostBreakdown {
   live: number;
   qaLive: number;
@@ -104,14 +111,16 @@ export function priceUsage(u: UsageDay | UsageMonth | null | undefined): UsageCo
 
   const liveMin = nonNeg(u?.liveMinutes);
   const calls = nonNeg(u?.calls);
-  const liveSq = Math.max(nonNeg(u?.liveMinutesSq), calls > 0 ? (liveMin * liveMin) / calls : 0);
+  // Lower bound for months/days recorded before liveMinutesSq existed: every call at the average length
+  // (Cauchy–Schwarz), with the same context-window cap as per-call recording.
+  const liveSq = Math.max(nonNeg(u?.liveMinutesSq), calls > 0 ? calls * liveContextMinutesSq(liveMin / calls) : 0);
   const live = liveCost(liveMin, liveSq);
 
   const qaMin = nonNeg(u?.qaLiveMinutes);
   const qaSqRaw = nonNeg(u?.qaLiveMinutesSq);
   // qaCalls is not stored separately; when qaLiveMinutesSq is missing on positive qaLiveMinutes,
   // use qaMin^2 as a 1-call lower bound so context re-billing is not dropped.
-  const qaSq = qaMin > 0 ? (qaSqRaw > 0 ? qaSqRaw : qaMin * qaMin) : 0;
+  const qaSq = qaMin > 0 ? (qaSqRaw > 0 ? qaSqRaw : liveContextMinutesSq(qaMin)) : 0;
   const qaLive = liveCost(qaMin, qaSq);
 
   const sttMin = nonNeg(u?.sttMinutes);
@@ -150,6 +159,11 @@ export function liveCostPerMinute(u?: UsageDay | UsageMonth | null): number {
     return priceUsage(u).live / min;
   }
   return priceUsage({ liveMinutes: 3, liveMinutesSq: 9, calls: 1 }).live / 3;
+}
+
+/** Lecture TTS output audio USD per minute of generated audio (gemini-3.8-flash-tts). */
+export function lectureAudioCostPerMinute(): number {
+  return (USAGE_ASSUMPTIONS.audioTokensPerSec * 60 * PRICING_RATES.ttsOutAudioPer1M) / 1_000_000;
 }
 
 export function estimateCostUsd(d: UsageDelta): number {

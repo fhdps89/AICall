@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { liveContextMinutesSq } from "../src/services/usage/learningLog.ts";
 import {
   MAX_RECOVERED_CALL_SEC,
   createRecoveredUsageRecorder,
@@ -94,7 +95,9 @@ test("recoveredCallUsage: 3시간 상한 및 startedAt 이상값 거부", () => 
     "2026-11-21"
   );
   const maxMin = MAX_RECOVERED_CALL_SEC / 60;
-  assert.deepEqual(capped, { liveMinutes: maxMin, liveMinutesSq: maxMin * maxMin, calls: 1 });
+  // 3h call: context re-billing is capped by the sliding window, so Sq < maxMin²
+  assert.deepEqual(capped, { liveMinutes: maxMin, liveMinutesSq: liveContextMinutesSq(maxMin), calls: 1 });
+  assert.ok(capped!.liveMinutesSq < maxMin * maxMin);
 
   assert.equal(
     recoveredCallUsage(

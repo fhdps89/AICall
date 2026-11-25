@@ -36,7 +36,6 @@ export const PRICING_RATES = {
   textOutPer1M: 3.75,
   ttsInPer1M: 0.5,
   ttsOutAudioPer1M: 9,
-  ttsLiteOutAudioPer1M: 6,
   sttPerMinuteAssembly: 0.006,
   ttsPer1kCharsElevenLabs: 0.015,
   sieEmbedPer1MTokens: 0.06,
@@ -52,6 +51,8 @@ export const USAGE_ASSUMPTIONS = {
   liveModelTalkShare: 0.5,
   /** ~1 user/tutor turn exchange every 15s (4 turns/min). */
   liveTurnsPerMin: 4,
+  /** Live session context window; slidingWindow compression keeps context at about this size, so re-billing stops growing past it. */
+  liveContextWindowTokens: 128_000,
   /** lessonPromptBuilder (~4.3KB) + goal context re-billed on every Live turn. */
   liveSystemPromptTokens: 1500,
   /** ~150 spoken words/min plus speaker labels and timestamps. */

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Loader2, Flame } from "lucide-react";
-import { getUsageMonths, liveCostPerMinute, priceUsage, UsageMonth } from "../../services/usage/usageService";
+import { getUsageMonths, lectureAudioCostPerMinute, liveCostPerMinute, priceUsage, UsageMonth } from "../../services/usage/usageService";
 import {
   getRecentMonthKeys,
   isActiveLearningDay,
@@ -63,6 +63,7 @@ export const UsagePanel: React.FC<{ userId?: string }> = ({ userId }) => {
   const monthCost = priceUsage(usage);
   const dayCost = priceUsage(d);
   const livePerMin = liveCostPerMinute(usage);
+  const lectureAudioPerMin = lectureAudioCostPerMinute();
   const usd = (n?: number) => `$${(n || 0).toFixed(4)}`;
   const rows: [string, string, string][] = [
     ["통화", `${(usage?.liveMinutes || 0).toFixed(1)}분`, `${(d?.liveMinutes || 0).toFixed(1)}분`],
@@ -195,7 +196,7 @@ export const UsagePanel: React.FC<{ userId?: string }> = ({ userId }) => {
       <div className="text-[11px] text-slate-500">
         예상 비용은 추정치예요. 실제 청구액과 다를 수 있어요.
         {devMode && (
-          <> (공식 단가 기준 2026-11 · 통화 1분 ≈ ${livePerMin.toFixed(3)} 문맥 재과금 포함 추정 · 받아쓰기 2회(통화 중+종료 후) · 강의 음성 1분 ≈ $0.0135 · 재생성·QA봇 서버 작업 제외)</>
+          <> (공식 단가 기준 2026-11 · 통화 1분 ≈ ${livePerMin.toFixed(3)}(이번 달 평균, 문맥 재과금 포함 추정) · 받아쓰기 2회(통화 중+종료 후) · 강의 음성 1분 ≈ ${lectureAudioPerMin.toFixed(4)} · 재생성·QA봇 서버 작업 제외)</>
         )}
       </div>
     </div>
