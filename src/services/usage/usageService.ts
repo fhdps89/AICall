@@ -118,8 +118,8 @@ export function priceUsage(u: UsageDay | UsageMonth | null | undefined): UsageCo
 
   const qaMin = nonNeg(u?.qaLiveMinutes);
   const qaSqRaw = nonNeg(u?.qaLiveMinutesSq);
-  // qaCalls is not stored separately; when qaLiveMinutesSq is missing on positive qaLiveMinutes,
-  // use qaMin^2 as a 1-call lower bound so context re-billing is not dropped.
+  // qaCalls is not stored separately; qaLiveMinutes and qaLiveMinutesSq are written together, so this
+  // fallback (all QA minutes as one call, an upper bound) only guards malformed docs.
   const qaSq = qaMin > 0 ? (qaSqRaw > 0 ? qaSqRaw : liveContextMinutesSq(qaMin)) : 0;
   const qaLive = liveCost(qaMin, qaSq);
 

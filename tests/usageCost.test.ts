@@ -382,3 +382,20 @@ test('createCachedSegmentSynth: failed synth is not billed; corrupt (odd-length)
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('legacy live lower bound uses calls x capped Sq at the average call length', async () => {
+  const { liveContextMinutesSq } = await import('../src/services/usage/learningLog.ts');
+  const legacy = priceUsage({ liveMinutes: 200, calls: 2, sttMinutes: 0, textTokens: 0, ttsChars: 0, estCostUsd: 0 });
+  const explicit = priceUsage({
+    liveMinutes: 200,
+    calls: 2,
+    liveMinutesSq: 2 * liveContextMinutesSq(100),
+    sttMinutes: 0,
+    textTokens: 0,
+    ttsChars: 0,
+    estCostUsd: 0,
+  });
+  assert.ok(Math.abs(legacy.live - explicit.live) < 1e-12);
+  // the average (100 min) is past the cap, so the bound is below the uncapped calls x avg²
+  assert.ok(2 * liveContextMinutesSq(100) < 2 * 100 * 100);
+});

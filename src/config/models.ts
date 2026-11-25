@@ -51,7 +51,7 @@ export const USAGE_ASSUMPTIONS = {
   liveModelTalkShare: 0.5,
   /** ~1 user/tutor turn exchange every 15s (4 turns/min). */
   liveTurnsPerMin: 4,
-  /** Live session context window; slidingWindow compression keeps context at about this size, so re-billing stops growing past it. */
+  /** Cap for Live context re-billing: slidingWindow (default trigger/target) keeps context at or below this, so re-billing stops growing past it. Conservative: the real average after compression is lower. */
   liveContextWindowTokens: 128_000,
   /** lessonPromptBuilder (~4.3KB) + goal context re-billed on every Live turn. */
   liveSystemPromptTokens: 1500,
