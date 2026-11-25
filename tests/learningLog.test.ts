@@ -15,9 +15,9 @@ import {
   buildUsageFields,
   buildUsagePayload,
   estimateCostUsd,
+  priceUsage,
   type UsageMonth,
 } from '../src/services/usage/usageService.ts';
-import { PRICING_RATES } from '../src/config/models.ts';
 
 function makeMonth(
   days: Record<string, { calls?: number; liveMinutes?: number }>,
@@ -263,6 +263,7 @@ test('recentDays always has length 14 sorted oldest to newest', () => {
 test('buildUsageFields includes calls and leaves estCostUsd unchanged', () => {
   const baseDelta = {
     liveMinutes: 5,
+    liveMinutesSq: 25,
     sttMinutes: 2,
     textInputTokens: 1000,
     textOutputTokens: 500,
@@ -493,22 +494,25 @@ test('deriveHomeLearningStatus(null) hides both', () => {
 });
 
 test('callUsageDelta isolates QA calls from liveMinutes and calls while keeping qaLiveMinutes (A17)', () => {
-  assert.deepEqual(callUsageDelta(260, false), { liveMinutes: 260 / 60, calls: 1 });
+  const m = 260 / 60;
+  assert.deepEqual(callUsageDelta(260, false), { liveMinutes: m, liveMinutesSq: m * m, calls: 1 });
 
   const qa = callUsageDelta(260, true);
-  assert.deepEqual(qa, { qaLiveMinutes: 260 / 60 });
+  assert.deepEqual(qa, { qaLiveMinutes: m, qaLiveMinutesSq: m * m });
   assert.equal('liveMinutes' in qa, false);
   assert.equal('calls' in qa, false);
 
-  assert.deepEqual(callUsageDelta(5, false), { liveMinutes: 5 / 60, calls: 0 });
-  assert.deepEqual(callUsageDelta(Number.NaN, false), { liveMinutes: 0, calls: 0 });
+  const shortM = 5 / 60;
+  assert.deepEqual(callUsageDelta(5, false), { liveMinutes: shortM, liveMinutesSq: shortM * shortM, calls: 0 });
+  assert.deepEqual(callUsageDelta(Number.NaN, false), { liveMinutes: 0, liveMinutesSq: 0, calls: 0 });
 });
 
 test('qaLiveMinutes adds estCostUsd without counting as an active learning day or streak (A18)', () => {
-  const qaDayFields = buildUsageFields({ qaLiveMinutes: 4 }, (n) => n);
+  const qaDayFields = buildUsageFields({ qaLiveMinutes: 4, qaLiveMinutesSq: 16 }, (n) => n);
   assert.equal(qaDayFields.liveMinutes, 0);
   assert.equal(qaDayFields.calls, 0);
-  assert.equal(qaDayFields.estCostUsd, 4 * PRICING_RATES.livePerMinute);
+  assert.ok(qaDayFields.estCostUsd > 0);
+  assert.ok(Math.abs(qaDayFields.estCostUsd - priceUsage({ qaLiveMinutes: 4, qaLiveMinutesSq: 16 }).total) < 1e-12);
 
   const monthOnlyQa: UsageMonth = {
     liveMinutes: qaDayFields.liveMinutes,

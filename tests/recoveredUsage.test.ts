@@ -56,7 +56,7 @@ test("recoveredCallUsage: liveTranscript 마지막 timestamp가 더 늦으면 �
     },
     "2026-11-21"
   );
-  assert.deepEqual(usage, { liveMinutes: 2, calls: 1 });
+  assert.deepEqual(usage, { liveMinutes: 2, liveMinutesSq: 4, calls: 1 });
 });
 
 test("recoveredCallUsage: KST 날짜가 오늘과 다르면 null, KST 자정 넘긴 시각은 오늘로 기록", () => {
@@ -71,7 +71,7 @@ test("recoveredCallUsage: KST 날짜가 오늘과 다르면 null, KST 자정 넘
     },
     "2026-11-21"
   );
-  assert.deepEqual(midnightUsage, { liveMinutes: 1, calls: 1 });
+  assert.deepEqual(midnightUsage, { liveMinutes: 1, liveMinutesSq: 1, calls: 1 });
 
   const yesterdayUsage = recoveredCallUsage(
     {
@@ -93,7 +93,8 @@ test("recoveredCallUsage: 3시간 상한 및 startedAt 이상값 거부", () => 
     },
     "2026-11-21"
   );
-  assert.deepEqual(capped, { liveMinutes: MAX_RECOVERED_CALL_SEC / 60, calls: 1 });
+  const maxMin = MAX_RECOVERED_CALL_SEC / 60;
+  assert.deepEqual(capped, { liveMinutes: maxMin, liveMinutesSq: maxMin * maxMin, calls: 1 });
 
   assert.equal(
     recoveredCallUsage(
@@ -200,7 +201,7 @@ test("recoveredCallUsage: 무마이크(lastChunkAt==startedAt, liveTranscript �
     },
     "2026-11-21"
   );
-  assert.deepEqual(usage, { liveMinutes: 1.75, calls: 1 });
+  assert.deepEqual(usage, { liveMinutes: 1.75, liveMinutesSq: 1.75 * 1.75, calls: 1 });
 });
 
 test("recoveredCallUsage: 무마이크·timestamp 없음 → lastTranscriptAt만 있으면 그것으로, 둘 다 없으면 null", () => {
@@ -213,7 +214,7 @@ test("recoveredCallUsage: 무마이크·timestamp 없음 → lastTranscriptAt만
     },
     "2026-11-21"
   );
-  assert.deepEqual(withTranscriptAt, { liveMinutes: 0.5, calls: 1 });
+  assert.deepEqual(withTranscriptAt, { liveMinutes: 0.5, liveMinutesSq: 0.25, calls: 1 });
 
   const withNeither = recoveredCallUsage(
     {
@@ -252,7 +253,7 @@ test("recoveredCallUsage & parseTranscriptTimestamp: 문자열(숫자·ISO)은 �
     },
     "2026-11-21"
   );
-  assert.deepEqual(numericStrUsage, { liveMinutes: 0.75, calls: 1 });
+  assert.deepEqual(numericStrUsage, { liveMinutes: 0.75, liveMinutesSq: 0.75 * 0.75, calls: 1 });
 
   const isoStrUsage = recoveredCallUsage(
     {
@@ -262,7 +263,7 @@ test("recoveredCallUsage & parseTranscriptTimestamp: 문자열(숫자·ISO)은 �
     },
     "2026-11-21"
   );
-  assert.deepEqual(isoStrUsage, { liveMinutes: 1.5, calls: 1 });
+  assert.deepEqual(isoStrUsage, { liveMinutes: 1.5, liveMinutesSq: 2.25, calls: 1 });
 });
 
 test("recoveredCallUsage: 시작 이전 timestamp와 시작+3시간 초과 timestamp는 무시", () => {
@@ -281,7 +282,7 @@ test("recoveredCallUsage: 시작 이전 timestamp와 시작+3시간 초과 times
     },
     "2026-11-21"
   );
-  assert.deepEqual(ignoredOutliers, { liveMinutes: 1, calls: 1 });
+  assert.deepEqual(ignoredOutliers, { liveMinutes: 1, liveMinutesSq: 1, calls: 1 });
 
   // 시작 이전·3시간 초과만 있으면 후보가 없어 null
   const onlyOutliers = recoveredCallUsage(
@@ -306,7 +307,7 @@ test("recoveredCallUsage: updatedAt이 더 늦어도 결과 불변", () => {
     updatedAt: "2026-11-21T03:00:00.000Z",
     liveTranscript: [],
   };
-  assert.deepEqual(recoveredCallUsage(session, "2026-11-21"), { liveMinutes: 1, calls: 1 });
+  assert.deepEqual(recoveredCallUsage(session, "2026-11-21"), { liveMinutes: 1, liveMinutesSq: 1, calls: 1 });
 });
 
 test("recoveredCallUsage: lastTranscriptAt이 있어도 endedAt 있으면 null", () => {
@@ -328,7 +329,7 @@ test("recoveredCallUsage: lastTranscriptAt이 있어도 endedAt 있으면 null",
 test("createRecoveredUsageRecorder: 무마이크 세션 동시 2회 호출 → recordUsage 1회, 완료 후 재호출 0회", async () => {
   let recorded = false;
   let markCalls = 0;
-  const recordedUsages: Array<{ liveMinutes: number; calls: number }> = [];
+  const recordedUsages: Array<{ liveMinutes: number; liveMinutesSq: number; calls: number }> = [];
   let releaseGet!: () => void;
   const getGate = new Promise<void>((resolve) => {
     releaseGet = resolve;
@@ -363,7 +364,7 @@ test("createRecoveredUsageRecorder: 무마이크 세션 동시 2회 호출 → r
   assert.equal(r1, true);
   assert.equal(r2, false);
   assert.equal(markCalls, 1);
-  assert.deepEqual(recordedUsages, [{ liveMinutes: 1.75, calls: 1 }]);
+  assert.deepEqual(recordedUsages, [{ liveMinutes: 1.75, liveMinutesSq: 1.75 * 1.75, calls: 1 }]);
 
   const r3 = await recordOnce("u1", "s-nomic");
   assert.equal(r3, false);

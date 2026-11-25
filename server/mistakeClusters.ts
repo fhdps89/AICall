@@ -22,6 +22,7 @@ import {
   sha256Hex,
 } from './clusterMath.ts';
 import { embedTexts, type SieFailureReason } from './sieEmbeddings.ts';
+import { tokensFromUsageMetadata } from './usageMeta.ts';
 
 const NAMING_TIMEOUT_MS = 10_000;
 const MAX_SAMPLES_PER_CLUSTER = 5;
@@ -299,10 +300,11 @@ ${serialized}
 
     const parsed = JSON.parse(response.text?.trim() || '[]');
     const items = Array.isArray(parsed) ? (parsed as ClusterNamingOutputItem[]) : [];
+    const { inputTokens, outputTokens } = tokensFromUsageMetadata(response.usageMetadata);
     return {
       items,
-      inputTokens: response.usageMetadata?.promptTokenCount || 0,
-      outputTokens: response.usageMetadata?.candidatesTokenCount || 0,
+      inputTokens,
+      outputTokens,
     };
   } finally {
     if (timer !== undefined) clearTimeout(timer);

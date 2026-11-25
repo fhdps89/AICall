@@ -13,6 +13,7 @@ import {
   type MergedSupplementItem,
 } from '../src/services/lecture/lectureSource.ts';
 import { LECTURE_STEP_TIMEOUT_MS, withTimeout } from './lecture.ts';
+import { tokensFromUsageMetadata } from './usageMeta.ts';
 
 export const SUPPLEMENT_TIMEOUT_MS = LECTURE_STEP_TIMEOUT_MS;
 export const SUPPLEMENT_MAX_CORPUS_CHARS = 8000;
@@ -181,10 +182,7 @@ export async function runLectureSupplement(
     }));
 
     const usage = response?.usageMetadata
-      ? {
-          inputTokens: Number(response.usageMetadata.promptTokenCount || 0),
-          outputTokens: Number(response.usageMetadata.candidatesTokenCount || 0),
-        }
+      ? tokensFromUsageMetadata(response.usageMetadata)
       : undefined;
 
     return {

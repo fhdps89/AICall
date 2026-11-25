@@ -140,14 +140,15 @@ export function callsForDuration(sec: number): number {
 
 /**
  * 통화 종료 시 기록할 사용량 증분을 계산한다.
- * QA 통화는 비용만 남기도록 qaLiveMinutes만 반환하고 liveMinutes·calls는 넣지 않는다.
+ * QA 통화는 비용만 남기도록 qaLiveMinutes·qaLiveMinutesSq만 반환하고 liveMinutes·calls는 넣지 않는다.
  */
 export function callUsageDelta(durationSec: number, isQa: boolean): UsageDelta {
   const sec = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
+  const m = sec / 60;
   if (isQa) {
-    return { qaLiveMinutes: sec / 60 };
+    return { qaLiveMinutes: m, qaLiveMinutesSq: m * m };
   }
-  return { liveMinutes: sec / 60, calls: callsForDuration(sec) };
+  return { liveMinutes: m, liveMinutesSq: m * m, calls: callsForDuration(sec) };
 }
 
 /**

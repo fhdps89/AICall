@@ -102,7 +102,7 @@ export const SttBenchmarkModal: React.FC<{ user: User; onClose: () => void }> = 
           const suggested = suggestPreserved(out.output || "", cur.myPhrase, cur.naturalPhrase);
           setResults((r) => ({ ...r, [engine]: { status: "done", output: out.output, suggested, judged: suggested } }));
           if (engine !== "live") recordUsage(user.uid, { sttMinutes: minutes, sttEngine: engine === "assemblyai" ? "assemblyai" : "gemini" });
-          else recordUsage(user.uid, { liveMinutes: minutes });
+          else recordUsage(user.uid, { liveMinutes: minutes, liveMinutesSq: minutes * minutes });
         } else {
           setResults((r) => ({ ...r, [engine]: { status: out.skipped ? "skipped" : "error", error: out.error } }));
         }

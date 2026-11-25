@@ -1,13 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { Loader2, Flame } from "lucide-react";
-import { getUsageMonths, UsageMonth } from "../../services/usage/usageService";
+import { getUsageMonths, liveCostPerMinute, priceUsage, UsageMonth } from "../../services/usage/usageService";
 import {
   getRecentMonthKeys,
   isActiveLearningDay,
   summarizeLearningLog,
 } from "../../services/usage/learningLog";
 import { getKSTToday } from "../../services/firebase/db";
-import { PRICING_RATES } from "../../config/models";
 import { useDevMode } from "../../data/devMode";
 
 /** B-10 이번 달 사용량·예상 비용 + 내 학습 기록 */
@@ -61,6 +60,9 @@ export const UsagePanel: React.FC<{ userId?: string }> = ({ userId }) => {
   );
 
   const d = usage?.days?.[today.slice(8, 10)];
+  const monthCost = priceUsage(usage);
+  const dayCost = priceUsage(d);
+  const livePerMin = liveCostPerMinute(usage);
   const usd = (n?: number) => `$${(n || 0).toFixed(4)}`;
   const rows: [string, string, string][] = [
     ["통화", `${(usage?.liveMinutes || 0).toFixed(1)}분`, `${(d?.liveMinutes || 0).toFixed(1)}분`],
@@ -69,9 +71,14 @@ export const UsagePanel: React.FC<{ userId?: string }> = ({ userId }) => {
       ? ([
           ["텍스트 토큰", `${Math.round(usage?.textTokens || 0).toLocaleString()}`, `${Math.round(d?.textTokens || 0).toLocaleString()}`],
           ["TTS 글자 수", `${Math.round(usage?.ttsChars || 0).toLocaleString()}`, `${Math.round(d?.ttsChars || 0).toLocaleString()}`],
+          ["통화 비용", usd(monthCost.live), usd(dayCost.live)],
+          ["QA 통화 비용", usd(monthCost.qaLive), usd(dayCost.qaLive)],
+          ["받아쓰기 비용", usd(monthCost.stt), usd(dayCost.stt)],
+          ["텍스트 비용", usd(monthCost.text), usd(dayCost.text)],
+          ["강의 음성 TTS 비용", usd(monthCost.tts), usd(dayCost.tts)],
         ] as [string, string, string][])
       : []),
-    ["예상 비용", usd(usage?.estCostUsd), usd(d?.estCostUsd)],
+    ["예상 비용", usd(monthCost.total), usd(dayCost.total)],
   ];
   return (
     <div className="space-y-4">
@@ -188,7 +195,7 @@ export const UsagePanel: React.FC<{ userId?: string }> = ({ userId }) => {
       <div className="text-[11px] text-slate-500">
         예상 비용은 추정치예요. 실제 청구액과 다를 수 있어요.
         {devMode && (
-          <> (src/config/models.ts · PRICING_RATES 기준 · 통화 1분 ${PRICING_RATES.livePerMinute} · 받아쓰기 1분 ${PRICING_RATES.sttPerMinuteGemini})</>
+          <> (공식 단가 기준 2026-11 · 통화 1분 ≈ ${livePerMin.toFixed(3)} 문맥 재과금 포함 추정 · 받아쓰기 2회(통화 중+종료 후) · 강의 음성 1분 ≈ $0.0135 · 재생성·QA봇 서버 작업 제외)</>
         )}
       </div>
     </div>

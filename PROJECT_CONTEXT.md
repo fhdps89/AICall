@@ -51,6 +51,12 @@
 - **기록용 받아쓰기 & 퀴즈 음성 전사 (STT)**: `STT_ENGINE = "gemini"` (`gemini-3.5-transcribe`, 모드 `VERBATIM`) / 비실시간 대안 `universal-3-5-pro` (AssemblyAI)
 - **오디오 합성 (TTS)**: `TTS_ENGINE = "gemini"` — 아침 강의 `GEMINI_TTS_MODEL = "gemini-3.8-flash-tts"`, 복기 화면 발음 듣기 `GEMINI_TTS_LITE_MODEL = "gemini-3.8-flash-lite-tts"` / 2인 대화 대안 ElevenLabs(미연결)
 - **실수 임베딩 (선택)**: `EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-4B"` (`SIE_EMBEDDING_URL = "https://api.superlinked.com/v1/embeddings"`, `PRICING_RATES.sieEmbedPer1MTokens = 0.06`). 서버 전용 선택 env `SIE_API_KEY`가 없으면 기능이 자동으로 꺼짐(`enabled: false`).
+- **사용량·예상 비용 (2026-11-25 개정, 브랜치 `englead/usage-cost-estimate-20261125`)**: 단가는 `PRICING_RATES`(공식 유료 단가, USD/1M 토큰, aistudio pricing 2026-11-25 기준), 모델링 가정은 `USAGE_ASSUMPTIONS`(오디오 25 tok/s, 튜터 발화 비율 0.5, 4턴/분, 시스템 프롬프트 1,500 tok, 받아쓰기 출력 175 tok/분, 옛 텍스트 출력 비중 0.3, 옛 TTS 10자/초) 한 곳에 둔다. 화면의 예상 비용은 저장된 `estCostUsd`가 아니라 원천 필드에서 `priceUsage()`로 다시 계산하므로 옛 기록도 새 단가로 재평가된다.
+  - Live: 입력 오디오 + 튜터 발화 출력 오디오 + 턴마다 시스템 프롬프트 재과금 + 세션 컨텍스트 재과금(턴/분 × 2,250 tok/분 × ΣT²/2). 통화별 `liveMinutesSq`(분²)를 누적하고, 없던 기간은 `liveMinutes²/calls` 하한을 쓴다. QA 통화는 `qaLiveMinutes`·`qaLiveMinutesSq`로 따로 저장한다.
+  - 받아쓰기: 통화 중 1분 partial + 종료 후 VERBATIM 두 번을 모두 센다(partial 분 = 통화 분으로 추정).
+  - 텍스트: 서버가 `tokensFromUsageMetadata`(`server/usageMeta.ts`)로 출력에 thinking 토큰을 더하고, 월 문서에 `textInputTokens`·`textOutputTokens`를 따로 쌓는다. 나머지 옛 `textTokens`는 혼합 단가.
+  - 강의 TTS: 세그먼트 캐시 미스로 실제 생성한 오디오 초(`ttsAudioSec`)를 오디오 토큰으로 과금한다. 옛 기록은 글자 수 ÷ 10자/초로 추정.
+  - 범위 밖: 서버 쪽 재생성 낭비, 그록봇 피드 강의, 퀴즈 받아쓰기, 발음 듣기 lite TTS. Live 실제 `usageMetadata`로 가정값 보정은 후속 과제.
 - **공급자 추상화 레이어 (`src/services/providers/`)**: `LiveProvider`, `SttProvider`, `LlmProvider`, `TtsProvider` 인터페이스 분리(`types.ts`). 브라우저에 구현된 것은 Live(`GeminiLiveProvider`)뿐이고, **통화마다 새 인스턴스**를 만듦(`createLiveProvider()`, v2.8.0). 같은 통화 안의 "다시 시도"는 같은 인스턴스를 써서 대화 기록·세션 재개 핸들을 이어 감. 받아쓰기·텍스트·음성 합성은 서버(`server.ts`, `server/lecture.ts`, `server/sttBench.ts`)에서 처리하며, 브라우저용 빈 뼈대 구현은 v2.8.0에서 삭제.
 
 ---

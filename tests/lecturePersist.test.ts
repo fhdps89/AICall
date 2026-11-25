@@ -248,6 +248,7 @@ test('3) 404 backup starts generation; 500 backup error skips generation (0 star
     assert.equal(skip500, true);
     const out500 = buildFeedToday(ai, st500, 'https://example.test', {
       date,
+      now: Date.parse('2026-11-22T01:00:00.000Z'), // 10:00 KST, after the 05:00 gate (wall-clock independent)
       skipStart: skip500,
       startJob: () => {
         started500 += 1;

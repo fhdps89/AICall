@@ -84,6 +84,10 @@ export interface LectureDoc {
   ttsEngine?: string;
   chars?: number;
   textTokens?: number;
+  textInputTokens?: number;
+  textOutputTokens?: number;
+  ttsAudioSec?: number;
+  ttsAudioChars?: number;
   durationSec?: number;
   listenedAt?: string | null;
   createdAt: string;
@@ -392,6 +396,10 @@ export async function syncLectureStatus(uid: string, date = getKSTToday()): Prom
     ttsEngine: lecture.ttsEngine,
     chars: lecture.chars,
     textTokens: lecture.textTokens,
+    ...(typeof lecture.textInputTokens === "number" ? { textInputTokens: lecture.textInputTokens } : {}),
+    ...(typeof lecture.textOutputTokens === "number" ? { textOutputTokens: lecture.textOutputTokens } : {}),
+    ...(typeof lecture.ttsAudioSec === "number" ? { ttsAudioSec: lecture.ttsAudioSec } : {}),
+    ...(typeof lecture.ttsAudioChars === "number" ? { ttsAudioChars: lecture.ttsAudioChars } : {}),
     durationSec: lecture.durationSec,
     listenedAt: listenedAtToKeep(current, lecture.createdAt),
     createdAt: lecture.createdAt,
@@ -403,8 +411,24 @@ export async function syncLectureStatus(uid: string, date = getKSTToday()): Prom
   };
   await setDoc(lectureRef(uid, date), readyDoc, { merge: true });
   if (shouldMarkLectureDate(current?.status, "ready")) {
-    // B-10 usage: lecture script tokens + TTS chars (once per lecture)
-    recordUsage(uid, { textTokens: lecture.textTokens || 0, ttsChars: lecture.chars || 0, ttsEngine: "gemini" });
+    // B-10 usage: lecture script tokens + TTS chars/audio (once per lecture)
+    const hasSplitTokens =
+      typeof lecture.textInputTokens === "number" || typeof lecture.textOutputTokens === "number";
+    recordUsage(uid, {
+      ...(hasSplitTokens
+        ? {
+            textInputTokens: lecture.textInputTokens || 0,
+            textOutputTokens: lecture.textOutputTokens || 0,
+          }
+        : { textTokens: lecture.textTokens || 0 }),
+      ttsChars: lecture.chars || 0,
+      // ttsAudioSec is the measured (cache-miss) audio for the whole lecture, so all of its chars are
+      // covered by it; marking them prevents the legacy chars→seconds fallback from billing cache hits.
+      ...(typeof lecture.ttsAudioSec === "number"
+        ? { ttsAudioSec: lecture.ttsAudioSec, ttsAudioChars: lecture.chars || 0 }
+        : {}),
+      ttsEngine: "gemini",
+    });
     for (const id of lecture.newMistakeIds || []) {
       try {
         await updateDoc(doc(db, "users", uid, "mistakes", id), { lectureDate: date });
@@ -488,6 +512,10 @@ export async function rebuildLectureAudio(lecture: LectureDoc): Promise<void> {
     body.ttsEngine = lecture.ttsEngine;
     body.createdAt = lecture.createdAt;
     body.textTokens = lecture.textTokens;
+    if (typeof lecture.textInputTokens === "number") body.textInputTokens = lecture.textInputTokens;
+    if (typeof lecture.textOutputTokens === "number") body.textOutputTokens = lecture.textOutputTokens;
+    if (typeof lecture.ttsAudioSec === "number") body.ttsAudioSec = lecture.ttsAudioSec;
+    if (typeof lecture.ttsAudioChars === "number") body.ttsAudioChars = lecture.ttsAudioChars;
     body.itemCount = lecture.itemCount;
   }
   await authJson<{ lecture: unknown }>("/api/lecture/audio/rebuild", body);

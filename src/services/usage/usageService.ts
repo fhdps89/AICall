@@ -1,23 +1,28 @@
 /**
  * B-10 Usage tracking: users/{uid}/usage/{yyyy-mm}
- * { liveMinutes, sttMinutes, textTokens, ttsChars, estCostUsd, days: { "DD": { estCostUsd, ... } } }
- * Unit prices come only from PRICING_RATES in src/config/models.ts (single source).
+ * { liveMinutes, qaLiveMinutes, liveMinutesSq, qaLiveMinutesSq, sttMinutes, textTokens, textInputTokens, textOutputTokens, ttsChars, ttsAudioSec, ttsAudioChars, estCostUsd, days: { "DD": { ... } } }
+ * Unit prices and assumptions come only from src/config/models.ts (single source).
  */
 import { doc, getDoc, setDoc, increment, FieldValue } from "firebase/firestore";
 import { db } from "../firebase/config";
-import { PRICING_RATES, DEFAULT_STT_ENGINE, DEFAULT_TTS_ENGINE } from "../../config/models";
+import { PRICING_RATES, USAGE_ASSUMPTIONS } from "../../config/models";
 import { getKSTToday } from "../firebase/db";
 
 export interface UsageDelta {
   liveMinutes?: number;
   qaLiveMinutes?: number;
+  liveMinutesSq?: number;
+  qaLiveMinutesSq?: number;
   sttMinutes?: number;
   sttEngine?: "gemini" | "assemblyai";
   textInputTokens?: number;
   textOutputTokens?: number;
-  /** total tokens when the in/out split is unknown (priced at the input rate) */
+  /** total tokens when the in/out split is unknown (priced at the legacy blended rate) */
   textTokens?: number;
   ttsChars?: number;
+  ttsAudioSec?: number;
+  /** chars whose audio length is already in ttsAudioSec (excluded from the legacy chars→seconds fallback) */
+  ttsAudioChars?: number;
   ttsEngine?: "gemini" | "elevenlabs";
   sieEmbeddingTokens?: number;
   calls?: number;
@@ -25,9 +30,16 @@ export interface UsageDelta {
 
 export interface UsageDay {
   liveMinutes?: number;
+  qaLiveMinutes?: number;
+  liveMinutesSq?: number;
+  qaLiveMinutesSq?: number;
   sttMinutes?: number;
   textTokens?: number;
+  textInputTokens?: number;
+  textOutputTokens?: number;
   ttsChars?: number;
+  ttsAudioSec?: number;
+  ttsAudioChars?: number;
   sieEmbeddingTokens?: number;
   estCostUsd?: number;
   calls?: number;
@@ -35,36 +47,157 @@ export interface UsageDay {
 
 export interface UsageMonth {
   liveMinutes: number;
+  qaLiveMinutes?: number;
+  liveMinutesSq?: number;
+  qaLiveMinutesSq?: number;
   sttMinutes: number;
   textTokens: number;
+  textInputTokens?: number;
+  textOutputTokens?: number;
   ttsChars: number;
+  ttsAudioSec?: number;
+  ttsAudioChars?: number;
   sieEmbeddingTokens?: number;
   estCostUsd: number;
   calls?: number;
   days?: Record<string, UsageDay>;
 }
 
-export function estimateCostUsd(d: UsageDelta): number {
+export interface UsageCostBreakdown {
+  live: number;
+  qaLive: number;
+  stt: number;
+  text: number;
+  tts: number;
+  sie: number;
+  total: number;
+}
+
+function nonNeg(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+function liveCost(minutes: number, sq: number): number {
+  if (minutes <= 0) return 0;
   const r = PRICING_RATES;
-  const stt = (d.sttEngine || DEFAULT_STT_ENGINE) === "assemblyai" ? r.sttPerMinuteAssembly : r.sttPerMinuteGemini;
-  const tts = (d.ttsEngine || DEFAULT_TTS_ENGINE) === "elevenlabs" ? r.ttsPer1kCharsElevenLabs : r.ttsPer1kCharsGemini;
-  return (
-    (d.liveMinutes || 0) * r.livePerMinute +
-    (d.qaLiveMinutes || 0) * r.livePerMinute +
-    (d.sttMinutes || 0) * stt +
-    ((d.textInputTokens || 0) / 1000) * r.textPer1kInputTokens +
-    ((d.textOutputTokens || 0) / 1000) * r.textPer1kOutputTokens +
-    ((d.textTokens || 0) / 1000) * r.textPer1kInputTokens +
-    ((d.ttsChars || 0) / 1000) * tts +
-    ((d.sieEmbeddingTokens || 0) / 1_000_000) * r.sieEmbedPer1MTokens
-  );
+  const a = USAGE_ASSUMPTIONS;
+  const audioTokensPerMin = a.audioTokensPerSec * 60;
+  const rho = a.liveModelTalkShare;
+  const f = a.liveTurnsPerMin;
+  const baseIn = (minutes * audioTokensPerMin * r.liveInAudioPer1M) / 1_000_000;
+  const baseOut = (minutes * rho * audioTokensPerMin * r.liveOutAudioPer1M) / 1_000_000;
+  const promptRebill = (minutes * f * a.liveSystemPromptTokens * r.liveInTextPer1M) / 1_000_000;
+  const contextRebill =
+    (f * audioTokensPerMin * (1 + rho) * (sq / 2) * r.liveInAudioPer1M) / 1_000_000;
+  return baseIn + baseOut + promptRebill + contextRebill;
+}
+
+function geminiSttPerMinute(): number {
+  const r = PRICING_RATES;
+  const a = USAGE_ASSUMPTIONS;
+  return (a.audioTokensPerSec * 60 * r.sttInAudioPer1M + a.sttOutTokensPerMin * r.sttOutTextPer1M) / 1_000_000;
+}
+
+export function priceUsage(u: UsageDay | UsageMonth | null | undefined): UsageCostBreakdown {
+  const r = PRICING_RATES;
+  const a = USAGE_ASSUMPTIONS;
+
+  const liveMin = nonNeg(u?.liveMinutes);
+  const calls = nonNeg(u?.calls);
+  const liveSq = Math.max(nonNeg(u?.liveMinutesSq), calls > 0 ? (liveMin * liveMin) / calls : 0);
+  const live = liveCost(liveMin, liveSq);
+
+  const qaMin = nonNeg(u?.qaLiveMinutes);
+  const qaSqRaw = nonNeg(u?.qaLiveMinutesSq);
+  // qaCalls is not stored separately; when qaLiveMinutesSq is missing on positive qaLiveMinutes,
+  // use qaMin^2 as a 1-call lower bound so context re-billing is not dropped.
+  const qaSq = qaMin > 0 ? (qaSqRaw > 0 ? qaSqRaw : qaMin * qaMin) : 0;
+  const qaLive = liveCost(qaMin, qaSq);
+
+  const sttMin = nonNeg(u?.sttMinutes);
+  const stt = (sttMin + liveMin + qaMin) * geminiSttPerMinute();
+
+  const textIn = nonNeg(u?.textInputTokens);
+  const textOut = nonNeg(u?.textOutputTokens);
+  const textTotal = nonNeg(u?.textTokens);
+  const residual = Math.max(0, textTotal - textIn - textOut);
+  const blendedPer1M =
+    (1 - a.legacyTextOutputShare) * r.textInPer1M + a.legacyTextOutputShare * r.textOutPer1M;
+  const text = (textIn * r.textInPer1M + textOut * r.textOutPer1M + residual * blendedPer1M) / 1_000_000;
+
+  const ttsChars = nonNeg(u?.ttsChars);
+  const ttsAudioSec = nonNeg(u?.ttsAudioSec);
+  const ttsAudioChars = nonNeg(u?.ttsAudioChars);
+  const legacyChars = Math.max(0, ttsChars - ttsAudioChars);
+  const totalTtsSec = ttsAudioSec + legacyChars / a.legacyTtsCharsPerSec;
+  const tts =
+    (totalTtsSec * a.audioTokensPerSec * r.ttsOutAudioPer1M +
+      ttsChars * a.ttsInTokensPerChar * r.ttsInPer1M) /
+    1_000_000;
+
+  const sie = (nonNeg(u?.sieEmbeddingTokens) * r.sieEmbedPer1MTokens) / 1_000_000;
+  const total = live + qaLive + stt + text + tts + sie;
+  return { live, qaLive, stt, text, tts, sie, total };
+}
+
+/**
+ * Effective Live USD/min for the usage footnote: uses this month's live cost / liveMinutes
+ * when positive, otherwise falls back to a 3-minute single-call example.
+ */
+export function liveCostPerMinute(u?: UsageDay | UsageMonth | null): number {
+  const min = nonNeg(u?.liveMinutes);
+  if (min > 0) {
+    return priceUsage(u).live / min;
+  }
+  return priceUsage({ liveMinutes: 3, liveMinutesSq: 9, calls: 1 }).live / 3;
+}
+
+export function estimateCostUsd(d: UsageDelta): number {
+  const textIn = nonNeg(d.textInputTokens);
+  const textOut = nonNeg(d.textOutputTokens);
+  const textTotal = textIn + textOut + nonNeg(d.textTokens);
+  const base = priceUsage({
+    liveMinutes: d.liveMinutes,
+    qaLiveMinutes: d.qaLiveMinutes,
+    liveMinutesSq: d.liveMinutesSq,
+    qaLiveMinutesSq: d.qaLiveMinutesSq,
+    sttMinutes: d.sttMinutes,
+    textTokens: textTotal,
+    textInputTokens: textIn,
+    textOutputTokens: textOut,
+    ttsChars: d.ttsChars,
+    ttsAudioSec: d.ttsAudioSec,
+    ttsAudioChars: d.ttsAudioChars,
+    sieEmbeddingTokens: d.sieEmbeddingTokens,
+    calls: d.calls,
+  });
+
+  const stt =
+    d.sttEngine === "assemblyai"
+      ? nonNeg(d.sttMinutes) * PRICING_RATES.sttPerMinuteAssembly +
+        (nonNeg(d.liveMinutes) + nonNeg(d.qaLiveMinutes)) * geminiSttPerMinute()
+      : base.stt;
+
+  const tts =
+    d.ttsEngine === "elevenlabs"
+      ? (nonNeg(d.ttsChars) / 1000) * PRICING_RATES.ttsPer1kCharsElevenLabs
+      : base.tts;
+
+  return base.live + base.qaLive + stt + base.text + tts + base.sie;
 }
 
 export interface UsageFields<T> {
   liveMinutes: T;
+  qaLiveMinutes: T;
+  liveMinutesSq: T;
+  qaLiveMinutesSq: T;
   sttMinutes: T;
   textTokens: T;
+  textInputTokens: T;
+  textOutputTokens: T;
   ttsChars: T;
+  ttsAudioSec: T;
+  ttsAudioChars: T;
   sieEmbeddingTokens: T;
   estCostUsd: T;
   calls: T;
@@ -81,16 +214,25 @@ export function buildUsageFields<T>(
   d: UsageDelta,
   inc: (n: number) => T = increment as unknown as (n: number) => T
 ): UsageFields<T> {
-  const tokens = (d.textInputTokens || 0) + (d.textOutputTokens || 0) + (d.textTokens || 0);
+  const textIn = nonNeg(d.textInputTokens);
+  const textOut = nonNeg(d.textOutputTokens);
+  const tokens = textIn + textOut + nonNeg(d.textTokens);
   const cost = estimateCostUsd(d);
   return {
-    liveMinutes: inc(d.liveMinutes || 0),
-    sttMinutes: inc(d.sttMinutes || 0),
+    liveMinutes: inc(nonNeg(d.liveMinutes)),
+    qaLiveMinutes: inc(nonNeg(d.qaLiveMinutes)),
+    liveMinutesSq: inc(nonNeg(d.liveMinutesSq)),
+    qaLiveMinutesSq: inc(nonNeg(d.qaLiveMinutesSq)),
+    sttMinutes: inc(nonNeg(d.sttMinutes)),
     textTokens: inc(tokens),
-    ttsChars: inc(d.ttsChars || 0),
-    sieEmbeddingTokens: inc(d.sieEmbeddingTokens || 0),
+    textInputTokens: inc(textIn),
+    textOutputTokens: inc(textOut),
+    ttsChars: inc(nonNeg(d.ttsChars)),
+    ttsAudioSec: inc(nonNeg(d.ttsAudioSec)),
+    ttsAudioChars: inc(nonNeg(d.ttsAudioChars)),
+    sieEmbeddingTokens: inc(nonNeg(d.sieEmbeddingTokens)),
     estCostUsd: inc(cost),
-    calls: inc(d.calls || 0),
+    calls: inc(nonNeg(d.calls)),
   };
 }
 
