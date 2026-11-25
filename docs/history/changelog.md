@@ -7,7 +7,7 @@
 ### [2026-11-26 KST] 사용량 화면 항목별 비용 합계 불일치 수정 (브랜치 `englead/usage-breakdown-sie-20261126`, QA 시트 63행)
 - **증상**: 개발자 모드 설정 → 사용량·예상 비용의 항목별 비용 합이 예상 비용 합계보다 작았다(이번 달 $0.0106, 오늘 $0.0006 차이).
 - **원인**: `priceUsage()`의 `sie`(실수 묶기 임베딩, Qwen3-Embedding-4B) 비용은 합계에 들어가는데 화면에 행이 없었다.
-- **수정**: `usageService.ts`에 `USAGE_COST_COMPONENTS`(라벨 맵을 `satisfies Record<…>`로 묶어 새 비용 항목이 빠지면 컴파일 오류)를 두고, `UsagePanel.tsx`는 이 목록을 그대로 돌려 0원 항목까지 모든 비용 행(「실수 묶기 임베딩 비용」 추가)을 보여 준다.
+- **수정**: `usageService.ts`에 `USAGE_COST_COMPONENTS`(라벨 맵을 `satisfies Record<…>`로 묶어 새 비용 항목이 빠지면 컴파일 오류)를 두고, `UsagePanel.tsx`는 이 목록을 그대로 돌려 모든 비용 행(「실수 묶기 임베딩 비용」 추가)을 보여 준다. 합계(`priceUsage`·`estimateCostUsd`)도 같은 목록으로 더하는 `sumUsageCostComponents` 한 곳에서 만든다.
 - **방어 조치**: `tests/usageCost.test.ts`에 목록 키 = 합계 제외 키, 모든 항목이 0이 아닌 달에서 항목 합 = 합계, 라벨 형식 테스트 3건 추가.
 
 ### [2026-11-25 KST] v2.10.0 이후 수정(미배포) — 사용량·예상 비용 재산정 (브랜치 `englead/usage-cost-estimate-20261125`)

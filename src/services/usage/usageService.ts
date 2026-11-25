@@ -100,6 +100,11 @@ export const USAGE_COST_COMPONENTS: ReadonlyArray<{
   label: USAGE_COST_COMPONENT_LABELS[key],
 }));
 
+/** Sum of every breakdown component; the single place the total is formed, so the UI rows always add up. */
+export function sumUsageCostComponents(parts: Record<UsageCostComponentKey, number>): number {
+  return USAGE_COST_COMPONENTS.reduce((acc, { key }) => acc + parts[key], 0);
+}
+
 function nonNeg(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
 }
@@ -165,8 +170,8 @@ export function priceUsage(u: UsageDay | UsageMonth | null | undefined): UsageCo
     1_000_000;
 
   const sie = (nonNeg(u?.sieEmbeddingTokens) * r.sieEmbedPer1MTokens) / 1_000_000;
-  const total = live + qaLive + stt + text + tts + sie;
-  return { live, qaLive, stt, text, tts, sie, total };
+  const parts = { live, qaLive, stt, text, tts, sie };
+  return { ...parts, total: sumUsageCostComponents(parts) };
 }
 
 /**
@@ -217,7 +222,7 @@ export function estimateCostUsd(d: UsageDelta): number {
       ? (nonNeg(d.ttsChars) / 1000) * PRICING_RATES.ttsPer1kCharsElevenLabs
       : base.tts;
 
-  return base.live + base.qaLive + stt + base.text + tts + base.sie;
+  return sumUsageCostComponents({ ...base, stt, tts });
 }
 
 export interface UsageFields<T> {
