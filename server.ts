@@ -8,9 +8,9 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { GoogleGenAI, Type } from '@google/genai';
 import { requireAuth, verifyFirebaseIdToken, setAfterAuthHook } from './server/auth.ts';
 import { ensureUserGeminiKey, getUserSuppliedKey } from './server/userKey.ts';
-import { saveFeedBackup, deleteFeedBackup, persistLectureBackups } from './server/feedStore.ts';
+import { saveFeedBackup, deleteFeedBackup, persistLectureBackups, saveLectureFailureBackup } from './server/feedStore.ts';
 import { geminiLimit, clusterLimit, checkLiveSessionStart } from './server/rateLimit.ts';
-import { DATA_DIR, startLectureJob, startLectureAudioRebuild, readLectureState, lectureAudioPath, lectureHasLocalScript, lectureStatusPayload, kstToday, LECTURE_AUDIO_MISSING, LECTURE_AUDIO_SCRIPT_MISSING, LECTURE_AUDIO_REBUILD_TIMED_OUT } from './server/lecture.ts';
+import { DATA_DIR, startLectureJob, startLectureAudioRebuild, readLectureState, lectureAudioPath, lectureHasLocalScript, lectureStatusPayload, recordLectureBackupResult, kstToday, LECTURE_AUDIO_MISSING, LECTURE_AUDIO_SCRIPT_MISSING, LECTURE_AUDIO_REBUILD_TIMED_OUT } from './server/lecture.ts';
 import type { LectureState } from './server/lecture.ts';
 import { sanitizeLectureInputs } from './server/lectureMaterial.ts';
 import { mimeForAudioFile } from './server/lectureAudioEncode.ts';
@@ -1296,9 +1296,21 @@ app.post('/api/lecture/generate', requireAuth, geminiLimit, async (req: Request,
         const f = feedForUid(uid);
         if (!f) return;
         try {
-          await persistLectureBackups(f.secret, s, isCurrent);
+          const result = await persistLectureBackups(f.secret, s, isCurrent);
+          if (isCurrent()) {
+            recordLectureBackupResult(uid, s.date, { createdAt: s.createdAt, audioBackupId: s.audioBackupId }, result);
+          }
         } catch (err: any) {
-          console.warn('[Lecture] backup save failed:', err?.message || err);
+          console.warn('[Lecture] backup save failed:', err?.name || 'error');
+        }
+      },
+      onFailed: async (s: LectureState, isCurrent: () => boolean) => {
+        const f = feedForUid(uid);
+        if (!f) return;
+        try {
+          await saveLectureFailureBackup(f.secret, s, isCurrent);
+        } catch (err: any) {
+          console.warn('[Lecture] failure backup save failed:', err?.name || 'error');
         }
       },
     });
@@ -1401,9 +1413,21 @@ app.post('/api/lecture/audio/rebuild', requireAuth, geminiLimit, (req: Request, 
         const f = feedForUid(uid);
         if (!f) return;
         try {
-          await persistLectureBackups(f.secret, s, isCurrent);
+          const result = await persistLectureBackups(f.secret, s, isCurrent);
+          if (isCurrent()) {
+            recordLectureBackupResult(uid, s.date, { createdAt: s.createdAt, audioBackupId: s.audioBackupId }, result);
+          }
         } catch (err: any) {
-          console.warn('[Lecture] rebuild backup save failed:', err?.message || err);
+          console.warn('[Lecture] rebuild backup save failed:', err?.name || 'error');
+        }
+      },
+      onFailed: async (s, isCurrent) => {
+        const f = feedForUid(uid);
+        if (!f) return;
+        try {
+          await saveLectureFailureBackup(f.secret, s, isCurrent);
+        } catch (err: any) {
+          console.warn('[Lecture] rebuild failure backup save failed:', err?.name || 'error');
         }
       },
     });

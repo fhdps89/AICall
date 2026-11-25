@@ -14,6 +14,15 @@ import { TEXT_MODEL, GEMINI_TTS_MODEL } from '../src/config/models.ts';
 import { stripSpeechDirections, cleanLectureScriptItem } from './speechText.ts';
 import { encodeLectureAudio, mimeForAudioFile, type LectureEncodeFn } from './lectureAudioEncode.ts';
 import {
+  classifyLectureAudioError,
+  cooldownMsFor,
+  retryableFor,
+  sanitizeAudioBackupResult,
+  type AudioBackupResult,
+  type AudioErrorStage,
+  type LectureAudioError,
+} from './lectureAudioError.ts';
+import {
   MAX_NEW,
   MAX_REVIEW,
   MAX_DIALOGUE_LINES,
@@ -128,10 +137,14 @@ export interface LectureState {
   audioFile?: string; // relative file name inside LECTURE_DIR/{uid}
   audioMime?: string;
   audioBackupId?: string;
+  audioChunks?: number;
   /** Audio generation only. Do not use status=generating for a TTS rebuild of a ready script. */
   audioStatus?: 'ready' | 'rebuilding' | 'missing';
   audioRebuildStartedAt?: string;
   audioRebuildFailedAt?: string;
+  audioRetryAfter?: string;
+  audioError?: LectureAudioError;
+  audioBackup?: AudioBackupResult;
   audioProgress?: { completed: number; total: number };
   error?: string;
   createdAt: string;
@@ -416,6 +429,7 @@ export interface StartLectureAudioRebuildOpts {
   synthesizeFn?: LectureSynthesizeFn;
   encodeFn?: LectureEncodeFn;
   onReady?: (state: LectureState, isCurrent: () => boolean) => void | Promise<void>;
+  onFailed?: (state: LectureState, isCurrent: () => boolean) => void | Promise<void>;
   now?: number;
   ignoreCooldown?: boolean;
   /** Test hook: shorten the audio rebuild cap. */
@@ -469,8 +483,76 @@ export function installRestoredLectureAudio(
   };
   delete next.audioRebuildStartedAt;
   delete next.audioRebuildFailedAt;
+  delete next.audioError;
+  delete next.audioRetryAfter;
   delete next.error;
   delete next.audioProgress;
+  writeLectureState(next);
+  return next;
+}
+
+/**
+ * Install a backed-up ready lecture locally in audioStatus='missing' state without audio files,
+ * so cooldown-blocked instances do not trigger startLectureJob from scratch.
+ */
+export function installBackupLectureWithoutAudio(
+  uid: string,
+  date: string,
+  backup: LectureState,
+  opts?: { expectedEpoch?: number; expectedCreatedAt?: string; origin?: 'local' | 'backup' }
+): LectureState | null {
+  safeDate(date);
+  const key = `${uid}:${date}`;
+  if (running.has(key)) return null;
+  if (opts?.expectedEpoch !== undefined && (jobEpoch.get(key) ?? 0) !== opts.expectedEpoch) {
+    return null;
+  }
+  if (opts && 'expectedCreatedAt' in opts) {
+    const currentLocal = readLectureState(uid, date);
+    if (currentLocal?.createdAt !== opts.expectedCreatedAt) return null;
+  }
+  const next: LectureState = {
+    ...backup,
+    uid,
+    date,
+    status: 'ready',
+    audioStatus: 'missing',
+    ...(backup.audioError
+      ? { audioError: { ...backup.audioError, origin: opts?.origin ?? 'backup' } }
+      : {}),
+  };
+  delete next.audioFile;
+  delete next.audioMime;
+  delete next.audioRebuildStartedAt;
+  delete next.audioProgress;
+  writeLectureState(next);
+  return next;
+}
+
+/** Record backup upload outcome onto the matching local lecture state. */
+export function recordLectureBackupResult(
+  uid: string,
+  date: string,
+  match: { createdAt?: string; audioBackupId?: string },
+  result: AudioBackupResult
+): LectureState | null {
+  safeDate(date);
+  const current = readLectureState(uid, date);
+  if (!current) return null;
+  if (match.createdAt !== undefined && current.createdAt !== match.createdAt) return null;
+  if (match.audioBackupId !== undefined && current.audioBackupId !== match.audioBackupId) return null;
+  const cleanResult = sanitizeAudioBackupResult(result);
+  if (!cleanResult) return null;
+  const next: LectureState = {
+    ...current,
+    audioBackup: cleanResult,
+  };
+  if (cleanResult.result === 'ok' && cleanResult.chunks) {
+    next.audioChunks = cleanResult.chunks;
+  } else {
+    delete next.audioBackupId;
+    delete next.audioChunks;
+  }
   writeLectureState(next);
   return next;
 }
@@ -599,6 +681,8 @@ export function startLectureAudioRebuild(
     audioRebuildStartedAt: nowIso,
   };
   delete state.error;
+  delete state.audioError;
+  delete state.audioRetryAfter;
   delete state.audioFile;
   delete state.audioMime;
   delete state.audioProgress;
@@ -629,18 +713,46 @@ export function startLectureAudioRebuild(
         try {
           await opts.onReady(state, currentFn);
         } catch (err: any) {
-          console.warn('[Lecture] rebuild onReady failed:', err?.message || err);
+          console.warn('[Lecture] rebuild onReady failed:', err?.name || 'error');
         }
       },
-      (err) => {
-        if (!isCurrentJob(key, epoch)) return;
-        console.error('[Lecture] audio rebuild failed:', err);
-        try { ac.abort(); } catch { /* ignore */ }
+      async (err) => {
+        const currentFn = () => isCurrentJob(key, epoch);
+        if (!currentFn()) return;
         const timedOut = JOB_TIMED_OUT_RE.test(String(err?.message || err));
+        const failedNowMs = Date.now();
+        const failedAtIso = new Date(failedNowMs).toISOString();
+        const classified = classifyLectureAudioError(err, {
+          stage: timedOut ? 'rebuild_timeout' : undefined,
+          at: failedAtIso,
+          origin: 'local',
+        });
+        console.error(
+          '[Lecture] audio rebuild failed:',
+          JSON.stringify({
+            stage: classified.stage,
+            code: classified.code,
+            httpStatus: classified.httpStatus,
+            googleStatus: classified.googleStatus,
+            attempts: classified.attempts,
+            completed: classified.completed,
+            total: classified.total,
+          })
+        );
+        try { ac.abort(); } catch { /* ignore */ }
         state.audioStatus = 'missing';
         state.error = timedOut ? LECTURE_AUDIO_REBUILD_TIMED_OUT : 'GENERATION_FAILED';
-        state.audioRebuildFailedAt = new Date().toISOString();
+        state.audioRebuildFailedAt = failedAtIso;
+        state.audioError = classified;
+        state.audioRetryAfter = new Date(failedNowMs + cooldownMsFor(classified.code)).toISOString();
         ctx.write(state);
+        if (opts.onFailed) {
+          try {
+            await opts.onFailed(state, currentFn);
+          } catch (onFailErr: any) {
+            console.warn('[Lecture] rebuild onFailed failed:', onFailErr?.name || 'error');
+          }
+        }
       }
     )
     .finally(() => {
@@ -725,6 +837,8 @@ export interface StartLectureJobOpts {
   jobTimeoutMs?: number;
   /** Called once when the job finishes with status==='ready' and is still the current job. */
   onReady?: (state: LectureState, isCurrent: () => boolean) => void | Promise<void>;
+  /** Called once when the job fails and is still the current job. */
+  onFailed?: (state: LectureState, isCurrent: () => boolean) => void | Promise<void>;
   /** Test hook: replace script+TTS so tests do not call Gemini. */
   runJobFn?: (
     ai: GoogleGenAI,
@@ -865,20 +979,49 @@ export function startLectureJob(
           console.warn('[Lecture] onReady failed:', err?.message || err);
         }
       },
-      (err) => {
-        if (!isCurrentJob(key, epoch)) return;
-        console.error('[Lecture] job failed:', err);
+      async (err) => {
+        const currentFn = () => isCurrentJob(key, epoch);
+        if (!currentFn()) return;
         const timedOut = JOB_TIMED_OUT_RE.test(String(err?.message || err));
+        const failedNowMs = Date.now();
+        const failedAtIso = new Date(failedNowMs).toISOString();
+        const fallbackStage: AudioErrorStage = state.audioProgress ? 'tts' : 'script';
+        const classified = classifyLectureAudioError(err, {
+          stage: timedOut ? 'rebuild_timeout' : fallbackStage,
+          at: failedAtIso,
+          origin: 'local',
+        });
+        console.error(
+          '[Lecture] job failed:',
+          JSON.stringify({
+            stage: classified.stage,
+            code: classified.code,
+            httpStatus: classified.httpStatus,
+            googleStatus: classified.googleStatus,
+            attempts: classified.attempts,
+            completed: classified.completed,
+            total: classified.total,
+          })
+        );
         running.delete(key);
-        if (timedOut) {
-          abortCurrentJob(key);
-        } else if (jobAbort.get(key) === ac) {
-          jobAbort.delete(key);
-        }
+        try { ac.abort(); } catch { /* ignore */ }
+        if (jobAbort.get(key) === ac) jobAbort.delete(key);
         state.status = 'failed';
         // Shown in the app and on the public feed page: a code only, details stay in the log.
         state.error = timedOut ? 'TIMED_OUT' : 'GENERATION_FAILED';
+        state.audioError = classified;
+        state.audioRetryAfter = new Date(failedNowMs + cooldownMsFor(classified.code)).toISOString();
         writeLectureState(state);
+        if (opts.onFailed) {
+          try {
+            await opts.onFailed(state, currentFn);
+          } catch (onFailErr: any) {
+            console.warn('[Lecture] onFailed failed:', onFailErr?.name || 'error');
+          }
+        }
+        if (timedOut && currentFn()) {
+          abortCurrentJob(key);
+        }
       }
     )
     .finally(() => {
@@ -1061,12 +1204,49 @@ export function toSpeechParts(text: string, twoSpeakers: boolean): any[] {
   return parts;
 }
 
-async function synthesizeGemini(
+function attachErrorMeta(
+  err: unknown,
+  meta: { stage?: AudioErrorStage; attempts?: number; completed?: number; total?: number }
+): Error {
+  const out = (
+    err && typeof err === 'object'
+      ? err
+      : new Error(typeof err === 'string' ? err : 'error')
+  ) as Error & Record<string, unknown>;
+  if (meta.stage !== undefined && out.stage === undefined) out.stage = meta.stage;
+  if (meta.attempts !== undefined && out.attempts === undefined) out.attempts = meta.attempts;
+  if (meta.completed !== undefined) out.completed = meta.completed;
+  if (meta.total !== undefined) out.total = meta.total;
+  return out;
+}
+
+let ttsPauseUntil = 0;
+
+export function resetTtsPause(): void {
+  ttsPauseUntil = 0;
+}
+
+export interface SynthesizeGeminiOpts {
+  sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  now?: () => number;
+  stepTimeoutMs?: number;
+}
+
+function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return withAbort(new Promise<void>((r) => setTimeout(r, ms)), signal);
+}
+
+export async function synthesizeGemini(
   ai: GoogleGenAI,
   text: string,
   twoSpeakers: boolean,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  opts: SynthesizeGeminiOpts = {}
 ): Promise<Pcm> {
+  const sleepFn = opts.sleepFn || defaultSleep;
+  const nowFn = opts.now || Date.now;
+  const stepTimeoutMs = opts.stepTimeoutMs ?? LECTURE_STEP_TIMEOUT_MS;
   const speechConfig: any = twoSpeakers
     ? {
         multiSpeakerVoiceConfig: {
@@ -1078,24 +1258,54 @@ async function synthesizeGemini(
       }
     : { voiceConfig: { prebuiltVoiceConfig: { voiceName: VOICE_COACH } } };
   let lastErr: any;
+  let lastSleptUntil = 0;
   for (let attempt = 0; attempt < 3; attempt++) {
     if (signal?.aborted) throw new Error('lecture job superseded');
+    const nowMs = nowFn();
+    const waitBase = Math.max(nowMs, lastSleptUntil);
+    if (ttsPauseUntil > waitBase) {
+      const waitMs = Math.min(60_000, ttsPauseUntil - waitBase);
+      await withAbort(sleepFn(waitMs, signal), signal);
+      lastSleptUntil = waitBase + waitMs;
+      if (signal?.aborted) throw new Error('lecture job superseded');
+    }
+    const timeoutSig = AbortSignal.timeout(stepTimeoutMs);
+    const stepSig = signal ? AbortSignal.any([signal, timeoutSig]) : timeoutSig;
     try {
       const response = await withAbort(
-        withTimeout(ai.models.generateContent({
-          model: LECTURE_TTS_MODEL,
-          contents: [{ role: 'user', parts: toSpeechParts(text, twoSpeakers) }],
-          config: { abortSignal: signal, responseModalities: ['AUDIO'], speechConfig },
-        }), LECTURE_STEP_TIMEOUT_MS, 'lecture TTS'),
+        withTimeout(
+          ai.models.generateContent({
+            model: LECTURE_TTS_MODEL,
+            contents: [{ role: 'user', parts: toSpeechParts(text, twoSpeakers) }],
+            config: { abortSignal: stepSig, responseModalities: ['AUDIO'], speechConfig },
+          }),
+          stepTimeoutMs,
+          'lecture TTS'
+        ),
         signal
       );
       const part = response.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData?.data);
       if (!part?.inlineData?.data) throw new Error('TTS 음성 데이터 없음');
       return parseAudio(part.inlineData.data, part.inlineData.mimeType || '');
     } catch (err) {
-      lastErr = err;
-      if (signal?.aborted) throw err;
-      await withAbort(new Promise((r) => setTimeout(r, 1500 * (attempt + 1))), signal);
+      lastErr = attachErrorMeta(err, { stage: 'tts' });
+      (lastErr as any).attempts = attempt + 1;
+      if (signal?.aborted) throw lastErr;
+      const classified = classifyLectureAudioError(lastErr, { stage: 'tts', attempts: attempt + 1 });
+      if (!retryableFor(classified.code) || attempt === 2) {
+        throw lastErr;
+      }
+      let delayMs: number;
+      if (classified.code === 'QUOTA') {
+        const delaySec =
+          classified.retryDelaySec !== null ? Math.min(60, Math.max(0, classified.retryDelaySec)) : 20;
+        delayMs = delaySec * 1000;
+        ttsPauseUntil = Math.max(ttsPauseUntil, nowFn() + delayMs);
+        lastSleptUntil = ttsPauseUntil;
+      } else {
+        delayMs = 1500 * (attempt + 1);
+      }
+      await withAbort(sleepFn(delayMs, signal), signal);
     }
   }
   throw lastErr;
@@ -1164,13 +1374,18 @@ async function runJob(
   }
 ): Promise<void> {
   const write = ctx?.write || writeLectureState;
-  const script = await (hooks?.generateScriptFn || generateScript)(
-    ai,
-    state.date,
-    newList,
-    reviewList,
-    ctx?.signal
-  );
+  let script: { title: string; items: LectureScriptItem[]; coachNote: string; tokens?: number };
+  try {
+    script = await (hooks?.generateScriptFn || generateScript)(
+      ai,
+      state.date,
+      newList,
+      reviewList,
+      ctx?.signal
+    );
+  } catch (err) {
+    throw attachErrorMeta(err, { stage: 'script', attempts: 0, completed: 0, total: 0 });
+  }
   if (ctx && (ctx.signal.aborted || !isCurrentJob(ctx.key, ctx.epoch))) return;
   state.title = script.title;
   state.coachNote = script.coachNote;
@@ -1234,7 +1449,12 @@ async function renderAndSaveAudio(
         pcmParts[i] = resample(await synth(ai, state.ttsEngine, seg.text, seg.two, ctx?.signal), RATE);
       } catch (err) {
         aborted = true;
-        throw err;
+        throw attachErrorMeta(err, {
+          stage: 'tts',
+          attempts: 1,
+          completed: speechDone,
+          total: speechTotal,
+        });
       }
       if (aborted) return;
       speechDone += 1;
@@ -1292,85 +1512,99 @@ async function renderAndSaveAudio(
     recapChars: buildRecapText(items).length,
   };
 
-  let fitRes = fitLectureTimeline(measured);
-  let recapBuf: Buffer | undefined;
-  let drillIntroBuf: Buffer | undefined;
-  const extras: Extras = {};
+  let fitRes: ReturnType<typeof fitLectureTimeline>;
+  let pcm: Buffer;
+  let bodyStartSecByItem: Map<number, number>;
+  try {
+    fitRes = fitLectureTimeline(measured);
+    let recapBuf: Buffer | undefined;
+    let drillIntroBuf: Buffer | undefined;
+    const extras: Extras = {};
 
-  const synthExtraWithRetry = async (text: string): Promise<Buffer | null> => {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      ensureCurrent();
-      try {
-        return resample(await synth(ai, state.ttsEngine, text, false, ctx?.signal), RATE);
-      } catch (err) {
-        if (ctx && (ctx.signal.aborted || !isCurrentJob(ctx.key, ctx.epoch))) throw err;
-        if (attempt === 1) return null;
+    const synthExtraWithRetry = async (text: string): Promise<Buffer | null> => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        ensureCurrent();
+        try {
+          return resample(await synth(ai, state.ttsEngine, text, false, ctx?.signal), RATE);
+        } catch (err) {
+          if (ctx && (ctx.signal.aborted || !isCurrentJob(ctx.key, ctx.epoch))) throw err;
+          if (attempt === 1) return null;
+        }
       }
-    }
-    return null;
-  };
+      return null;
+    };
 
-  if (fitRes.want === 'recap') {
-    const keptSet = new Set(fitRes.keptItems);
-    const recapText = buildRecapText(items.filter((_, idx) => keptSet.has(idx)));
-    const buf = await synthExtraWithRetry(recapText);
-    if (buf) {
-      recapBuf = buf;
-      chars += recapText.length;
-      extras.recap = Math.floor(buf.length / 2);
-    } else {
-      extras.recap = 'failed';
-    }
-    fitRes = fitLectureTimeline(measured, extras);
-  } else if (fitRes.want === 'drillIntro') {
-    ensureCurrent();
-    const cacheKey = `${DRILL_INTRO_TEXT}::${VOICE_COACH}::${state.ttsEngine}`;
-    const cached = !synthesizeFn ? drillIntroCache.get(cacheKey) : undefined;
-    if (cached) {
-      drillIntroBuf = cached;
-      extras.drillIntro = Math.floor(cached.length / 2);
-    } else {
-      const buf = await synthExtraWithRetry(DRILL_INTRO_TEXT);
+    if (fitRes.want === 'recap') {
+      const keptSet = new Set(fitRes.keptItems);
+      const recapText = buildRecapText(items.filter((_, idx) => keptSet.has(idx)));
+      const buf = await synthExtraWithRetry(recapText);
       if (buf) {
-        drillIntroBuf = buf;
-        chars += DRILL_INTRO_TEXT.length;
-        if (!synthesizeFn) drillIntroCache.set(cacheKey, buf);
-        extras.drillIntro = Math.floor(buf.length / 2);
+        recapBuf = buf;
+        chars += recapText.length;
+        extras.recap = Math.floor(buf.length / 2);
       } else {
-        extras.drillIntro = 'failed';
+        extras.recap = 'failed';
       }
+      fitRes = fitLectureTimeline(measured, extras);
+    } else if (fitRes.want === 'drillIntro') {
+      ensureCurrent();
+      const cacheKey = `${DRILL_INTRO_TEXT}::${VOICE_COACH}::${state.ttsEngine}`;
+      const cached = !synthesizeFn ? drillIntroCache.get(cacheKey) : undefined;
+      if (cached) {
+        drillIntroBuf = cached;
+        extras.drillIntro = Math.floor(cached.length / 2);
+      } else {
+        const buf = await synthExtraWithRetry(DRILL_INTRO_TEXT);
+        if (buf) {
+          drillIntroBuf = buf;
+          chars += DRILL_INTRO_TEXT.length;
+          if (!synthesizeFn) drillIntroCache.set(cacheKey, buf);
+          extras.drillIntro = Math.floor(buf.length / 2);
+        } else {
+          extras.drillIntro = 'failed';
+        }
+      }
+      fitRes = fitLectureTimeline(measured, extras);
     }
-    fitRes = fitLectureTimeline(measured, extras);
-  }
 
-  ensureCurrent();
-  if (fitRes.want) {
-    throw new Error('duration fit did not converge');
-  }
-  const { pcm, bodyStartSecByItem } = assembleLecturePcm(
-    fitRes.timeline,
-    {
-      opening: openingBuf,
-      closing: closingBuf,
-      recap: recapBuf,
-      drillIntro: drillIntroBuf,
-      bodyByItem,
-      answerByItem,
-    },
-    fitRes.totalSamples,
-    RATE
-  );
-  const extraFailed = extras.recap === 'failed' || extras.drillIntro === 'failed';
-  const assembledSec = Math.floor(pcm.length / 2) / RATE;
-  if (extraFailed && assembledSec < LECTURE_MIN_SEC) {
-    console.warn(`[Lecture] duration under 6:00 after recap/drill TTS failure: ${assembledSec.toFixed(1)}s`);
+    ensureCurrent();
+    if (fitRes.want) {
+      throw new Error('duration fit did not converge');
+    }
+    const assembled = assembleLecturePcm(
+      fitRes.timeline,
+      {
+        opening: openingBuf,
+        closing: closingBuf,
+        recap: recapBuf,
+        drillIntro: drillIntroBuf,
+        bodyByItem,
+        answerByItem,
+      },
+      fitRes.totalSamples,
+      RATE
+    );
+    pcm = assembled.pcm;
+    bodyStartSecByItem = assembled.bodyStartSecByItem;
+    const extraFailed = extras.recap === 'failed' || extras.drillIntro === 'failed';
+    const assembledSec = Math.floor(pcm.length / 2) / RATE;
+    if (extraFailed && assembledSec < LECTURE_MIN_SEC) {
+      console.warn(`[Lecture] duration under 6:00 after recap/drill TTS failure: ${assembledSec.toFixed(1)}s`);
+    }
+  } catch (err) {
+    throw attachErrorMeta(err, { stage: 'fit', attempts: 0, completed: speechDone, total: speechTotal });
   }
   const keptItems = fitRes.keptItems.map((origIdx) => ({
     ...items[origIdx],
     startSec: bodyStartSecByItem.get(origIdx),
   }));
 
-  const encoded = await (encodeFn || encodeLectureAudio)(pcm, RATE);
+  let encoded: Awaited<ReturnType<LectureEncodeFn>>;
+  try {
+    encoded = await (encodeFn || encodeLectureAudio)(pcm, RATE);
+  } catch (err) {
+    throw attachErrorMeta(err, { stage: 'encode', attempts: 0, completed: speechDone, total: speechTotal });
+  }
   ensureCurrent();
   const fileName = `${state.date}.${encoded.ext}`;
   const dir = userDir(state.uid);
@@ -1379,11 +1613,11 @@ async function renderAndSaveAudio(
   try {
     fs.writeFileSync(tmpPath, encoded.buffer);
     fs.renameSync(tmpPath, finalPath);
+    removeLegacyAudioFiles(dir, state.date, fileName);
   } catch (err) {
     try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
-    throw err;
+    throw attachErrorMeta(err, { stage: 'save', attempts: 0, completed: speechDone, total: speechTotal });
   }
-  removeLegacyAudioFiles(dir, state.date, fileName);
   state.script = keptItems;
   state.itemCount = keptItems.length;
   state.newMistakeIds = keptItems.filter((it) => it.kind === 'new').map((it) => it.mistakeId);
@@ -1398,6 +1632,10 @@ async function renderAndSaveAudio(
   state.audioStatus = 'ready';
   state.audioProgress = { completed: speechTotal, total: speechTotal };
   delete state.error;
+  delete state.audioError;
+  delete state.audioRetryAfter;
+  delete state.audioChunks;
+  delete state.audioBackup;
   delete state.audioRebuildStartedAt;
   delete state.audioRebuildFailedAt;
   write(state);
