@@ -19,6 +19,7 @@ import {
   classifyLectureAudioError,
   cooldownMsFor,
   retryableFor,
+  safeErrName,
   sanitizeAudioBackupResult,
   type AudioBackupResult,
   type AudioErrorStage,
@@ -92,7 +93,6 @@ export const LECTURE_AUDIO_RETRY_COOLDOWN_MS = 30 * 60 * 1000;
 export const LECTURE_AUDIO_REBUILD_TIMED_OUT = 'AUDIO_REBUILD_TIMED_OUT';
 export const LECTURE_GEN_SKIPPED = 'GEN_SKIPPED';
 const JOB_TIMED_OUT_RE = /^(lecture job|audio rebuild) timed out/;
-const SAFE_ERR_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,40}$/;
 
 function userDirNoMkdir(uid: string): string {
   const safe = uid.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -139,16 +139,22 @@ class GenSkipError extends Error {
   }
 }
 
-function safeErrName(err: unknown): string | undefined {
-  if (!err || typeof err !== 'object') return undefined;
-  const obj = err as { name?: unknown; constructor?: { name?: unknown } };
-  const raw =
-    typeof obj.name === 'string' && obj.name
-      ? obj.name
-      : typeof obj.constructor?.name === 'string'
-      ? obj.constructor.name
-      : '';
-  return SAFE_ERR_NAME_RE.test(raw) ? raw : undefined;
+function formatAudioFailureLog(classified: LectureAudioError, err: unknown): string {
+  const errName = classified.errName ?? safeErrName(err);
+  return JSON.stringify({
+    stage: classified.stage,
+    code: classified.code,
+    httpStatus: classified.httpStatus,
+    googleStatus: classified.googleStatus,
+    attempts: classified.attempts,
+    completed: classified.completed,
+    total: classified.total,
+    ...(classified.segIndex !== undefined ? { segIndex: classified.segIndex } : {}),
+    ...(classified.segChars !== undefined ? { segChars: classified.segChars } : {}),
+    ...(classified.elapsedMs !== undefined ? { elapsedMs: classified.elapsedMs } : {}),
+    ...(classified.attemptMs !== undefined ? { attemptMs: classified.attemptMs } : {}),
+    ...(errName ? { errName } : {}),
+  });
 }
 
 export function retryCooldownUntilMs(
@@ -994,20 +1000,7 @@ export function startLectureAudioRebuild(
           at: failedAtIso,
           origin: 'local',
         });
-        const errName = safeErrName(err);
-        console.error(
-          '[Lecture] audio rebuild failed:',
-          JSON.stringify({
-            stage: classified.stage,
-            code: classified.code,
-            httpStatus: classified.httpStatus,
-            googleStatus: classified.googleStatus,
-            attempts: classified.attempts,
-            completed: classified.completed,
-            total: classified.total,
-            ...(errName ? { errName } : {}),
-          })
-        );
+        console.error('[Lecture] audio rebuild failed:', formatAudioFailureLog(classified, err));
         try { ac.abort(); } catch { /* ignore */ }
         state.audioStatus = 'missing';
         state.error = timedOut ? LECTURE_AUDIO_REBUILD_TIMED_OUT : 'GENERATION_FAILED';
@@ -1401,20 +1394,7 @@ export function startLectureJob(
           at: failedAtIso,
           origin: 'local',
         });
-        const errName = safeErrName(err);
-        console.error(
-          '[Lecture] job failed:',
-          JSON.stringify({
-            stage: classified.stage,
-            code: classified.code,
-            httpStatus: classified.httpStatus,
-            googleStatus: classified.googleStatus,
-            attempts: classified.attempts,
-            completed: classified.completed,
-            total: classified.total,
-            ...(errName ? { errName } : {}),
-          })
-        );
+        console.error('[Lecture] job failed:', formatAudioFailureLog(classified, err));
         running.delete(key);
         try { ac.abort(); } catch { /* ignore */ }
         if (jobAbort.get(key) === ac) jobAbort.delete(key);
@@ -1642,7 +1622,15 @@ export function toSpeechParts(text: string, twoSpeakers: boolean): any[] {
 
 function attachErrorMeta(
   err: unknown,
-  meta: { stage?: AudioErrorStage; attempts?: number; completed?: number; total?: number }
+  meta: {
+    stage?: AudioErrorStage;
+    attempts?: number;
+    completed?: number;
+    total?: number;
+    segIndex?: number;
+    segChars?: number;
+    segElapsedMs?: number;
+  }
 ): Error {
   const out = (
     err && typeof err === 'object'
@@ -1653,6 +1641,9 @@ function attachErrorMeta(
   if (meta.attempts !== undefined && out.attempts === undefined) out.attempts = meta.attempts;
   if (meta.completed !== undefined) out.completed = meta.completed;
   if (meta.total !== undefined) out.total = meta.total;
+  if (meta.segIndex !== undefined) out.segIndex = meta.segIndex;
+  if (meta.segChars !== undefined) out.segChars = meta.segChars;
+  if (meta.segElapsedMs !== undefined) out.segElapsedMs = meta.segElapsedMs;
   return out;
 }
 
@@ -1675,6 +1666,7 @@ export async function synthesizeGemini(
   opts: SynthesizeGeminiOpts = {}
 ): Promise<Pcm> {
   const sleepFn = opts.sleepFn || defaultSleep;
+  const nowFn = opts.now ?? Date.now;
   const stepTimeoutMs = opts.stepTimeoutMs ?? LECTURE_STEP_TIMEOUT_MS;
   const speechConfig: any = twoSpeakers
     ? {
@@ -1686,11 +1678,13 @@ export async function synthesizeGemini(
         },
       }
     : { voiceConfig: { prebuiltVoiceConfig: { voiceName: VOICE_COACH } } };
+  const attemptMs: number[] = [];
   let lastErr: any;
   for (let attempt = 0; attempt < 3; attempt++) {
     if (signal?.aborted) throw new Error('lecture job superseded');
     const timeoutSig = AbortSignal.timeout(stepTimeoutMs);
     const stepSig = signal ? AbortSignal.any([signal, timeoutSig]) : timeoutSig;
+    const attemptStart = nowFn();
     try {
       const response = await withAbort(
         withTimeout(
@@ -1708,6 +1702,8 @@ export async function synthesizeGemini(
       if (!part?.inlineData?.data) throw new Error('TTS 음성 데이터 없음');
       return parseAudio(part.inlineData.data, part.inlineData.mimeType || '');
     } catch (err: any) {
+      const elapsedMs = Math.max(0, Math.round(nowFn() - attemptStart));
+      attemptMs.push(elapsedMs);
       const isAbortOrTimeout = err?.name === 'AbortError' || err?.name === 'TimeoutError';
       const normalized =
         timeoutSig.aborted && !signal?.aborted && isAbortOrTimeout
@@ -1717,8 +1713,19 @@ export async function synthesizeGemini(
           : err;
       lastErr = attachErrorMeta(normalized, { stage: 'tts' });
       (lastErr as any).attempts = attempt + 1;
-      if (signal?.aborted) throw lastErr;
+      (lastErr as any).attemptMs = [...attemptMs];
       const classified = classifyLectureAudioError(lastErr, { stage: 'tts', attempts: attempt + 1 });
+      const errName = safeErrName(lastErr);
+      console.warn(
+        '[Lecture] TTS attempt failed:',
+        JSON.stringify({
+          attempt: attempt + 1,
+          elapsedMs,
+          errName,
+          code: classified.code,
+        })
+      );
+      if (signal?.aborted) throw lastErr;
       if (!retryableFor(classified.code) || attempt === 2) {
         throw lastErr;
       }
@@ -1861,6 +1868,7 @@ export function createCachedSegmentSynth(opts: {
   rate: number;
   synthOne: (text: string, two: boolean) => Promise<LecturePcm>;
   onMiss?: () => void;
+  onHit?: (segKey: string | number) => void;
 }): SegmentSynthTracker {
   let samples = 0;
   let chars = 0;
@@ -1875,6 +1883,7 @@ export function createCachedSegmentSynth(opts: {
       if (fs.existsSync(filePath)) {
         const cached = fs.readFileSync(filePath);
         if (cached.length > 0 && cached.length % 2 === 0) {
+          opts.onHit?.(segKey);
           return cached;
         }
       }
@@ -1946,12 +1955,16 @@ async function renderAndSaveAudio(
   pruneSegmentCache(state.uid, state.date, fp);
   const segDir = path.join(userDir(state.uid), 'segcache', safeDate(state.date), fp);
 
+  const hitSegs = new Set<string | number>();
   const segSynth = createCachedSegmentSynth({
     segDir,
     rate: RATE,
     synthOne: (text, two) => synth(ai, state.ttsEngine, text, two, ctx?.signal),
     onMiss: () => {
       if (ctx?.billable) ctx.billable.calls += 1;
+    },
+    onHit: (segKey) => {
+      hitSegs.add(segKey);
     },
   });
   const cachedSynth = segSynth.synth;
@@ -1982,20 +1995,35 @@ async function renderAndSaveAudio(
         continue;
       }
       chars += seg.text.length;
+      const segStart = Date.now();
       try {
         pcmParts[i] = await cachedSynth(i, seg.text, seg.two);
       } catch (err) {
         aborted = true;
         if (!firstErr) {
+          const segElapsedMs = Math.max(0, Math.round(Date.now() - segStart));
           firstErr = attachErrorMeta(err, {
             stage: 'tts',
             attempts: 1,
             completed: speechDone,
             total: speechTotal,
+            segIndex: i,
+            segChars: seg.text.length,
+            segElapsedMs,
           });
         }
         return;
       }
+      const elapsedMs = Math.max(0, Math.round(Date.now() - segStart));
+      console.log(
+        '[Lecture] TTS segment ok:',
+        JSON.stringify({
+          segIndex: i,
+          segChars: seg.text.length,
+          elapsedMs,
+          cached: hitSegs.has(i),
+        })
+      );
       speechDone += 1;
       state.audioProgress = { completed: speechDone, total: speechTotal };
       state.updatedAt = new Date().toISOString();

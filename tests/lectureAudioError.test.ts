@@ -93,6 +93,15 @@ const EXPECTED_ERROR_KEYS = [
   'origin',
 ];
 
+const ALLOWED_ERROR_KEYS = new Set([
+  ...EXPECTED_ERROR_KEYS,
+  'segIndex',
+  'segChars',
+  'elapsedMs',
+  'attemptMs',
+  'errName',
+]);
+
 test('7) classifyLectureAudioError maps all categories, matches exact allow-list, and never leaks raw message/URL', () => {
   const MARKER = 'SENSITIVE_MARKER_https://generativelanguage.googleapis.com/?key=AIzaFakeSecret';
   const cases: Array<{ err: any; ctx?: any; expect: Partial<ReturnType<typeof classifyLectureAudioError>> }> = [
@@ -159,7 +168,13 @@ test('7) classifyLectureAudioError maps all categories, matches exact allow-list
 
   for (const c of cases) {
     const out = classifyLectureAudioError(c.err, c.ctx);
-    assert.deepEqual(Object.keys(out), EXPECTED_ERROR_KEYS);
+    const outKeys = Object.keys(out);
+    for (const k of EXPECTED_ERROR_KEYS) {
+      assert.ok(outKeys.includes(k), `missing required key ${k}`);
+    }
+    for (const k of outKeys) {
+      assert.ok(ALLOWED_ERROR_KEYS.has(k), `unexpected key ${k}`);
+    }
     for (const [k, v] of Object.entries(c.expect)) {
       assert.equal((out as any)[k], v, `mismatch on ${k} for ${c.expect.code}`);
     }
