@@ -15,7 +15,7 @@ AI 튜터와 영어로 통화하고, 통화에서 **틀린 말을 틀린 그대�
 | 1단계 | 실시간 통화 `gemini-3.8-live`: 임시 토큰 직접 연결 → 실패 시 서버 중계, 세션 재개, 재연결(5번 실패하면 멈추고 안내). 통화마다 새 연결 객체라 앞 통화가 섞이지 않음 | `src/services/providers/geminiLiveProvider.ts`, `server.ts` `/live` |
 | 1단계 | 10초 조각 녹음(IndexedDB 먼저 저장 → Storage 업로드, 통화 마지막 조각까지 포함), 1분 단위 임시 받아쓰기(설정에서 끄기 가능), 끊긴 통화 복구 | `src/services/recording/` |
 | 1단계 | 통화 후 복기: 녹음을 1분 WAV로 합쳐 `gemini-3.5-transcribe` VERBATIM 받아쓰기 → `gemini-3.8-flash` 복기(`myPhrase`는 틀린 그대로). "내가 한 말 아님" 신고 시 그 실수는 복습 목록에서 빠짐. 다시 복기해도 중복·진도 후퇴 없음. 복기 화면에서 이번 통화 성과(졸업·재복습·다음 수업 진행)도 함께 표시 | `src/services/review/reviewPipeline.ts`, `/api/review` |
-| 1단계 | Keep 실수 목록 붙여넣기 가져오기, 사용량·예상 비용, 받아쓰기 품질 시험(개발자 메뉴) | `src/ui/keep/`, `src/ui/settings/UsagePanel.tsx`, `src/ui/sttBench/` |
+| 1단계 | Keep 실수 목록 붙여넣기 가져오기, 사용량·예상 비용(공식 단가 기준, Live 컨텍스트 재과금·받아쓰기 2회·강의 TTS 오디오 토큰 포함 추정), 받아쓰기 품질 시험(개발자 메뉴) | `src/ui/keep/`, `src/ui/settings/UsagePanel.tsx`, `src/ui/sttBench/` |
 | 2단계 | 간격 반복(1→3→7→14일, 보류, 졸업)과 퀴즈(말하기/타이핑, `gemini-3.8-flash` 채점) | `src/services/firebase/db.ts`, `src/ui/quiz/` |
 | 2단계 | 아침 강의(대본 `gemini-3.8-flash`, 2인 음성 `gemini-3.8-flash-tts`, 답 전 3초 무음). 서버 재시작으로 멈추면 "다시 만들기" 안내. 아침 강의는 하루 최대 2회(환경변수 `LECTURE_DAILY_GEN_CAP`)까지만 새로 만듭니다. 그 뒤로는 백업 복원만 하며, 이유는 피드 `today/diag.json`의 `genSkipReason`에서 볼 수 있습니다. | `server/lecture.ts`, `server/lectureGenGuard.ts`, `src/ui/lecture/` |
 | 2단계 | 그록봇 피드: `/feed/{비밀키}/today` 주소로 오늘 강의 상태·음성 링크 제공 | `server/feed.ts`, `src/ui/settings/FeedSettingsPanel.tsx` |

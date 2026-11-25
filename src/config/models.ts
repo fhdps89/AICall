@@ -23,18 +23,46 @@ export const GEMINI_TTS_MODEL = "gemini-3.8-flash-tts" as const;
 export const GEMINI_TTS_LITE_MODEL = "gemini-3.8-flash-lite-tts" as const;
 
 /**
- * Standard pricing unit rates for Part B-10 usage & cost estimation
+ * Standard pricing unit rates (USD per 1M tokens unless noted), aistudio pricing 2026-11-25.
+ * Single source of unit rates for Part B-10 usage & cost estimation.
  */
 export const PRICING_RATES = {
-  // USD per unit
-  livePerMinute: 0.004,        // Gemini Live audio streaming per minute estimate
-  sttPerMinuteGemini: 0.003,   // gemini-3.5-transcribe VERBATIM
-  sttPerMinuteAssembly: 0.006, // AssemblyAI Universal-3.5 Pro
-  textPer1kInputTokens: 0.00015,
-  textPer1kOutputTokens: 0.0006,
-  ttsPer1kCharsGemini: 0.0004, // gemini-3.8-flash-tts
+  liveInTextPer1M: 0.75,
+  liveInAudioPer1M: 3,
+  liveOutAudioPer1M: 12,
+  sttInAudioPer1M: 2,
+  sttOutTextPer1M: 12,
+  textInPer1M: 0.75,
+  textOutPer1M: 3.75,
+  ttsInPer1M: 0.5,
+  ttsOutAudioPer1M: 9,
+  sttPerMinuteAssembly: 0.006,
   ttsPer1kCharsElevenLabs: 0.015,
-  sieEmbedPer1MTokens: 0.06,    // Qwen/Qwen3-Embedding-4B on Superlinked Serverless
+  sieEmbedPer1MTokens: 0.06,
+} as const;
+
+/**
+ * Modeling assumptions used when exact token/audio counts are unavailable or re-billed per turn.
+ */
+export const USAGE_ASSUMPTIONS = {
+  /** Gemini native audio tokenization rate (25 tok/s = 1,500 tok/min). */
+  audioTokensPerSec: 25,
+  /** Tutor speaks ~50% of call duration for explanations and corrections. */
+  liveModelTalkShare: 0.5,
+  /** ~1 user/tutor turn exchange every 15s (4 turns/min). */
+  liveTurnsPerMin: 4,
+  /** Cap for Live context re-billing: slidingWindow (default trigger/target) keeps context at or below this, so re-billing stops growing past it. Conservative: the real average after compression is lower. */
+  liveContextWindowTokens: 128_000,
+  /** lessonPromptBuilder (~4.3KB) + goal context re-billed on every Live turn. */
+  liveSystemPromptTokens: 1500,
+  /** ~150 spoken words/min plus speaker labels and timestamps. */
+  sttOutTokensPerMin: 175,
+  /** Blended 70% input / 30% output for legacy textTokens; partially offsets missing thinking tokens. */
+  legacyTextOutputShare: 0.3,
+  /** Blended English (~14 chars/s) & Korean (~7-8 chars/s) when ttsAudioSec is absent. */
+  legacyTtsCharsPerSec: 10,
+  /** Approximate input text tokens per character for mixed Korean/English lecture scripts. */
+  ttsInTokensPerChar: 0.5,
 } as const;
 
 export interface ModelConfig {

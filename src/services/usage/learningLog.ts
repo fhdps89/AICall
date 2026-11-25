@@ -1,4 +1,17 @@
 import type { UsageDelta, UsageMonth } from "./usageService";
+import { USAGE_ASSUMPTIONS } from "../../config/models";
+
+/**
+ * Live 컨텍스트 재과금용 "유효 분²" (통화 1회). 컨텍스트는 slidingWindow 압축으로 창 크기(C분)에서 더 커지지 않으므로
+ * T ≤ C이면 T², T > C이면 2CT − C² (턴별 컨텍스트 합 = ∫min(t, C)dt × 2).
+ */
+export function liveContextMinutesSq(minutes: number): number {
+  const t = Number.isFinite(minutes) && minutes > 0 ? minutes : 0;
+  const a = USAGE_ASSUMPTIONS;
+  const tokensPerMin = a.audioTokensPerSec * 60 * (1 + a.liveModelTalkShare);
+  const capMin = a.liveContextWindowTokens / tokensPerMin;
+  return t <= capMin ? t * t : 2 * capMin * t - capMin * capMin;
+}
 
 export const REST_BANNER_MIN_DAYS = 2;
 
@@ -140,14 +153,15 @@ export function callsForDuration(sec: number): number {
 
 /**
  * 통화 종료 시 기록할 사용량 증분을 계산한다.
- * QA 통화는 비용만 남기도록 qaLiveMinutes만 반환하고 liveMinutes·calls는 넣지 않는다.
+ * QA 통화는 비용만 남기도록 qaLiveMinutes·qaLiveMinutesSq만 반환하고 liveMinutes·calls는 넣지 않는다.
  */
 export function callUsageDelta(durationSec: number, isQa: boolean): UsageDelta {
   const sec = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
+  const m = sec / 60;
   if (isQa) {
-    return { qaLiveMinutes: sec / 60 };
+    return { qaLiveMinutes: m, qaLiveMinutesSq: liveContextMinutesSq(m) };
   }
-  return { liveMinutes: sec / 60, calls: callsForDuration(sec) };
+  return { liveMinutes: m, liveMinutesSq: liveContextMinutesSq(m), calls: callsForDuration(sec) };
 }
 
 /**

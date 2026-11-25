@@ -813,13 +813,18 @@ test('5) 429 & AUTH fail immediately with 0 retries, set 30m/6h cooldown in stat
     fs.writeFileSync(lecture429, JSON.stringify(disk429, null, 2));
     const synthBeforeFeed = synth429;
     let feedStartCalls = 0;
+    // Wall-clock independent: before 05:00 KST the feed waits, so move "now" past the gate
+    // (never earlier than the real clock, so audioRetryAfter above stays in the past).
+    const kstHourNow = new Date(Date.now() + 9 * 3600_000).getUTCHours();
+    const feedNow = kstHourNow < 5 ? Date.now() + (5 - kstHourNow) * 3600_000 : Date.now();
     buildFeedToday(ai, feed429, 'https://example.test', {
       date,
-      now: Date.now(),
+      now: feedNow,
       startJob: (a, u, d, n, r, o) => {
         feedStartCalls += 1;
         return startLectureJob(a, u, d, n, r, {
           ...o,
+          now: Date.now(), // cooldown is checked against the real clock, not the shifted feed gate time
           synthesizeFn: async () => {
             synth429 += 1;
             return silentPcm();

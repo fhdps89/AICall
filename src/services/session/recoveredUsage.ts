@@ -2,7 +2,7 @@
  * 끊긴 통화 복구 시 누락된 통화 횟수·통화 분을 계산하는 순수 모듈 (Firebase·React 비의존).
  */
 import type { SessionData } from "../firebase/db";
-import { callsForDuration } from "../usage/learningLog";
+import { callsForDuration, liveContextMinutesSq } from "../usage/learningLog";
 
 export const MAX_RECOVERED_CALL_SEC = 3 * 60 * 60;
 
@@ -54,7 +54,7 @@ export type RecoveredUsageSession = Pick<
 export function recoveredCallUsage(
   s: RecoveredUsageSession,
   todayKst: string
-): { liveMinutes: number; calls: number } | null {
+): { liveMinutes: number; liveMinutesSq: number; calls: number } | null {
   if (s.source === "qa") return null;
   if (s.endedAt || s.usageRecordedAt) return null;
 
@@ -82,8 +82,10 @@ export function recoveredCallUsage(
   if (!Number.isFinite(rawSec) || rawSec <= 0) return null;
 
   const sec = Math.min(rawSec, MAX_RECOVERED_CALL_SEC);
+  const m = sec / 60;
   return {
-    liveMinutes: sec / 60,
+    liveMinutes: m,
+    liveMinutesSq: liveContextMinutesSq(m),
     calls: callsForDuration(sec),
   };
 }
@@ -91,7 +93,7 @@ export function recoveredCallUsage(
 export interface RecoveredUsageRecorderDeps {
   getSession: (uid: string, sessionId: string) => Promise<RecoveredUsageSession | null>;
   markRecorded: (uid: string, sessionId: string) => Promise<void>;
-  recordUsage: (uid: string, usage: { liveMinutes: number; calls: number }) => Promise<void>;
+  recordUsage: (uid: string, usage: { liveMinutes: number; liveMinutesSq: number; calls: number }) => Promise<void>;
   todayKst: () => string;
   onError?: (err: unknown) => void;
 }

@@ -16,6 +16,7 @@ import { sanitizeLectureInputs } from './server/lectureMaterial.ts';
 import { mimeForAudioFile } from './server/lectureAudioEncode.ts';
 import { computeMistakeClusters, validateClusterRequestBody } from './server/mistakeClusters.ts';
 import { runLectureSupplement } from './server/lectureSupplement.ts';
+import { tokensFromUsageMetadata } from './server/usageMeta.ts';
 import { preferredUserTranscript, buildUserCorpus } from './src/services/lecture/lectureSource.ts';
 import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive } from './server/sttBench.ts';
 import { LIVE_MODEL, TEXT_MODEL, GEMINI_STT_MODEL, GEMINI_TTS_LITE_MODEL } from './src/config/models.ts';
@@ -807,8 +808,7 @@ STRICT ANALYSIS RULES (Part B-4):
           sourceStt,
         });
 
-    const mainInput = response.usageMetadata?.promptTokenCount || 0;
-    const mainOutput = response.usageMetadata?.candidatesTokenCount || 0;
+    const { inputTokens: mainInput, outputTokens: mainOutput } = tokensFromUsageMetadata(response.usageMetadata);
     const suppInput = supp.usage?.inputTokens || 0;
     const suppOutput = supp.usage?.outputTokens || 0;
     const elapsed = Math.round(performance.now() - start);
@@ -1384,6 +1384,10 @@ app.post('/api/lecture/audio/rebuild', requireAuth, geminiLimit, (req: Request, 
     ttsEngine,
     createdAt,
     textTokens,
+    textInputTokens,
+    textOutputTokens,
+    ttsAudioSec,
+    ttsAudioChars,
     itemCount,
   } = req.body || {};
   const ai = createGenAI();
@@ -1406,6 +1410,10 @@ app.post('/api/lecture/audio/rebuild', requireAuth, geminiLimit, (req: Request, 
           ttsEngine,
           createdAt,
           textTokens,
+          textInputTokens,
+          textOutputTokens,
+          ttsAudioSec,
+          ttsAudioChars,
           itemCount,
         }
       : undefined;
@@ -1635,10 +1643,7 @@ ${text}`;
     res.json({
       ok: true,
       items,
-      usage: {
-        inputTokens: response.usageMetadata?.promptTokenCount || 0,
-        outputTokens: response.usageMetadata?.candidatesTokenCount || 0,
-      },
+      usage: tokensFromUsageMetadata(response.usageMetadata),
     });
   } catch (err: any) {
     console.error('[KeepParse] error:', err);

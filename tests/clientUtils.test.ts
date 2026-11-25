@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { groupChunks } from '../src/services/recording/audioMerge.ts';
 import { addKSTDays } from '../src/services/firebase/db.ts';
-import { estimateCostUsd, buildUsageFields } from '../src/services/usage/usageService.ts';
-import { PRICING_RATES } from '../src/config/models.ts';
+import { estimateCostUsd, buildUsageFields, priceUsage, liveCostPerMinute } from '../src/services/usage/usageService.ts';
+import { PRICING_RATES, USAGE_ASSUMPTIONS } from '../src/config/models.ts';
 import { buildClusterRequest, pickDisplayClusters } from '../src/services/mistakes/clusterRequest.ts';
 
 test('chunks are grouped into 1-minute batches of 6', () => {
@@ -15,8 +15,20 @@ test('KST date arithmetic crosses month ends', () => {
   assert.equal(addKSTDays(14, '2026-12-25'), '2027-01-08');
 });
 
-test('cost estimate uses the single price table', () => {
-  assert.equal(estimateCostUsd({ liveMinutes: 10 }), 10 * PRICING_RATES.livePerMinute);
+test('cost estimate delegates to priceUsage and formats footnote live per-minute rate', () => {
+  const delta = { liveMinutes: 3, liveMinutesSq: 9, calls: 1 };
+  const expected = priceUsage({ liveMinutes: 3, liveMinutesSq: 9, calls: 1 }).total;
+  assert.ok(Math.abs(estimateCostUsd(delta) - expected) < 1e-12);
+  assert.ok(Math.abs(estimateCostUsd({ sttMinutes: 2, sttEngine: 'assemblyai' }) - 2 * PRICING_RATES.sttPerMinuteAssembly) < 1e-12);
+  assert.ok(Math.abs(estimateCostUsd({ ttsChars: 1000, ttsEngine: 'elevenlabs' }) - PRICING_RATES.ttsPer1kCharsElevenLabs) < 1e-12);
+
+  // Footnote rate: 3-min example fallback when liveMinutes=0, or month live/liveMinutes when >0
+  assert.equal(liveCostPerMinute(null).toFixed(3), '0.058');
+  assert.equal(
+    liveCostPerMinute({ liveMinutes: 43.7, sttMinutes: 0, textTokens: 0, ttsChars: 0, estCostUsd: 0, calls: 16 }).toFixed(3),
+    '0.055'
+  );
+  assert.equal(USAGE_ASSUMPTIONS.audioTokensPerSec, 25);
 });
 
 test('usage cost: sieEmbeddingTokens priced at $0.06/1M and kept separate from textTokens', () => {

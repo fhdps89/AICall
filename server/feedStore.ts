@@ -144,6 +144,10 @@ export function sanitizeReadyLectureForBackup(
     ttsEngine: state.ttsEngine === 'elevenlabs' ? 'elevenlabs' : 'gemini',
     ...(typeof state.chars === 'number' ? { chars: state.chars } : {}),
     ...(typeof state.textTokens === 'number' ? { textTokens: state.textTokens } : {}),
+    ...(typeof state.textInputTokens === 'number' ? { textInputTokens: state.textInputTokens } : {}),
+    ...(typeof state.textOutputTokens === 'number' ? { textOutputTokens: state.textOutputTokens } : {}),
+    ...(typeof state.ttsAudioSec === 'number' ? { ttsAudioSec: state.ttsAudioSec } : {}),
+    ...(typeof state.ttsAudioChars === 'number' ? { ttsAudioChars: state.ttsAudioChars } : {}),
     ...(typeof state.durationSec === 'number' ? { durationSec: state.durationSec } : {}),
     ...(typeof state.audioBackupId === 'string' && state.audioBackupId
       ? { audioBackupId: state.audioBackupId }

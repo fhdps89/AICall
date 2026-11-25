@@ -11,6 +11,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
 import { TEXT_MODEL, GEMINI_TTS_MODEL } from '../src/config/models.ts';
+import { tokensFromUsageMetadata } from './usageMeta.ts';
 import { stripSpeechDirections, cleanLectureScriptItem } from './speechText.ts';
 import { encodeLectureAudio, mimeForAudioFile, type LectureEncodeFn } from './lectureAudioEncode.ts';
 import {
@@ -217,6 +218,10 @@ export interface LectureState {
   ttsEngine: 'gemini' | 'elevenlabs';
   chars?: number;
   textTokens?: number;
+  textInputTokens?: number;
+  textOutputTokens?: number;
+  ttsAudioSec?: number;
+  ttsAudioChars?: number;
   durationSec?: number;
   durationFit?: LectureDurationFit;
   audioFile?: string; // relative file name inside LECTURE_DIR/{uid}
@@ -386,6 +391,10 @@ export interface LectureAudioScriptPayload {
   ttsEngine?: 'gemini' | 'elevenlabs';
   createdAt?: string;
   textTokens?: number;
+  textInputTokens?: number;
+  textOutputTokens?: number;
+  ttsAudioSec?: number;
+  ttsAudioChars?: number;
   audioBackupId?: string;
   audioChunks?: number;
   durationFit?: LectureDurationFit;
@@ -506,6 +515,22 @@ export function sanitizeLectureScriptPayload(raw: unknown): LectureScriptSanitiz
       ttsEngine: obj.ttsEngine === 'elevenlabs' ? 'elevenlabs' : 'gemini',
       createdAt: typeof obj.createdAt === 'string' ? obj.createdAt : undefined,
       textTokens: typeof obj.textTokens === 'number' && Number.isFinite(obj.textTokens) ? obj.textTokens : undefined,
+      textInputTokens:
+        typeof obj.textInputTokens === 'number' && Number.isFinite(obj.textInputTokens) && obj.textInputTokens >= 0
+          ? obj.textInputTokens
+          : undefined,
+      textOutputTokens:
+        typeof obj.textOutputTokens === 'number' && Number.isFinite(obj.textOutputTokens) && obj.textOutputTokens >= 0
+          ? obj.textOutputTokens
+          : undefined,
+      ttsAudioSec:
+        typeof obj.ttsAudioSec === 'number' && Number.isFinite(obj.ttsAudioSec) && obj.ttsAudioSec >= 0
+          ? obj.ttsAudioSec
+          : undefined,
+      ttsAudioChars:
+        typeof obj.ttsAudioChars === 'number' && Number.isFinite(obj.ttsAudioChars) && obj.ttsAudioChars >= 0
+          ? obj.ttsAudioChars
+          : undefined,
       ...(typeof obj.audioBackupId === 'string' && obj.audioBackupId ? { audioBackupId: obj.audioBackupId } : {}),
       ...(audioChunks !== undefined ? { audioChunks } : {}),
       ...(durationFit ? { durationFit } : {}),
@@ -763,6 +788,10 @@ export function startLectureAudioRebuild(
   let ttsEngine: 'gemini' | 'elevenlabs' = existing?.ttsEngine || 'gemini';
   let createdAt = existing?.createdAt;
   let textTokens = existing?.textTokens;
+  let textInputTokens = existing?.textInputTokens;
+  let textOutputTokens = existing?.textOutputTokens;
+  let ttsAudioSec = existing?.ttsAudioSec;
+  let ttsAudioChars = existing?.ttsAudioChars;
   let audioBackupId = existing?.audioBackupId;
   let audioChunks = existing?.audioChunks;
 
@@ -799,6 +828,10 @@ export function startLectureAudioRebuild(
     ttsEngine = sanitized.payload.ttsEngine || ttsEngine;
     createdAt = sanitized.payload.createdAt || createdAt;
     textTokens = sanitized.payload.textTokens ?? textTokens;
+    textInputTokens = sanitized.payload.textInputTokens ?? textInputTokens;
+    textOutputTokens = sanitized.payload.textOutputTokens ?? textOutputTokens;
+    ttsAudioSec = sanitized.payload.ttsAudioSec ?? ttsAudioSec;
+    ttsAudioChars = sanitized.payload.ttsAudioChars ?? ttsAudioChars;
     audioBackupId = sanitized.payload.audioBackupId ?? audioBackupId;
     audioChunks = sanitized.payload.audioChunks ?? audioChunks;
   }
@@ -844,6 +877,10 @@ export function startLectureAudioRebuild(
     ...(inputLatestCreatedAt ? { inputLatestCreatedAt } : {}),
     ttsEngine,
     textTokens,
+    ...(typeof textInputTokens === 'number' ? { textInputTokens } : {}),
+    ...(typeof textOutputTokens === 'number' ? { textOutputTokens } : {}),
+    ...(typeof ttsAudioSec === 'number' ? { ttsAudioSec } : {}),
+    ...(typeof ttsAudioChars === 'number' ? { ttsAudioChars } : {}),
     ...(audioBackupId ? { audioBackupId } : {}),
     ...(audioChunks !== undefined ? { audioChunks } : {}),
     createdAt: createdAt || existing?.createdAt || nowIso,
@@ -1082,7 +1119,14 @@ export type LectureGenerateScriptFn = (
   newList: LectureMistakeInput[],
   reviewList: LectureMistakeInput[],
   signal?: AbortSignal
-) => Promise<{ title: string; items: LectureScriptItem[]; coachNote: string; tokens?: number }>;
+) => Promise<{
+  title: string;
+  items: LectureScriptItem[];
+  coachNote: string;
+  tokens?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+}>;
 
 export interface StartLectureJobOpts {
   force?: boolean;
@@ -1426,7 +1470,14 @@ async function generateScript(
   newList: LectureMistakeInput[],
   reviewList: LectureMistakeInput[],
   signal?: AbortSignal
-): Promise<{ title: string; items: LectureScriptItem[]; coachNote: string; tokens: number }> {
+): Promise<{
+  title: string;
+  items: LectureScriptItem[];
+  coachNote: string;
+  tokens: number;
+  inputTokens: number;
+  outputTokens: number;
+}> {
   const sunday = isSundayKst(date);
   const fmt = (list: LectureMistakeInput[], kind: string) =>
     list
@@ -1519,11 +1570,14 @@ ${fmt(reviewList, 'review')}
   const title = stripSpeechDirections(String(parsed.title || '')) || '오늘 아침 강의';
   const coachNote = normalizeCoachNote(String(parsed.coachNote || ''));
   const cleaned = applied.items.map(cleanLectureScriptItem);
+  const { inputTokens, outputTokens } = tokensFromUsageMetadata(response.usageMetadata);
   return {
     title,
     items: trimItemsToBudget(cleaned, date, title, coachNote, LECTURE_EST_MAX_SEC),
     coachNote,
     tokens: Number(response.usageMetadata?.totalTokenCount || 0),
+    inputTokens,
+    outputTokens,
   };
 }
 
@@ -1751,7 +1805,14 @@ async function runJob(
   }
 ): Promise<void> {
   const write = ctx?.write || writeLectureState;
-  let script: { title: string; items: LectureScriptItem[]; coachNote: string; tokens?: number };
+  let script: {
+    title: string;
+    items: LectureScriptItem[];
+    coachNote: string;
+    tokens?: number;
+    inputTokens?: number;
+    outputTokens?: number;
+  };
   try {
     script = await (hooks?.generateScriptFn || generateScript)(
       ai,
@@ -1772,9 +1833,67 @@ async function runJob(
   state.newMistakeIds = script.items.filter((it) => it.kind === 'new').map((it) => it.mistakeId);
   state.reviewMistakeIds = script.items.filter((it) => it.kind === 'review').map((it) => it.mistakeId);
   state.textTokens = script.tokens;
+  if (typeof script.inputTokens === 'number') state.textInputTokens = script.inputTokens;
+  if (typeof script.outputTokens === 'number') state.textOutputTokens = script.outputTokens;
   write(state);
 
   await renderAndSaveAudio(ai, state, script, hooks?.synthesizeFn, ctx, hooks?.encodeFn);
+}
+
+export interface SegmentSynthTracker {
+  synth: (segKey: string | number, text: string, two: boolean) => Promise<Buffer>;
+  billedSamples: () => number;
+  billedChars: () => number;
+}
+
+/**
+ * Wraps segment TTS synthesis with disk cache and counts only cache-miss samples/chars as billed TTS.
+ */
+export function createCachedSegmentSynth(opts: {
+  segDir: string;
+  rate: number;
+  synthOne: (text: string, two: boolean) => Promise<LecturePcm>;
+  onMiss?: () => void;
+}): SegmentSynthTracker {
+  let samples = 0;
+  let chars = 0;
+  const synth = async (segKey: string | number, text: string, two: boolean): Promise<Buffer> => {
+    const hash = crypto
+      .createHash('sha256')
+      .update(`${two ? 2 : 1}|${text}`)
+      .digest('hex')
+      .slice(0, 16);
+    const filePath = path.join(opts.segDir, `${segKey}-${hash}.pcm`);
+    try {
+      if (fs.existsSync(filePath)) {
+        const cached = fs.readFileSync(filePath);
+        if (cached.length > 0 && cached.length % 2 === 0) {
+          return cached;
+        }
+      }
+    } catch {
+      // ignore cache read failures and re-synthesize
+    }
+    const pcm = resample(await opts.synthOne(text, two), opts.rate);
+    opts.onMiss?.();
+    samples += Math.floor(pcm.length / 2);
+    chars += text.length;
+    const tmpPath = `${filePath}.${process.pid}.${crypto.randomUUID().slice(0, 8)}.tmp`;
+    try {
+      fs.mkdirSync(opts.segDir, { recursive: true });
+      fs.writeFileSync(tmpPath, pcm);
+      fs.renameSync(tmpPath, filePath);
+    } catch (err: any) {
+      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+      console.warn('[Lecture] segment cache write failed:', err?.name || 'error');
+    }
+    return pcm;
+  };
+  return {
+    synth,
+    billedSamples: () => samples,
+    billedChars: () => chars,
+  };
 }
 
 async function renderAndSaveAudio(
@@ -1820,36 +1939,15 @@ async function renderAndSaveAudio(
   pruneSegmentCache(state.uid, state.date, fp);
   const segDir = path.join(userDir(state.uid), 'segcache', safeDate(state.date), fp);
 
-  const cachedSynth = async (segKey: string | number, text: string, two: boolean): Promise<Buffer> => {
-    const hash = crypto
-      .createHash('sha256')
-      .update(`${two ? 2 : 1}|${text}`)
-      .digest('hex')
-      .slice(0, 16);
-    const filePath = path.join(segDir, `${segKey}-${hash}.pcm`);
-    try {
-      if (fs.existsSync(filePath)) {
-        const cached = fs.readFileSync(filePath);
-        if (cached.length > 0 && cached.length % 2 === 0) {
-          return cached;
-        }
-      }
-    } catch {
-      // ignore cache read failures and re-synthesize
-    }
-    const pcm = resample(await synth(ai, state.ttsEngine, text, two, ctx?.signal), RATE);
-    if (ctx?.billable) ctx.billable.calls += 1;
-    const tmpPath = `${filePath}.${process.pid}.${crypto.randomUUID().slice(0, 8)}.tmp`;
-    try {
-      fs.mkdirSync(segDir, { recursive: true });
-      fs.writeFileSync(tmpPath, pcm);
-      fs.renameSync(tmpPath, filePath);
-    } catch (err: any) {
-      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
-      console.warn('[Lecture] segment cache write failed:', err?.name || 'error');
-    }
-    return pcm;
-  };
+  const segSynth = createCachedSegmentSynth({
+    segDir,
+    rate: RATE,
+    synthOne: (text, two) => synth(ai, state.ttsEngine, text, two, ctx?.signal),
+    onMiss: () => {
+      if (ctx?.billable) ctx.billable.calls += 1;
+    },
+  });
+  const cachedSynth = segSynth.synth;
 
   const speechTotal = plan.filter((s) => s.kind === 'speech').length;
   let speechDone = 0;
@@ -2051,6 +2149,8 @@ async function renderAndSaveAudio(
   state.newMistakeIds = keptItems.filter((it) => it.kind === 'new').map((it) => it.mistakeId);
   state.reviewMistakeIds = keptItems.filter((it) => it.kind === 'review').map((it) => it.mistakeId);
   state.chars = chars;
+  state.ttsAudioSec = Math.round((segSynth.billedSamples() / RATE) * 10) / 10;
+  state.ttsAudioChars = segSynth.billedChars();
   state.durationSec = Math.round(fitRes.totalSamples / RATE);
   state.durationFit = fitRes.fit;
   state.audioBackupId = crypto.randomUUID();

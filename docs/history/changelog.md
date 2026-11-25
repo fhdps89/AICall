@@ -4,6 +4,18 @@
 
 ---
 
+### [2026-11-25 KST] v2.10.0 이후 수정(미배포) — 사용량·예상 비용 재산정 (브랜치 `englead/usage-cost-estimate-20261125`)
+- **배경**: 설정 → 사용량·예상 비용이 이번 달 $0.3669(16회·43.7분)로 표시돼 AI Studio 대시보드(28일 약 $6.7)보다 크게 낮았다. 옛 단가(통화 1분 $0.004, 받아쓰기 1분 $0.003, TTS 1천 자 $0.0004)가 공식 단가보다 낮았고, Live 턴별 컨텍스트 재과금·통화 중 partial 받아쓰기·thinking 토큰·TTS 오디오 토큰이 빠져 있었다.
+- **수정**:
+  - `src/config/models.ts`: `PRICING_RATES`를 공식 유료 단가(USD/1M 토큰)로 교체하고 `USAGE_ASSUMPTIONS` 추가.
+  - `src/services/usage/usageService.ts`: `priceUsage()`·`UsageCostBreakdown`·`liveCostPerMinute()` 추가, `estimateCostUsd`는 `priceUsage`에 위임. 새 필드 `qaLiveMinutes`·`liveMinutesSq`·`qaLiveMinutesSq`·`textInputTokens`·`textOutputTokens`·`ttsAudioSec`·`ttsAudioChars` 저장.
+  - `src/ui/settings/UsagePanel.tsx`: 예상 비용을 저장값 대신 재계산값으로 표시(옛 기록 재평가), 개발자 모드 항목별 비용 행과 새 각주.
+  - `server/usageMeta.ts`(신규) `tokensFromUsageMetadata`: 출력 = candidates + thoughts. `server.ts`·`server/mistakeClusters.ts`·`server/lectureSupplement.ts`·`server/lecture.ts`에 적용.
+  - `server/lecture.ts`: 대본 입력/출력 토큰 분리, `createCachedSegmentSynth`로 캐시 미스 TTS만 `ttsAudioSec`·`ttsAudioChars`에 누적. `server/feedStore.ts` 백업·`lectureService.ts` 기록에 새 필드 전달.
+  - `learningLog.ts` `liveContextMinutesSq`(컨텍스트 창 128k 토큰 상한 반영)·`callUsageDelta`·`recoveredUsage.ts`·`SttBenchmarkModal.tsx`: 통화 유효 분² 기록. 각주의 강의 음성 단가는 단가표에서 계산(`lectureAudioCostPerMinute`), 미사용 lite TTS 단가 제거.
+- **결과(이번 달 같은 기록 기준)**: $0.3669 → 약 $4.03(Live $2.40·받아쓰기 $0.35·텍스트 $0.53·TTS $0.76). 남은 차이는 QA봇 통화(옛 기록엔 분 미저장)·재생성 낭비·피드 강의 등 범위 밖 항목.
+- **방어 조치**: `tests/usageCost.test.ts`(신규) — 빈 문서 0·NaN 없음, 이번 달 옛 기록 ≈ $4.03, Sq 가산성, 옛+새 혼합 하한, 새 필드 저장, QA 델타, 복구 사용량 Sq, thinking 토큰 합산, 캐시 미스만 과금. `tests/lectureGenCost.test.ts`·`tests/lecturePersist.test.ts`의 피드 테스트가 00~05시 KST에 실패하던 벽시계 의존을 `now` 고정으로 해소.
+
 ### [2026-11-25 KST] v2.10.0 이후 수정(미배포) — 강의 생성 비용 가드 (브랜치 `englead/lecture-gen-cost-20261125`)
 - **배경**: 평일 Flash TTS 지출이 정상 1편 대비 약 10배 수준이었고, 재시작·Republish 후 전체 TTS 재생성(A), 중간 실패 시 성공 세그먼트 폐기 및 대본부터 재시작(B·D), 다중 인스턴스 동시 생성 및 `force` 중단 499(C·G), 429 분당 QUOTA 세그먼트 재시도·전역 pause(H) 등 중복 호출 경로(A~H)가 겹쳐 낭비가 발생했다.
 - **수정**:
