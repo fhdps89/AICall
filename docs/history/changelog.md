@@ -9,6 +9,7 @@
 - **원인**: `@google/genai` 2.24.0(`createAttemptSignal`)이 호출 측 `AbortSignal`을 자체 `AbortController`에 연결해 이유 없이 `abort()`하므로, 단계 시간 초과 시 `withTimeout`보다 SDK의 `AbortError`가 먼저 발생해 `STEP_TIMEOUT`으로 분류되지 않았다.
 - **수정**: `server/lecture.ts`의 `synthesizeGemini` catch 블록에서 `timeoutSig.aborted && !signal?.aborted`이면 오류를 `name = 'TimeoutError'`인 `lecture TTS timed out after ${stepTimeoutMs}ms`(`cause`에 원 오류 보존)로 바꿔 `STEP_TIMEOUT`으로 기록한다. 재시도(3회, 대기 1500/3000ms)·쿨다운·상위 작업 취소(`superseded`) 동작은 그대로 유지된다.
 - **방어 조치**: `tests/lectureAudioError.test.ts`에 fake `AbortError` 재시도·`STEP_TIMEOUT` 분류, 무응답 로컬 HTTP 서버 + 실제 `GoogleGenAI` SDK 회귀, 호출자 `AbortController` 취소 우선, 일반 `Error('boom')` `UNKNOWN` 유지 테스트 4건 추가.
+- **리뷰 후속 보완**: catch 정규화에 `err?.name === 'AbortError' || err?.name === 'TimeoutError'` 가드를 추가해 `timeoutSig` 만료 직후 도착한 `ApiError`(429 등)·응답 파싱 오류는 `TimeoutError`로 덮어쓰지 않고 원 오류 분류를 유지한다(`tests/lectureAudioError.test.ts` 테스트 22 추가, 테스트 18 race 완화).
 
 ### [2026-11-26 KST] 사용량 화면 항목별 비용 합계 불일치 수정 (브랜치 `englead/usage-breakdown-sie-20261126`, QA 시트 63행)
 - **증상**: 개발자 모드 설정 → 사용량·예상 비용의 항목별 비용 합이 예상 비용 합계보다 작았다(이번 달 $0.0106, 오늘 $0.0006 차이).

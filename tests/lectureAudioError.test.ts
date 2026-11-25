@@ -1081,7 +1081,10 @@ test('18) synthesizeGemini stepTimeoutMs AbortError normalizes to TimeoutError -
   assert.deepEqual(sleeps, [1500, 3000]);
   assert.match(caught.message, /^lecture TTS timed out/);
   assert.equal(caught.name, 'TimeoutError');
-  assert.equal(caught.cause?.name, 'AbortError');
+  assert.ok(
+    caught.cause?.name === 'AbortError' ||
+      /^lecture TTS timed out/.test(String(caught.cause?.message ?? ''))
+  );
   const classified = classifyLectureAudioError(caught, { stage: 'tts' });
   assert.equal(classified.code, 'STEP_TIMEOUT');
   assert.equal(classified.stage, 'tts');
@@ -1189,4 +1192,48 @@ test('21) synthesizeGemini non-timeout generic error still classifies UNKNOWN wi
   const classified = classifyLectureAudioError(caught, { stage: 'tts' });
   assert.equal(classified.code, 'UNKNOWN');
   assert.equal(classified.attempts, 3);
+});
+
+test('22) synthesizeGemini 429 RESOURCE_EXHAUSTED after timeoutSig aborts preserves QUOTA (1 attempt, no sleeps)', async () => {
+  let calls = 0;
+  const sleeps: number[] = [];
+  let caught: any;
+  try {
+    await synthesizeGemini(
+      {
+        models: {
+          generateContent: (req: any) => {
+            calls += 1;
+            const sig = req.config.abortSignal as AbortSignal;
+            const makeQuotaErr = () =>
+              Object.assign(new Error('RESOURCE_EXHAUSTED: quota exceeded'), { status: 429 });
+            return new Promise((_resolve, reject) => {
+              if (sig.aborted) {
+                reject(makeQuotaErr());
+                return;
+              }
+              sig.addEventListener('abort', () => reject(makeQuotaErr()), { once: true });
+            });
+          },
+        },
+      } as unknown as GoogleGenAI,
+      'Coach: hi',
+      false,
+      undefined,
+      {
+        stepTimeoutMs: 50,
+        sleepFn: async (ms) => {
+          sleeps.push(ms);
+        },
+      }
+    );
+    assert.fail('expected synthesizeGemini to throw');
+  } catch (err) {
+    caught = err;
+  }
+  assert.equal(calls, 1);
+  assert.deepEqual(sleeps, []);
+  const classified = classifyLectureAudioError(caught, { stage: 'tts' });
+  assert.equal(classified.code, 'QUOTA');
+  assert.equal(classified.attempts, 1);
 });
