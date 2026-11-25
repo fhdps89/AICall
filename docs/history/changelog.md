@@ -4,6 +4,14 @@
 
 ---
 
+### [2026-11-25 KST] v2.10.0 이후 수정(미배포) — 강의 오디오를 mp3로 생성·서빙·백업 (브랜치 `englead/lecture-audio-backup-size-20261125`)
+- **배경**: PR #49 배포 후 오늘 강의 오디오는 ready였으나 파일이 wav 17,520,044 bytes(365초, 24kHz 16-bit mono PCM과 일치)라 Firestore 청크 백업이 `too_large`(30청크, 한도 8)였다. `encodeLectureAudio`는 ffmpeg가 없거나 aac·lame 시도가 모두 실패하면 wav로 폴백하고, 라이브 AI Studio 런타임에는 ffmpeg가 없는 것으로 보는 것이 가장 그럴듯하다(서버 로그는 없음).
+- **수정**: 청크 한도를 올리지 않는다. 생성·서빙·백업은 모두 mp3(48kbps). `encodeLectureAudio`는 ffmpeg `libmp3lame`이 있으면 그걸 쓰고, 없거나 실패하면 `@breezystack/lamejs`(`encodePcmToMp3`, 주기적으로 이벤트 루프에 양보)로 인코딩해 항상 mp3를 반환한다(wav 폴백·m4a 우선 시도 제거). AI Studio Republish 뒤에는 `.data`가 비워지므로 콜드 스타트 TTS 재생성이 mp3를 만든다. `persistLectureBackups`의 wav→mp3 트랜스코드는 같은 프로세스가 남겨 둔 wav(또는 테스트 스텁)를 백업하기 위한 경로다. `AUDIO_CHUNK_MAX`는 8, `firestore.rules`는 변경 없음.
+- **방어 조치 (Safeguards)**: `tests/lectureAudioEncode.test.ts`(ffmpeg 부재 시 순수 JS mp3, ffmpeg 있으면 ext=mp3), `tests/lectureAudioChunks.test.ts`(360초 24kHz 무음 mp3가 8청크 이내, 17.5MB 유효 wav를 lamejs로 트랜스코드 후 커밋, 깨진 17MB wav는 too_large·원본 유지, 트랜스코드 후 isCurrent=false면 not_current·wav 유지, 8/9청크 경계는 .mp3 파일 기준).
+- **검증**: `npm test` 522/522, `npx tsc --noEmit -p tsconfig.json`, `npx tsc --noEmit -p tsconfig.server.json`, `npm run lint`, `npm run build` 통과. 머지·배포·규칙 게시 안 함.
+
+---
+
 ### [2026-11-25 KST] v2.10.0 이후 수정(미배포) — 아침 강의 오디오 백업을 Firestore 청크로 이전·TTS 재생성 실패 진단 (브랜치 `englead/lecture-audio-backup-20261125`)
 - **배경**:
   - 11/25 강의(08:08 ready, 5항목)는 08:30 PR #48 배포 뒤 TTS 재생성으로 한 번 되살아났지만(days 백업 `updatedAt` 08:36 KST), 컨테이너가 다시 켜진 뒤 09:45 확인 때 오디오 없이 `GENERATION_FAILED`였다.

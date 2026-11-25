@@ -602,6 +602,43 @@ export function recordLectureBackupResult(
 }
 
 /**
+ * Atomically save a transcoded MP3 file, update state.audioFile/audioMime, and remove legacy WAV/M4A files.
+ * Returns null if the local state is missing or no longer matches `match`.
+ */
+export function replaceLectureAudioWithMp3(
+  uid: string,
+  date: string,
+  mp3Buffer: Buffer,
+  match?: { createdAt?: string; audioBackupId?: string }
+): { audioPath: string; audioFile: string; audioMime: 'audio/mpeg'; updatedAt: string } | null {
+  safeDate(date);
+  const current = readLectureState(uid, date);
+  if (!current) return null;
+  if (match?.createdAt !== undefined && current.createdAt !== match.createdAt) return null;
+  if (match?.audioBackupId !== undefined && current.audioBackupId !== match.audioBackupId) return null;
+
+  const dir = userDir(uid);
+  const fileName = `${date}.mp3`;
+  const finalPath = path.join(dir, fileName);
+  const tmpPath = path.join(dir, `${fileName}.${process.pid}.tmp`);
+  try {
+    fs.writeFileSync(tmpPath, mp3Buffer);
+    fs.renameSync(tmpPath, finalPath);
+  } catch (err) {
+    try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+    throw err;
+  }
+  const next: LectureState = {
+    ...current,
+    audioFile: fileName,
+    audioMime: 'audio/mpeg',
+  };
+  writeLectureState(next);
+  removeLegacyAudioFiles(dir, date, fileName);
+  return { audioPath: finalPath, audioFile: fileName, audioMime: 'audio/mpeg', updatedAt: next.updatedAt! };
+}
+
+/**
  * Re-render TTS from an existing script when the WAV was lost (e.g. server disk wiped on redeploy).
  * Keeps status=ready so a ready lecture is not flipped to generating/INTERRUPTED.
  */
