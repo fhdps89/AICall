@@ -1,5 +1,6 @@
 import type { UsageDelta, UsageMonth } from "./usageService";
 import type { LiveUsageTotals } from "../providers/liveUsage";
+import type { PocUsageTotals } from "../../config/cascadePoc";
 import { USAGE_ASSUMPTIONS } from "../../config/models";
 
 /**
@@ -230,6 +231,30 @@ export function callUsageDelta(
 }
 
 /**
+ * 구글 스트리밍 시험 모드(PoC) 통화의 사용량 증분. 분은 liveMinutes가 아니라 pocMinutes에 넣고
+ * (기본 엔진 단가로 잘못 계산되지 않게), 통화 횟수(calls)는 일반 통화와 같은 규칙으로 센다.
+ * QA 통화는 비용(토큰)만 남기고 분·횟수는 넣지 않는다.
+ */
+export function pocCallUsageDelta(
+  durationSec: number,
+  isQa: boolean,
+  poc?: Partial<PocUsageTotals> | null
+): UsageDelta {
+  const sec = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
+  const tokens: UsageDelta = {
+    pocSttAudioSec: posNum(poc?.sttAudioSec),
+    pocSttOutTokens: posNum(poc?.sttOutTokens),
+    pocTextInTokens: posNum(poc?.textInTokens),
+    pocTextOutTokens: posNum(poc?.textOutTokens),
+    pocTtsInTokens: posNum(poc?.ttsInTokens),
+    pocTtsAudioSec: posNum(poc?.ttsAudioSec),
+  };
+  if (isQa) return tokens;
+  const calls = callsForDuration(sec);
+  return { ...tokens, pocMinutes: sec / 60, pocCalls: calls, calls };
+}
+
+/**
  * 학습한 날 판정: 통화 횟수가 1회 이상이거나(옛 데이터 호환) 통화 시간이 0.5분 이상.
  */
 export function isActiveLearningDay(calls: number, minutes: number): boolean {
@@ -259,7 +284,8 @@ export function summarizeLearningLog(
       if (!parseDateStr(fullDate)) continue;
 
       const calls = dayStats?.calls ?? 0;
-      const minutes = dayStats?.liveMinutes ?? 0;
+      // 시험 모드(PoC) 통화 시간도 학습 시간이다 (liveMinutes와 따로 저장됨).
+      const minutes = (dayStats?.liveMinutes ?? 0) + (dayStats?.pocMinutes ?? 0);
       const prev = dayMap.get(fullDate);
       const mergedCalls = (prev?.calls ?? 0) + calls;
       const mergedMinutes = (prev?.minutes ?? 0) + minutes;

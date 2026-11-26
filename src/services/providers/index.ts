@@ -9,12 +9,25 @@
  */
 import { LiveProvider } from "./types";
 import { GeminiLiveProvider } from "./geminiLiveProvider";
+import { CascadePocProvider } from "./cascadePocProvider";
+import { PocFallbackProvider } from "./cascadeFallbackProvider";
+import { isCascadePocEnabled } from "../settings/callEngineSetting";
 
 /**
  * A fresh Live provider for one call. Each call needs its own instance: the provider keeps the
  * call's transcript and session resume handle, which must not leak into the next call.
+ * The Google-streaming test mode is used ONLY when its developer switch is on (default off);
+ * it falls back to the normal engine if the test mode is not ready within 8 s.
  */
-export function createLiveProvider(): LiveProvider {
+export function createLiveProvider(
+  pocEnabled: boolean = isCascadePocEnabled()
+): LiveProvider {
+  if (pocEnabled) {
+    return new PocFallbackProvider(
+      () => new CascadePocProvider(),
+      () => new GeminiLiveProvider()
+    );
+  }
   return new GeminiLiveProvider();
 }
 

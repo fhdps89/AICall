@@ -10,6 +10,8 @@
  *   textTokens, textInputTokens, textOutputTokens,
  *   ttsChars, ttsAudioSec, ttsAudioChars,
  *   sieEmbeddingTokens, estCostUsd, calls,
+ *   pocMinutes, pocCalls, pocSttAudioSec, pocSttOutTokens, pocTextInTokens, pocTextOutTokens,
+ *   pocTtsInTokens, pocTtsAudioSec   (Google-streaming test mode only; written only when present),
  *   days: { "DD": { ... } }
  * }
  * Unit prices and assumptions come only from src/config/models.ts (single source).
@@ -19,6 +21,7 @@ import { db } from "../firebase/config";
 import { PRICING_RATES, USAGE_ASSUMPTIONS } from "../../config/models";
 import { getKSTToday } from "../firebase/db";
 import { liveContextMinutesSq } from "./learningLog";
+import { pocCostUsd } from "../../config/cascadePoc";
 
 export interface UsageDelta {
   liveMinutes?: number;
@@ -55,6 +58,15 @@ export interface UsageDelta {
   ttsEngine?: "gemini" | "elevenlabs";
   sieEmbeddingTokens?: number;
   calls?: number;
+  /** Google-streaming test mode (PoC) call usage; never added to liveMinutes. */
+  pocMinutes?: number;
+  pocCalls?: number;
+  pocSttAudioSec?: number;
+  pocSttOutTokens?: number;
+  pocTextInTokens?: number;
+  pocTextOutTokens?: number;
+  pocTtsInTokens?: number;
+  pocTtsAudioSec?: number;
 }
 
 export interface UsageDay {
@@ -88,6 +100,15 @@ export interface UsageDay {
   sieEmbeddingTokens?: number;
   estCostUsd?: number;
   calls?: number;
+  /** Google-streaming test mode (PoC) call usage; never added to liveMinutes. */
+  pocMinutes?: number;
+  pocCalls?: number;
+  pocSttAudioSec?: number;
+  pocSttOutTokens?: number;
+  pocTextInTokens?: number;
+  pocTextOutTokens?: number;
+  pocTtsInTokens?: number;
+  pocTtsAudioSec?: number;
 }
 
 export interface UsageMonth {
@@ -121,6 +142,15 @@ export interface UsageMonth {
   sieEmbeddingTokens?: number;
   estCostUsd: number;
   calls?: number;
+  /** Google-streaming test mode (PoC) call usage; never added to liveMinutes. */
+  pocMinutes?: number;
+  pocCalls?: number;
+  pocSttAudioSec?: number;
+  pocSttOutTokens?: number;
+  pocTextInTokens?: number;
+  pocTextOutTokens?: number;
+  pocTtsInTokens?: number;
+  pocTtsAudioSec?: number;
   days?: Record<string, UsageDay>;
 }
 
@@ -137,6 +167,8 @@ export interface UsageCostBreakdown {
   text: number;
   tts: number;
   sie: number;
+  /** Google-streaming test mode (PoC) calls: STT + text + TTS tokens */
+  poc: number;
   total: number;
 }
 
@@ -149,6 +181,7 @@ const USAGE_COST_COMPONENT_LABELS = {
   text: "텍스트 비용",
   tts: "강의 음성 TTS 비용",
   sie: "실수 묶기 임베딩 비용",
+  poc: "시험 통화 비용",
 } as const satisfies Record<UsageCostComponentKey, string>;
 
 /** Ordered breakdown components (excluding total) shown in dev-mode usage cost tables. */
@@ -298,6 +331,25 @@ export function liveUsageBasis(u: UsageDay | UsageMonth | null | undefined): Liv
   };
 }
 
+/**
+ * Test-mode (PoC) cost from the stored poc* counters. Re-pricing uses today's TTS rate (the TTS
+ * price doubles from 2027-01-01 KST), so a 2026 PoC call viewed in 2027 shows the 2027 TTS rate.
+ */
+export function pocUsageCostUsd(u: UsageDelta | UsageDay | UsageMonth | null | undefined, nowMs?: number): number {
+  if (!u) return 0;
+  return pocCostUsd(
+    {
+      sttAudioSec: nonNeg(u.pocSttAudioSec),
+      sttOutTokens: nonNeg(u.pocSttOutTokens),
+      textInTokens: nonNeg(u.pocTextInTokens),
+      textOutTokens: nonNeg(u.pocTextOutTokens),
+      ttsInTokens: nonNeg(u.pocTtsInTokens),
+      ttsAudioSec: nonNeg(u.pocTtsAudioSec),
+    },
+    nowMs
+  );
+}
+
 export function priceUsage(u: UsageDay | UsageMonth | null | undefined): UsageCostBreakdown {
   const r = PRICING_RATES;
   const a = USAGE_ASSUMPTIONS;
@@ -332,7 +384,8 @@ export function priceUsage(u: UsageDay | UsageMonth | null | undefined): UsageCo
     1_000_000;
 
   const sie = (nonNeg(u?.sieEmbeddingTokens) * r.sieEmbedPer1MTokens) / 1_000_000;
-  const parts = { live, qaLive, stt, text, tts, sie };
+  const poc = pocUsageCostUsd(u);
+  const parts = { live, qaLive, stt, text, tts, sie, poc };
   return { ...parts, total: sumUsageCostComponents(parts) };
 }
 
@@ -387,6 +440,12 @@ export function estimateCostUsd(d: UsageDelta): number {
     ttsAudioChars: d.ttsAudioChars,
     sieEmbeddingTokens: d.sieEmbeddingTokens,
     calls: d.calls,
+    pocSttAudioSec: d.pocSttAudioSec,
+    pocSttOutTokens: d.pocSttOutTokens,
+    pocTextInTokens: d.pocTextInTokens,
+    pocTextOutTokens: d.pocTextOutTokens,
+    pocTtsInTokens: d.pocTtsInTokens,
+    pocTtsAudioSec: d.pocTtsAudioSec,
   });
 
   const stt =
@@ -434,6 +493,14 @@ export interface UsageFields<T> {
   sieEmbeddingTokens: T;
   estCostUsd: T;
   calls: T;
+  pocMinutes?: T;
+  pocCalls?: T;
+  pocSttAudioSec?: T;
+  pocSttOutTokens?: T;
+  pocTextInTokens?: T;
+  pocTextOutTokens?: T;
+  pocTtsInTokens?: T;
+  pocTtsAudioSec?: T;
 }
 
 export type UsagePayload<T> = UsageFields<T> & {
@@ -451,7 +518,7 @@ export function buildUsageFields<T>(
   const textOut = nonNeg(d.textOutputTokens);
   const tokens = textIn + textOut + nonNeg(d.textTokens);
   const cost = estimateCostUsd(d);
-  return {
+  const fields: UsageFields<T> = {
     liveMinutes: inc(nonNeg(d.liveMinutes)),
     qaLiveMinutes: inc(nonNeg(d.qaLiveMinutes)),
     liveMinutesSq: inc(nonNeg(d.liveMinutesSq)),
@@ -483,6 +550,32 @@ export function buildUsageFields<T>(
     estCostUsd: inc(cost),
     calls: inc(nonNeg(d.calls)),
   };
+  // Test-mode (PoC) counters are written only for a test-mode call, so a normal call's usage
+  // write keeps exactly the same fields as before.
+  if (hasPocUsage(d)) {
+    fields.pocMinutes = inc(nonNeg(d.pocMinutes));
+    fields.pocCalls = inc(nonNeg(d.pocCalls));
+    fields.pocSttAudioSec = inc(nonNeg(d.pocSttAudioSec));
+    fields.pocSttOutTokens = inc(nonNeg(d.pocSttOutTokens));
+    fields.pocTextInTokens = inc(nonNeg(d.pocTextInTokens));
+    fields.pocTextOutTokens = inc(nonNeg(d.pocTextOutTokens));
+    fields.pocTtsInTokens = inc(nonNeg(d.pocTtsInTokens));
+    fields.pocTtsAudioSec = inc(nonNeg(d.pocTtsAudioSec));
+  }
+  return fields;
+}
+
+function hasPocUsage(d: UsageDelta): boolean {
+  return (
+    nonNeg(d.pocMinutes) > 0 ||
+    nonNeg(d.pocCalls) > 0 ||
+    nonNeg(d.pocSttAudioSec) > 0 ||
+    nonNeg(d.pocSttOutTokens) > 0 ||
+    nonNeg(d.pocTextInTokens) > 0 ||
+    nonNeg(d.pocTextOutTokens) > 0 ||
+    nonNeg(d.pocTtsInTokens) > 0 ||
+    nonNeg(d.pocTtsAudioSec) > 0
+  );
 }
 
 /**

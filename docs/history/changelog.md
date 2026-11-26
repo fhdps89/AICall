@@ -4,6 +4,14 @@
 
 ---
 
+### [2026-11-26 KST] 구글 스트리밍 시험 모드 PoC (EL-18, 브랜치 `englead/google-streaming-poc-20261126`)
+- **배경**: 기획안 `docs/plan/google-streaming-poc-plan.md`(찬식님 승인 20:27 KST). 받아쓰기·답변·음성을 따로 부르는 구성으로 통화 1회 비용(10분 약 $0.19, 2027년 TTS 단가 기준 약 $0.23)과 지연을 실제로 재 보는 시험 모드.
+- **추가**: `src/config/cascadePoc.ts`(모델·단가·비용식), `server/cascadeText.ts`, `server/cascadeSession.ts`, `server/cascadeWs.ts`, `server.ts` `/api/gemini/cascade` 업그레이드(기존 인증·한도 재사용), `src/services/settings/callEngineSetting.ts`(기본 꺼짐), `src/services/providers/cascadePocProvider.ts`·`cascadeFallbackProvider.ts`, `createLiveProvider()` 분기, 설정 「개발자: 모델·보안」 스위치, 통화 화면 「시험 모드」 표시, 사용량 `poc*` 필드·「시험 통화 비용」 행·학습 시간 합산.
+- **그대로 둔 것**: 기본 엔진, `models.ts` 상수, `geminiLiveProvider.ts`, `server/liveConfig.ts`, 재생 스케줄러, 에코 게이트, 아침 강의, `[boot]`, `firestore.rules`(diff 0줄). 일반 통화의 사용량 쓰기 필드도 같다.
+- **안전장치**: 서버 준비 8초·첫 음성 8초 안에 안 되면 기본 엔진으로 자동 연결. 서버에 키가 없으면 바로 `fallback_required`. 키·오디오는 로그에 안 남김.
+- **테스트**: `tests/cascadeText.test.ts`(12), `tests/cascadeSession.test.ts`(12, 가짜 Gemini·수동 시계: 0.4초 대기, 문장별 음성 순서, 끼어들기·에코·1단어 무시, 기록 자르기, 제어 명령 문구 = `server.ts`, STT 9분 교체·버퍼, 사용량·추정 표시, 턴 오류, 소켓 키 없음), `tests/cascadePocClient.test.ts`(9: 스위치 기본 꺼짐, 대체 연결, poc 사용량·비용 행·학습 시간, 일반 통화 필드 불변). `tests/usageCost.test.ts`는 새 `poc` 비용 항목 반영.
+- **남은 일**: 배포 뒤 시험 통화 1회로 지연(`[poc-turn]`)·비용(`[poc-summary]`)·끼어들기 실측. 박스에는 Gemini 키가 없어 실제 API 호출은 하지 않았다.
+
 ### [2026-11-26 KST] 통화 비용 절감 Track 2: Live 실측 토큰·임시 받아쓰기 기본 끔·비용식 (브랜치 `englead/live-cost-track2-20261126`)
 - **배경**: 작업지시서 `docs/plan/work-order-live-cost-optimization.md`(원문 그대로 추가) Track 2. 통화 엔진·모델명·컨텍스트 압축 값은 바꾸지 않음(Phase Gate).
 - **2-1 실측 계측**: `src/services/providers/liveUsage.ts`(턴 단위 스냅샷, 턴 안 마지막 값만, 턴 끝·재연결·종료 때 합산, AUDIO/TEXT 분리, 잘못된 값 무시). 직연결은 `geminiLiveProvider.ts`, 서버 중계는 `server.ts`가 `sanitizeLiveUsageMetadata`(`server/usageMeta.ts`)로 숫자만 `usage_metadata`로 전달. 통화 종료 때 `[live-usage] …` 한 줄(숫자만)과 실측 토큰 필드를 사용량 문서에 저장.

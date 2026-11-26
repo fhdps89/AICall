@@ -62,7 +62,9 @@ export const UsagePanel: React.FC<{ userId?: string }> = ({ userId }) => {
     log.thisMonth.calls > 0 ||
     log.thisMonth.minutes > 0 ||
     log.bestStreakDays > 0 ||
-    Object.values(months).some((m) => (m?.calls || 0) > 0 || (m?.liveMinutes || 0) > 0);
+    Object.values(months).some(
+      (m) => (m?.calls || 0) > 0 || (m?.liveMinutes || 0) > 0 || (m?.pocMinutes || 0) > 0
+    );
   const maxRecentMinutes = Math.max(
     1,
     ...log.recentDays.map((day) => day.minutes)
@@ -100,6 +102,7 @@ export const UsagePanel: React.FC<{ userId?: string }> = ({ userId }) => {
     ["받아쓰기", `${(usage?.sttMinutes || 0).toFixed(1)}분`, `${(d?.sttMinutes || 0).toFixed(1)}분`],
     ...(devMode
       ? ([
+          ["시험 통화(구글 스트리밍)", `${(usage?.pocMinutes || 0).toFixed(1)}분`, `${(d?.pocMinutes || 0).toFixed(1)}분`],
           ["임시 받아쓰기", `${(usage?.partialSttMinutes || 0).toFixed(1)}분`, `${(d?.partialSttMinutes || 0).toFixed(1)}분`],
           ["통화 비용 기준", fmtBasis(monthBasis), fmtBasis(dayBasis)],
           ["통화 실측 토큰", fmtLiveTokens(usage), fmtLiveTokens(d)],
