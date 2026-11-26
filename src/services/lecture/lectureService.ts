@@ -8,7 +8,6 @@ import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "../firebase/config";
 import {
   getUserMistakes,
-  getDueMistakes,
   getKSTToday,
   getSessionById,
   listRecentSessions,
@@ -19,6 +18,7 @@ import {
   type ReviewMistakeItem,
   type SessionData,
 } from "../firebase/db";
+import { selectDueMistakes } from "../mistakes/mistakeLoadState";
 import { authFetch, authJson } from "../api/authFetch";
 import { recordUsage } from "../usage/usageService";
 import {
@@ -38,11 +38,13 @@ import {
   isQaMistake,
   sessionCallSeconds,
   isShortSession,
+  resolveLectureMistakes,
   PREVIOUS_LECTURE_LOOKBACK_DAYS,
   MAX_REVIEW_PER_LECTURE,
   type LectureCandidate,
   type SessionTiming,
 } from "./lecturePick";
+export { resolveLectureMistakes };
 import {
   collectNewLectureItems,
   needsSupplementalPass,
@@ -135,6 +137,7 @@ async function loadSessionsById(
   return Object.fromEntries(entries);
 }
 
+// 어제 강의가 있으면 1회 조회로 끝나고, 단일 쿼리로 바꾸면 큰 강의 문서 30개를 한 번에 읽어 오히려 무거워지므로 순차 조회를 유지한다.
 /** Walk back up to 30 KST days and stop at the latest ready lecture before `today`. */
 async function loadPreviousLectureCutoff(uid: string, today: string): Promise<string | undefined> {
   const lectures: Array<{ date: string; status?: string; createdAt?: string }> = [];
@@ -261,13 +264,18 @@ async function backfillReviewMistakes(uid: string, sessions: SessionData[], exis
  * New lecture items come from each qualifying session's post-call review (full-transcript
  * analysis + supplemental pass), not from scanning the mistakes collection. Due reviews still come from the list.
  */
-export async function pickLectureMistakes(uid: string, today = getKSTToday(), nowIso = new Date().toISOString()) {
-  const [all, due, recent, previousLectureCreatedAt] = await Promise.all([
-    getUserMistakes(uid),
-    getDueMistakes(uid, today),
+export async function pickLectureMistakes(
+  uid: string,
+  today = getKSTToday(),
+  nowIso = new Date().toISOString(),
+  pre?: { all: MistakeData[] }
+) {
+  const [all, recent, previousLectureCreatedAt] = await Promise.all([
+    resolveLectureMistakes(pre, () => getUserMistakes(uid)),
     listRecentSessions(uid, 30),
     loadPreviousLectureCutoff(uid, today),
   ]);
+  const due = selectDueMistakes(all, today);
   const cutoffMs = newCandidateCutoffMs({ nowIso, previousLectureCreatedAt });
   await ensureSessionSupplementalMistakes(uid, recent, cutoffMs);
   await backfillReviewMistakes(uid, recent, all);
@@ -348,8 +356,14 @@ export async function startLecture(uid: string, date = getKSTToday(), force = fa
  * Sync server job metadata → Firestore. Does not download the WAV.
  * A different ready lecture on the server does not replace an already-ready Firestore doc.
  */
-export async function syncLectureStatus(uid: string, date = getKSTToday()): Promise<LectureDoc | null> {
-  const current = await getLecture(uid, date);
+export async function syncLectureStatus(
+  uid: string,
+  date = getKSTToday(),
+  current?: LectureDoc | null
+): Promise<LectureDoc | null> {
+  if (current === undefined) {
+    current = await getLecture(uid, date);
+  }
   if (current?.status === "ready" && current.audioUrl) return current;
   const { lecture } = await authJson<{ lecture: any }>(`/api/lecture/status?date=${date}`, undefined, "GET");
   if (!lecture) {

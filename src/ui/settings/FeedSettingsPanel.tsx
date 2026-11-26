@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { friendlyError } from "../common/friendlyError";
 import { Copy, RefreshCw, Rss, Loader2 } from "lucide-react";
-import { syncFeed, rotateFeedSecret, feedUrls, grokBotInstruction } from "../../services/feed/feedService";
+import { syncFeedNow, rotateFeedSecret, feedUrls, grokBotInstruction } from "../../services/feed/feedService";
 import { useDevMode } from "../../data/devMode";
 
 /** B-8 settings: feed URL, Grok Bot instruction, rotate secret */
@@ -13,7 +13,7 @@ export const FeedSettingsPanel: React.FC<{ userId?: string }> = ({ userId }) => 
 
   useEffect(() => {
     if (!userId) return;
-    syncFeed(userId)
+    syncFeedNow(userId)
       .then(setSecret)
       .catch((e) => setMsg(`알림 주소 준비 실패: ${friendlyError(e)}`));
   }, [userId]);

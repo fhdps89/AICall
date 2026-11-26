@@ -46,7 +46,9 @@ import { SettingsModal } from "./ui/settings/SettingsModal";
 import { ReviewModal } from "./ui/review/ReviewModal";
 import { ReviewFlowScreen } from "./ui/review/ReviewFlowScreen";
 import { LiveTranscriptItem } from "./services/providers/types";
-import { syncFeed } from "./services/feed/feedService";
+import { syncFeedNow } from "./services/feed/feedService";
+import { loadProfileAndGoals } from "./services/session/bootLoad";
+import { markBoot } from "./services/perf/bootTiming";
 import { HistoryDepthSync } from "./services/navigation/historySync";
 import {
   BackTargetState,
@@ -144,6 +146,7 @@ export const App: React.FC = () => {
         setUser(null);
       } else {
         setAuthError(null);
+        if (authUser) markBoot("auth");
         setUser(authUser);
       }
     });
@@ -162,10 +165,13 @@ export const App: React.FC = () => {
     const loadUserData = async () => {
       setDataLoading(true);
       try {
-        // Fetch or initialize profile
-        let profile = await getUserProfile(user.uid);
-        if (!profile) {
-          profile = {
+        // Fetch or initialize profile and goals in parallel
+        const { profile, goals: userGoals } = await loadProfileAndGoals(user.uid, {
+          getUserProfile,
+          saveUserProfile,
+          getUserGoals,
+          batchInitGoals,
+          defaultProfile: () => ({
             email: user.email || ALLOWED_USER_EMAIL,
             job: DEFAULT_PROMPT_PLACEHOLDERS.job,
             surveyTopics: DEFAULT_PROMPT_PLACEHOLDERS.surveyTopics,
@@ -176,9 +182,9 @@ export const App: React.FC = () => {
             feedSecret: "secret-" + Math.random().toString(36).substring(2, 9),
             initialProgressConfigured: false,
             updatedAt: new Date().toISOString(),
-          };
-          await saveUserProfile(user.uid, profile);
-        }
+          }),
+          defaultGoals: DEFAULT_GOALS,
+        });
         setUserProfile(profile);
 
         // Populate placeholders from profile
@@ -191,13 +197,8 @@ export const App: React.FC = () => {
           travelWeakPoints: profile.travelWeakPoints || DEFAULT_PROMPT_PLACEHOLDERS.travelWeakPoints,
         });
 
-        // Fetch or initialize Goals
-        let userGoals = await getUserGoals(user.uid);
-        if (userGoals.length === 0) {
-          await batchInitGoals(user.uid, DEFAULT_GOALS);
-          userGoals = DEFAULT_GOALS;
-        }
         setGoals(userGoals);
+        markBoot("data");
 
         // Check if first-run progress setup is needed
         if (!profile.initialProgressConfigured) {
@@ -419,7 +420,7 @@ export const App: React.FC = () => {
         // Send tonight's new mistakes to the morning-lecture feed now. Before, this only
         // happened when the home screen was shown again, so closing the app on the review
         // screen left the 6:40 bot with yesterday's list.
-        syncFeed(sessionUser.uid).catch((e) => console.warn("[App] feed sync after review failed:", e));
+        syncFeedNow(sessionUser.uid).catch((e) => console.warn("[App] feed sync after review failed:", e));
         await refreshGoals();
         setActiveReviewData({
           review: result.review,
@@ -502,7 +503,7 @@ export const App: React.FC = () => {
           liveTranscript: session.liveTranscript,
           onProgress: (step) => setReviewProgressStep(step),
         });
-        syncFeed(sessionUser.uid).catch((e) => console.warn("[App] feed sync after review failed:", e));
+        syncFeedNow(sessionUser.uid).catch((e) => console.warn("[App] feed sync after review failed:", e));
         await refreshGoals();
 
         setActiveReviewData({

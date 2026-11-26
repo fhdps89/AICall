@@ -4,6 +4,13 @@
 
 ---
 
+### [2026-11-26 KST] 홈 첫 화면 로딩: 복습 카드 미확정 상태 구분·중복 조회 제거 (브랜치 `englead/home-load-state-20261126`, QA 시트 66·67행)
+- **증상**: 로드·새로고침 뒤 약 30초 동안 「오늘 복습 0개 / 오늘 퀴즈 0개 / 퀴즈 풀기 (0개)」가 보이다 45/10으로 바뀜(통화 직후에도 0/0). 「클라우드 데이터베이스 동기화 중」 11~23초, 「오늘 아침 강의: 불러오는 중…」 30초 넘게 지속.
+- **원인**: `HomeScreen.tsx` `dueMistakes` 초기값 []를 카드가 그대로 0으로 그림(로딩 상태 미사용), 복기 뒤 `key` 재마운트로 초기화. 홈 마운트마다 실수 컬렉션 5회 전체 읽기(`getDueMistakes`+`getUserMistakes`, `syncFeed` 안 3회), 통화 직후 `App.tsx`와 홈 재마운트가 `syncFeed` 중복. `MorningLectureCard`는 문서가 없으면 서버 상태 응답까지 로딩 유지, `syncLectureStatus`가 `getLecture`를 다시 읽음. `App.tsx` 프로필→목표 직렬.
+- **수정**: `src/services/mistakes/mistakeLoadState.ts`(`MistakeLoadState`, `reviewCardView`, `selectDueMistakes`, 탭 캐시, `createLatestOnly`), `src/services/feed/feedSyncGate.ts`(`syncFeedFromHome`/`syncFeedNow`, 모든 피드 동기화 uid별 직렬화), `src/services/lecture/lectureCardLoad.ts`(Firestore 즉시 표시·서버 10초 제한·늦은 결과 반영), `src/services/session/bootLoad.ts`(프로필·목표 병렬), `src/services/perf/bootTiming.ts`(`[boot]` 1회 로그). `syncFeed` `opts.mistakes`, `pickLectureMistakes` `pre`, `syncLectureStatus` `current` 인자 추가. 서버 코드 변경 없음.
+- **측정**: 가짜 Firestore 지연 모델(요청당 0.83초) 새로고침: 홈 1.68→0.85초, 강의 카드 4.22→1.78초, 실수 전체 읽기 5→1회. 통화 직후: 조회 104→54회, 전송량 3.2→1.5MB, 피드 동기화 2→1회. 라이브 수치는 배포 뒤 `[boot]` 로그로 확인.
+- **방어 조치**: `tests/mistakeLoadState.test.ts`, `tests/feedSyncGate.test.ts`, `tests/lectureCardLoad.test.ts`, `tests/bootTiming.test.ts`, `tests/homeLoadReads.test.ts`, `tests/homeReviewCardWiring.test.ts` 추가.
+
 ### [2026-11-26 KST] 아침 강의 TTS 조각·시도별 소요시간 진단 기록
 - **배경**: 아침 강의 TTS 조각이 3회 시도 후 실패했을 때 소요시간 정보가 없어 "Gemini TTS 지연"과 "서버 CPU 스로틀링 / 본문 읽기 정체"를 구분할 수 없었다.
 - **수정**:

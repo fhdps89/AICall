@@ -88,3 +88,63 @@ export function writeUploadFailAt(storage: { setItem(k: string, v: string): void
 export function clearUploadFailAt(storage: { removeItem(k: string): void } | undefined, uid: string, date: string): void {
   storage?.removeItem(lectureUploadFailKey(uid, date));
 }
+
+export function shouldStartPollRefresh(inFlight: boolean, busy = false): boolean {
+  return !inFlight && !busy;
+}
+
+export function isLatestRequest(reqId: number, currentReqId: number): boolean {
+  return reqId === currentReqId;
+}
+
+export function shouldShowLectureChecking(opts: {
+  loading: boolean;
+  status?: string;
+  serverChecking: boolean;
+}): boolean {
+  return !opts.loading && opts.serverChecking && (!opts.status || opts.status === "failed");
+}
+
+export function shouldShowLectureSlow(opts: {
+  loading: boolean;
+  status?: string;
+  serverChecking: boolean;
+  serverSlow: boolean;
+}): boolean {
+  return (
+    !opts.loading &&
+    !opts.serverChecking &&
+    opts.serverSlow &&
+    (!opts.status || opts.status === "failed")
+  );
+}
+
+/** Avoid force-overwriting an unconfirmed server job while the status check is still slow. */
+export function shouldForceStartLecture(status?: string, serverSlow = false): boolean {
+  return status === "failed" && !serverSlow;
+}
+
+export interface AutoOpenDecision {
+  openModal: boolean;
+  markHandled: boolean;
+  markFirstRefreshDone: boolean;
+}
+
+export function resolveLectureAutoOpen(opts: {
+  autoOpen: boolean;
+  alreadyHandled: boolean;
+  serverStatus: "skipped" | "ok" | "failed" | "timeout";
+  lectureStatus?: string;
+}): AutoOpenDecision {
+  if (opts.serverStatus === "timeout") {
+    return { openModal: false, markHandled: false, markFirstRefreshDone: false };
+  }
+  if (!opts.autoOpen || opts.alreadyHandled) {
+    return { openModal: false, markHandled: false, markFirstRefreshDone: true };
+  }
+  return {
+    openModal: opts.lectureStatus === "ready",
+    markHandled: true,
+    markFirstRefreshDone: true,
+  };
+}

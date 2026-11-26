@@ -13,6 +13,10 @@ import {
   shouldClearStaleLectureMedia,
   isLectureAudioRestoring,
   shouldPollLecture,
+  shouldStartPollRefresh,
+  shouldShowLectureSlow,
+  shouldForceStartLecture,
+  resolveLectureAutoOpen,
 } from '../src/services/lecture/lectureSyncPolicy.ts';
 
 test('ready lecture without audioUrl can be shown immediately', () => {
@@ -105,4 +109,108 @@ test('isLectureAudioRestoring and shouldPollLecture truth table', () => {
   assert.equal(shouldPollLecture({ status: 'ready', audioStatus: 'ready' }), false);
   assert.equal(shouldPollLecture({ status: 'ready', audioStatus: 'missing' }), false);
   assert.equal(shouldPollLecture({ status: 'failed' }), false);
+});
+
+test('poll busy guard, serverSlow notice/force policy, and autoOpen timeout deferral', () => {
+  assert.equal(shouldStartPollRefresh(false, false), true);
+  assert.equal(shouldStartPollRefresh(true, false), false);
+  assert.equal(shouldStartPollRefresh(false, true), false);
+  assert.equal(shouldStartPollRefresh(true, true), false);
+
+  assert.equal(shouldForceStartLecture('failed', false), true);
+  assert.equal(shouldForceStartLecture('failed', true), false);
+  assert.equal(shouldForceStartLecture(undefined, false), false);
+  assert.equal(shouldForceStartLecture(undefined, true), false);
+  assert.equal(shouldForceStartLecture('ready', false), false);
+
+  assert.equal(
+    shouldShowLectureSlow({ loading: false, status: undefined, serverChecking: false, serverSlow: true }),
+    true
+  );
+  assert.equal(
+    shouldShowLectureSlow({ loading: false, status: 'failed', serverChecking: false, serverSlow: true }),
+    true
+  );
+  assert.equal(
+    shouldShowLectureSlow({ loading: false, status: undefined, serverChecking: true, serverSlow: true }),
+    false
+  );
+  assert.equal(
+    shouldShowLectureSlow({ loading: true, status: undefined, serverChecking: false, serverSlow: true }),
+    false
+  );
+  assert.equal(
+    shouldShowLectureSlow({ loading: false, status: 'generating', serverChecking: false, serverSlow: true }),
+    false
+  );
+  assert.equal(
+    shouldShowLectureSlow({ loading: false, status: 'ready', serverChecking: false, serverSlow: true }),
+    false
+  );
+  assert.equal(
+    shouldShowLectureSlow({ loading: false, status: undefined, serverChecking: false, serverSlow: false }),
+    false
+  );
+
+  // Timeout on first refresh does not consume autoOpen or mark first refresh done
+  assert.deepEqual(
+    resolveLectureAutoOpen({
+      autoOpen: true,
+      alreadyHandled: false,
+      serverStatus: 'timeout',
+      lectureStatus: undefined,
+    }),
+    { openModal: false, markHandled: false, markFirstRefreshDone: false }
+  );
+
+  // Late onServerSettled with ready opens modal and consumes autoOpen once
+  assert.deepEqual(
+    resolveLectureAutoOpen({
+      autoOpen: true,
+      alreadyHandled: false,
+      serverStatus: 'ok',
+      lectureStatus: 'ready',
+    }),
+    { openModal: true, markHandled: true, markFirstRefreshDone: true }
+  );
+
+  // Late onServerSettled with non-ready or failed consumes autoOpen without opening modal
+  assert.deepEqual(
+    resolveLectureAutoOpen({
+      autoOpen: true,
+      alreadyHandled: false,
+      serverStatus: 'ok',
+      lectureStatus: 'generating',
+    }),
+    { openModal: false, markHandled: true, markFirstRefreshDone: true }
+  );
+  assert.deepEqual(
+    resolveLectureAutoOpen({
+      autoOpen: true,
+      alreadyHandled: false,
+      serverStatus: 'failed',
+      lectureStatus: undefined,
+    }),
+    { openModal: false, markHandled: true, markFirstRefreshDone: true }
+  );
+
+  // Already handled or autoOpen=false never opens modal or re-handles
+  assert.deepEqual(
+    resolveLectureAutoOpen({
+      autoOpen: true,
+      alreadyHandled: true,
+      serverStatus: 'ok',
+      lectureStatus: 'ready',
+    }),
+    { openModal: false, markHandled: false, markFirstRefreshDone: true }
+  );
+  assert.deepEqual(
+    resolveLectureAutoOpen({
+      autoOpen: false,
+      alreadyHandled: false,
+      serverStatus: 'skipped',
+      lectureStatus: 'ready',
+    }),
+    { openModal: false, markHandled: false, markFirstRefreshDone: true }
+  );
 });

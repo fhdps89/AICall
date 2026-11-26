@@ -5,7 +5,6 @@ import { User } from "firebase/auth";
 import {
   GoalData,
   MistakeData,
-  getDueMistakes,
   getUserMistakes,
   advanceMistakeAfterLesson,
   getKSTToday,
@@ -50,7 +49,22 @@ import { MorningLectureCard } from "../lecture/MorningLectureCard";
 import { MistakeClustersCard } from "./MistakeClustersCard";
 import { fetchMistakeClusters } from "../../services/mistakes/clusterService";
 import type { MistakeCluster } from "../../services/mistakes/clusterRequest";
-import { syncFeed } from "../../services/feed/feedService";
+import {
+  invalidateHomeFeedSync,
+  syncFeedFromHome,
+  syncFeedNow,
+} from "../../services/feed/feedService";
+import {
+  createLatestOnly,
+  failMistakes,
+  initialMistakeState,
+  pickFeedSyncMode,
+  rememberMistakes,
+  reviewCardView,
+  type LatestOnly,
+  type MistakeLoadState,
+} from "../../services/mistakes/mistakeLoadState";
+import { markBoot } from "../../services/perf/bootTiming";
 import { KeepImportModal } from "../keep/KeepImportModal";
 import { SttBenchmarkModal } from "../sttBench/SttBenchmarkModal";
 import { CoachModal } from "../coach/CoachModal";
@@ -88,6 +102,8 @@ interface HomeScreenProps {
   onOpenUnfinished?: () => void;
 }
 
+const EMPTY_MISTAKES: MistakeData[] = [];
+
 export const HomeScreen: React.FC<HomeScreenProps> = ({
   user,
   goals,
@@ -108,9 +124,13 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const [promptViewMode, setPromptViewMode] = useState<"raw" | "hydrated">("hydrated");
 
   // B-5 Spaced Repetition Due Mistakes State
-  const [dueMistakes, setDueMistakes] = useState<MistakeData[]>([]);
-  const [allMistakes, setAllMistakes] = useState<MistakeData[]>([]);
-  const [mistakesLoading, setMistakesLoading] = useState<boolean>(true);
+  const [mistakeState, setMistakeState] = useState<MistakeLoadState>(() =>
+    initialMistakeState(user.uid)
+  );
+  const today = getKSTToday();
+  const view = reviewCardView(mistakeState, today);
+  const dueMistakes = view.kind === "counts" ? view.due : EMPTY_MISTAKES;
+  const allMistakes = mistakeState.status === "ready" ? mistakeState.all : EMPTY_MISTAKES;
   const [showDebugSection, setShowDebugSection] = useState<boolean>(false);
   const [advancingId, setAdvancingId] = useState<string | null>(null);
   const [debugToast, setDebugToast] = useState<string | null>(null);
@@ -128,35 +148,65 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const [mistakeClusters, setMistakeClusters] = useState<MistakeCluster[] | null>(null);
   const clusterReqRef = useRef(0);
   const clusterAbortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+  const pendingFeedChangedRef = useRef(false);
+  const mistakeReqRef = useRef<LatestOnly | null>(null);
+  if (!mistakeReqRef.current) {
+    mistakeReqRef.current = createLatestOnly();
+  }
 
-  const loadMistakes = async () => {
+  const loadMistakes = async (reason: "mount" | "changed" = "changed") => {
+    if (reason === "changed") {
+      pendingFeedChangedRef.current = true;
+      invalidateHomeFeedSync(user.uid);
+    }
+    const reqId = mistakeReqRef.current!.begin();
+    const isCurrent = () => mountedRef.current && mistakeReqRef.current!.isLatest(reqId);
+    setMistakeState((prev) =>
+      prev.status === "ready"
+        ? { ...prev, refreshing: true }
+        : prev.status === "error"
+        ? { status: "loading" }
+        : prev
+    );
     try {
-      setMistakesLoading(true);
-      const [due, all] = await Promise.all([
-        getDueMistakes(user.uid),
-        getUserMistakes(user.uid),
-      ]);
-      setDueMistakes(due);
-      setAllMistakes(all);
+      const all = await getUserMistakes(user.uid);
+      if (!isCurrent()) return;
+      rememberMistakes(user.uid, all);
+      setMistakeState({ status: "ready", all, refreshing: false });
+      markBoot("mistakes");
+
       // B-8: keep the Grok Bot feed's candidate list fresh (no scheduler server)
-      syncFeed(user.uid).catch((e) => console.warn("[HomeScreen] feed sync failed:", e));
+      const feedSyncMode = pickFeedSyncMode(reason, pendingFeedChangedRef.current);
+      pendingFeedChangedRef.current = false;
+      const feedSync =
+        feedSyncMode === "now"
+          ? syncFeedNow(user.uid, { mistakes: all })
+          : syncFeedFromHome(user.uid, all);
+      feedSync.catch((e) => console.warn("[HomeScreen] feed sync failed:", e));
 
       // Background mistake clustering (never blocks home render, call, or quiz)
       clusterAbortRef.current?.abort();
       const controller = new AbortController();
       clusterAbortRef.current = controller;
-      const reqId = ++clusterReqRef.current;
+      const clusterReqId = ++clusterReqRef.current;
       void fetchMistakeClusters(user.uid, all, controller.signal)
         .then((clusters) => {
-          if (reqId === clusterReqRef.current && !controller.signal.aborted) {
+          if (
+            mountedRef.current &&
+            clusterReqId === clusterReqRef.current &&
+            !controller.signal.aborted
+          ) {
             setMistakeClusters(clusters);
           }
         })
         .catch(() => {});
     } catch (err) {
+      if (!isCurrent()) return;
       console.warn("[HomeScreen] Failed to load mistakes:", err);
-    } finally {
-      setMistakesLoading(false);
+      setMistakeState((prev) =>
+        failMistakes(prev, friendlyError(err, "복습 목록을 불러오지 못했어요."))
+      );
     }
   };
 
@@ -176,8 +226,11 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   };
 
   useEffect(() => {
+    mountedRef.current = true;
+    markBoot("home");
     if (!user?.uid) return;
-    loadMistakes();
+    setMistakeState(initialMistakeState(user.uid));
+    void loadMistakes("mount");
     loadPlanAndSettings();
 
     const refreshLearningSummary = () => {
@@ -223,6 +276,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
     window.addEventListener(USAGE_UPDATED_EVENT, handleUsageUpdated);
 
     return () => {
+      mountedRef.current = false;
+      pendingFeedChangedRef.current = false;
+      mistakeReqRef.current?.invalidate();
       learningReqRef.current += 1;
       learningInFlightRef.current = null;
       clusterReqRef.current += 1;
@@ -241,7 +297,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
     setAdvancingId(mistakeId);
     try {
       const res = await advanceMistakeAfterLesson(user.uid, mistakeId);
-      await loadMistakes();
+      await loadMistakes("changed");
       setDebugToast(
         `"${phrase}" 진행 완료: ${res.prevStage}일차 ➔ ${res.nextStage}일차 (${res.nextStatus === "deferred" ? "보류 전환" : res.nextStatus}) | 다음 복습: ${res.nextReviewAt}`
       );
@@ -505,7 +561,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
                 <button
                   type="button"
                   onClick={() => setShowQuizModal(true)}
-                  disabled={dueMistakes.length === 0}
+                  disabled={view.kind !== "counts" || !view.canQuiz}
                   className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 text-xs font-black transition-colors cursor-pointer"
                 >
                   오늘 퀴즈
@@ -646,10 +702,10 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
             autoOpen={focus === "lecture"}
             onAutoOpenHandled={focus === "lecture" ? handleLectureAutoOpenHandled : undefined}
             onOpenQuiz={async () => {
-              await loadMistakes();
+              await loadMistakes("mount");
               setShowQuizModal(true);
             }}
-            onLectureCompleted={() => loadMistakes()}
+            onLectureCompleted={() => loadMistakes("changed")}
           />
         </div>
 
@@ -663,35 +719,69 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
               <div>
                 <div className="flex items-center gap-2">
                   <span className="text-xs font-bold text-amber-400">복습 & 퀴즈</span>
-                  <span className="text-[11px] text-slate-400">
-                    보류 {dueMistakes.filter((m) => m.status === "deferred").length}개 · 오늘 복습 대상 {dueMistakes.filter((m) => m.status === "reviewing").length}개
-                  </span>
+                  {view.kind === "counts" && (
+                    <>
+                      <span className="text-[11px] text-slate-400">
+                        보류 {view.deferred}개 · 오늘 복습 대상 {view.reviewing}개
+                      </span>
+                      {view.refreshing && (
+                        <Loader2 className="w-3 h-3 animate-spin text-slate-400" />
+                      )}
+                    </>
+                  )}
                 </div>
-                <div className="flex flex-wrap items-center gap-3 sm:gap-4 mt-1">
-                  <div className="text-xl sm:text-2xl font-black text-white flex items-center gap-1.5">
-                    <span>오늘 복습</span>
-                    <span className="text-amber-400 font-mono underline decoration-amber-400/30">
-                      {dueMistakes.length}개
-                    </span>
+                {view.kind === "loading" ? (
+                  <div data-testid="review-card-loading" className="mt-1.5 space-y-1.5">
+                    <div className="flex items-center gap-1.5 text-xs text-slate-400">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                      <span>복습 목록 확인 중…</span>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <div className="h-6 w-24 rounded-md bg-slate-800 animate-pulse" />
+                      <div className="h-6 w-24 rounded-md bg-slate-800 animate-pulse" />
+                    </div>
                   </div>
-                  <div className="text-xl sm:text-2xl font-black text-white flex items-center gap-1.5 border-l border-slate-700/80 pl-3 sm:pl-4">
-                    <span>오늘 퀴즈</span>
-                    <span className="text-emerald-400 font-mono">
-                      {Math.min(dueMistakes.length, 10)}개
-                    </span>
+                ) : view.kind === "error" ? (
+                  <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-rose-300">복습 목록을 불러오지 못했어요</span>
+                    <button
+                      type="button"
+                      data-testid="review-card-retry"
+                      onClick={() => void loadMistakes("mount")}
+                      className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-semibold border border-slate-700 cursor-pointer"
+                    >
+                      다시 시도
+                    </button>
                   </div>
-                </div>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-3 sm:gap-4 mt-1">
+                    <div className="text-xl sm:text-2xl font-black text-white flex items-center gap-1.5">
+                      <span>오늘 복습</span>
+                      <span className="text-amber-400 font-mono underline decoration-amber-400/30">
+                        {view.dueCount}개
+                      </span>
+                    </div>
+                    <div className="text-xl sm:text-2xl font-black text-white flex items-center gap-1.5 border-l border-slate-700/80 pl-3 sm:pl-4">
+                      <span>오늘 퀴즈</span>
+                      <span className="text-emerald-400 font-mono">
+                        {view.quizCount}개
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
               <button
                 onClick={() => setShowQuizModal(true)}
-                disabled={dueMistakes.length === 0}
+                disabled={view.kind !== "counts" || !view.canQuiz}
                 className="px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 text-xs font-black flex items-center gap-1.5 shadow-md shadow-amber-500/20 transition-all cursor-pointer active:scale-95"
               >
                 <Play className="w-3.5 h-3.5 fill-current" />
-                <span>퀴즈 풀기 ({Math.min(dueMistakes.length, 10)}개)</span>
+                <span>
+                  {view.kind === "counts" ? `퀴즈 풀기 (${view.quizCount}개)` : "퀴즈 풀기"}
+                </span>
               </button>
               <button
                 onClick={() => setShowKeepImport(true)}
@@ -734,11 +824,19 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
                   <span>간격 반복 단계 진행 시뮬레이터 (1→3→7→14→deferred)</span>
                 </span>
                 <span className="text-[11px] font-mono">
-                  총 {allMistakes.length}개 보관
+                  {mistakeState.status === "ready"
+                    ? `총 ${allMistakes.length}개 보관`
+                    : mistakeState.status === "error"
+                    ? "불러오지 못했어요"
+                    : "확인 중…"}
                 </span>
               </div>
 
-              {allMistakes.length === 0 ? (
+              {mistakeState.status !== "ready" ? (
+                <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800 text-center text-xs text-slate-400">
+                  {mistakeState.status === "error" ? "불러오지 못했어요" : "확인 중…"}
+                </div>
+              ) : allMistakes.length === 0 ? (
                 <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800 text-center text-xs text-slate-400">
                   아직 등록된 실수가 없습니다. 통화 완료 후 복기를 생성하면 1일차 reviewing으로 자동 등록됩니다.
                 </div>
@@ -1063,7 +1161,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
         <KeepImportModal
           user={user}
           onClose={() => setShowKeepImport(false)}
-          onSaved={() => loadMistakes()}
+          onSaved={() => loadMistakes("changed")}
         />
       )}
 
@@ -1075,7 +1173,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
           isOpen={showQuizModal}
           onClose={() => setShowQuizModal(false)}
           onFinished={() => {
-            loadMistakes();
+            loadMistakes("changed");
           }}
         />
       )}

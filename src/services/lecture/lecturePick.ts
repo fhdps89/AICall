@@ -43,6 +43,14 @@ export const NEW_MISTAKE_FALLBACK_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 export const PREVIOUS_LECTURE_LOOKBACK_DAYS = 30;
 
+/** Reuse pre-fetched mistakes when available instead of re-reading Firestore. */
+export async function resolveLectureMistakes(
+  pre: { all: MistakeData[] } | undefined,
+  read: () => Promise<MistakeData[]>
+): Promise<MistakeData[]> {
+  return pre ? pre.all : read();
+}
+
 export type SessionTiming = {
   startedAt?: string;
   endedAt?: string;
