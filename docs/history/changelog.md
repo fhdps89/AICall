@@ -4,6 +4,11 @@
 
 ---
 
+### [2026-11-26 KST] 통화 비용 절감 제안서를 보고서 양식으로 재작성 (Track 1, 브랜치 `englead/live-cost-proposal-20261126`)
+- **변경**: `docs/plan/live-cost-optimization-proposal.md`를 보고서 양식(보고서 규칙 통합안 v1.5 + 필수 형식 가이드라인, 2026-11-11 확정본)으로 다시 썼다. 제목 바로 아래 3줄 요약(순영향·즉시 조치·결정 필요), 헤더 메타(작성일·작성·상태)와 본문 중간 `[S1]`~`[S12]` 출처 태그 삭제, 출처는 각주와 [부록 G]로 이동, 절 제목은 「주제 — 결론」, 절마다 카드·프로세스 맵·강조 박스, 위계 ○/-, 지엽 수치·코드 근거·전체 매트릭스·단가표는 [부록 A]~[부록 F]로 이동.
+- **숫자 불변**: 모든 금액·토큰·단가는 기존 문서와 `logs/el17_track1/matrix_out.md` 값 그대로(표 B-1 17행 대조 일치). 결론(1순위 H1, 차선 구글 단일 스트리밍 PoC)과 Phase Gate도 그대로.
+- **PDF**: 같은 마크다운을 `md_render_guard.py` + `report_a4.css` + headless Chrome으로 렌더(13쪽). 코드 변경 없음.
+
 ### [2026-11-26 KST] 통화 비용 절감 아키텍처 제안서 (Track 1, 브랜치 `englead/live-cost-proposal-20261126`)
 - **추가**: `docs/plan/live-cost-optimization-proposal.md`. Google·OpenAI·Cartesia·Deepgram·xAI·LiveKit 공식 가격·문서(접속일 2026-11-26)로 대안 1(명시 압축)·2(분당 정액 GPT-Live·Cartesia·Deepgram·xAI)·3(풀듀플렉스 스트리밍)과 무음 차단·롤링 요약·경량 모델·프롬프트 경량화·2027 인상 대응·하이브리드를 비교. 산식과 일·월 USD/KRW 매트릭스(2026·2027-01-01 단가).
 - **결론(제안)**: 1순위 하이브리드 H1(엔진 유지, 보수안 월 $30.25/$33.21 → 6k/3k 월 $21.73/$24.69, 추정), 차선책 구글 단일 스트리밍 PoC(월 $10.49/$15.91, 추정). 엔진 변경 전 Track 2 `usageMetadata` 실측 8개 항목을 확인.
