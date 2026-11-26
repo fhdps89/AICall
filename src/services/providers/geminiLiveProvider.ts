@@ -9,6 +9,7 @@ import {
 import { authFetch } from "../api/authFetch";
 import { auth } from "../firebase/config";
 import { decodeLiveMessage, createSerialQueue } from "./liveMessage";
+import { createLiveUsageAccumulator, LiveUsageTotals } from "./liveUsage";
 import { LIVE_STATUS_TEXT } from "./liveStatusText";
 import {
   LiveWireKind,
@@ -101,6 +102,7 @@ export class GeminiLiveProvider implements LiveProvider {
   // Connection path tracking (2-1 requirement 5)
   private connectionPath: "direct" | "proxy" = "direct";
   private directFailCount = 0;
+  private liveUsage = createLiveUsageAccumulator();
 
   // Audio contexts
   private inputAudioCtx: AudioContext | null = null;
@@ -150,10 +152,15 @@ export class GeminiLiveProvider implements LiveProvider {
     this.connectStartedAt = Date.now();
     this.playbackScheduler = createScheduler();
     this.interruptCount = 0;
-    // resumeToken 없이 새 Live 맥락을 열 때만 튜터 발화 여부와 kickoff 횟수를 초기화한다(재연결·resumeToken 재개에서는 유지).
+    // resumeToken 없이 새 Live 맥락을 열 때만 튜터 발화 여부·kickoff 횟수·토큰 누적기를 초기화한다.
+    // 내부 재연결(triggerReconnection -> establishConnection)은 connect()를 거치지 않고,
+    // resumeToken 재개 역시 동일 통화 맥락이므로 누적 합계를 유지한 채 직전 pending 턴만 커밋한다.
     if (!options.resumeToken) {
       this.tutorSpoke = false;
       this.kickoffAttempts = 0;
+      this.liveUsage.reset();
+    } else {
+      this.liveUsage.commitTurn();
     }
 
     console.log("[Live] stage=connect_start");
@@ -201,6 +208,7 @@ export class GeminiLiveProvider implements LiveProvider {
   }
 
   private async establishConnection(): Promise<boolean> {
+    this.liveUsage.commitTurn();
     const startGen = this.connectionGeneration;
     // 1. Try Ephemeral Token direct connection (2-1 requirement 1, 2, 3)
     let directSucceeded = false;
@@ -371,6 +379,9 @@ export class GeminiLiveProvider implements LiveProvider {
                 return;
               }
               if (raw.setupComplete && !setupCompleted) {
+                if (raw.usageMetadata) {
+                  this.liveUsage.observe(raw.usageMetadata);
+                }
                 setupCompleted = true;
                 clearTimeout(setupTimer);
                 clearErrorFallback();
@@ -777,6 +788,9 @@ export class GeminiLiveProvider implements LiveProvider {
     }
 
     if (wire === "direct") {
+      if (msg.usageMetadata) {
+        this.liveUsage.observe(msg.usageMetadata);
+      }
 
       // Standard Direct BidiGenerateContent messages
       if (msg.serverContent) {
@@ -808,12 +822,14 @@ export class GeminiLiveProvider implements LiveProvider {
         }
 
         if (msg.serverContent.interrupted) {
+          this.liveUsage.commitTurn();
           this.interruptCount += 1;
           this.stopAudioPlayback();
           this.options?.onInterrupted?.();
         }
 
         if (msg.serverContent.turnComplete) {
+          this.liveUsage.commitTurn();
           console.log(
             `[Live] stage=playback_stats ${describeScheduler(this.playbackScheduler)} interrupts=${this.interruptCount}`
           );
@@ -846,11 +862,15 @@ export class GeminiLiveProvider implements LiveProvider {
       } else if (msg.type === "output_transcript" && msg.text) {
         this.appendTranscript("model", msg.text);
         this.options?.onTranscript(msg.text, false);
+      } else if (msg.type === "usage_metadata" && msg.usageMetadata) {
+        this.liveUsage.observe(msg.usageMetadata);
       } else if (msg.type === "interrupted") {
+        this.liveUsage.commitTurn();
         this.interruptCount += 1;
         this.stopAudioPlayback();
         this.options?.onInterrupted?.();
       } else if (msg.type === "turnComplete") {
+        this.liveUsage.commitTurn();
         console.log(
           `[Live] stage=playback_stats ${describeScheduler(this.playbackScheduler)} interrupts=${this.interruptCount}`
         );
@@ -877,6 +897,7 @@ export class GeminiLiveProvider implements LiveProvider {
    */
   private triggerReconnection(): void {
     if (this.isReconnecting) return;
+    this.liveUsage.commitTurn();
     this.isReconnecting = true;
     this.isConnected = false;
     const reconnectGen = ++this.connectionGeneration;
@@ -990,6 +1011,14 @@ export class GeminiLiveProvider implements LiveProvider {
       connectionPath: this.connectionPath,
       directFailCount: this.directFailCount,
     };
+  }
+
+  public getLiveUsage(): LiveUsageTotals {
+    return this.liveUsage.snapshot();
+  }
+
+  public finalizeLiveUsage(): LiveUsageTotals {
+    return this.liveUsage.finalize();
   }
 
   public sendAudioChunk(pcm16kChunk: ArrayBuffer): void {
@@ -1223,6 +1252,7 @@ export class GeminiLiveProvider implements LiveProvider {
   }
 
   private async runDisconnect(notifyClosed: boolean): Promise<void> {
+    this.liveUsage.commitTurn();
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.connectionGeneration++;
     this.cancelPendingConnect?.();
