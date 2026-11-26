@@ -65,17 +65,39 @@ export function createBootTimer(
   };
 }
 
+export interface BootTimerRuntime {
+  /** True in a browser page. `unref` there can drop the 60s fallback. */
+  window: boolean;
+  node: boolean;
+}
+
+function defaultBootTimerRuntime(): BootTimerRuntime {
+  return {
+    window: typeof window !== "undefined",
+    node: typeof process !== "undefined" && typeof process.versions?.node === "string",
+  };
+}
+
+/** Node tests may unref so the process can exit. A page timer must stay armed. */
+export function shouldUnrefBootTimer(
+  handle: unknown,
+  runtime: BootTimerRuntime = defaultBootTimerRuntime()
+): boolean {
+  if (runtime.window || !runtime.node) return false;
+  return (
+    typeof handle === "object" &&
+    handle !== null &&
+    "unref" in handle &&
+    typeof (handle as { unref?: unknown }).unref === "function"
+  );
+}
+
 const defaultMarkBoot = createBootTimer(
   () => (typeof performance !== "undefined" ? performance.now() : Date.now()),
   (msg) => console.info(msg),
   (cb, ms) => {
     const id = setTimeout(cb, ms);
-    if (
-      typeof id === "object" &&
-      id !== null &&
-      "unref" in id &&
-      typeof (id as { unref?: () => void }).unref === "function"
-    ) {
+    if (shouldUnrefBootTimer(id)) {
       (id as { unref: () => void }).unref();
     }
     return id;
@@ -85,4 +107,16 @@ const defaultMarkBoot = createBootTimer(
 
 export function markBoot(phase: BootPhase): void {
   defaultMarkBoot(phase);
+}
+
+/**
+ * Mark `phase` when `run` settles, whether it succeeds or throws, and before the
+ * caller decides the result is stale. Used for the home mistakes read.
+ */
+export async function settleBootPhase<T>(phase: BootPhase, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } finally {
+    markBoot(phase);
+  }
 }

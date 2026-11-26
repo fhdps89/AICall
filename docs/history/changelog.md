@@ -4,6 +4,13 @@
 
 ---
 
+### [2026-11-26 KST] 아침 강의 카드가 없는 강의를 잠깐 보여주고, `[boot]` 로그가 안 남던 문제 (브랜치 `englead/lecture-card-unknown-20261126`)
+- **증상**: 첫 방문에서 홈 아침 강의 카드가 약 2–5초 「아직 오늘 강의가 없어요」를 보인 뒤 실제 강의로 바뀜(카드는 5.2–7.3초에 자리 잡음). 같은 배포의 `[boot]` 한 줄은 라이브에서 한 번도 안 나옴. 페이지 로드 전에 콘솔을 붙잡아 둔 기록은 첫 방문 약 50초·새로고침 약 27초 동안 info가 0건이었고, 홈과 강의 카드는 약 7초 안에 자리 잡았음. 번들 `index-DOgNslPT.js`에는 로거가 들어 있음.
+- **원인 (강의 카드)**: `MorningLectureCard.tsx` `onLocal`이 로컬 문서가 없어도 `setLoading(false)`를 호출함(수정 전 120행). 헤드라인의 나머지 분기는 상태가 없으면 「아직 오늘 강의가 없어요」를 그림(수정 전 260행). 서버 확인(`needsServer`)이 아직 참이어도 빈 상태가 먼저 보임. 10초 제한에 걸리고 로컬 문서가 없으면 같은 빈 문구에 느린 안내만 붙음.
+- **원인 (`[boot]`)**: `flush`는 `mistakes`와 `lectureServer`가 둘 다 찍힌 뒤에만 바로 호출되고, 아니면 60초를 기다림(`bootTiming.ts` 57–64행). 그 두 표시는 카드가 결과를 받아들일 때만 찍힘. `MorningLectureCard.tsx` 140–141행은 `canApply`가 거짓이면 `markBoot("lectureServer")`에 닿지 않고, 123행의 `lectureLocal`도 `onLocal`의 같은 가드(118행) 뒤에 있음. `HomeScreen.tsx` 182–185행은 `isCurrent()`가 거짓이면 `markBoot("mistakes")`를 건너뛰고, 조회가 실패하면 catch(212행 이후)에도 표시가 없음. `App.tsx` 116행은 `dataLoading`이 거짓으로 시작해, 인증 뒤 첫 그리기(675행 관문)가 홈을 먼저 마운트함. 이어서 234행이 `setDataLoading(true)`를 호출하고, 캐시가 없으면 홈이 바로 언마운트됨. 정리 함수(`MorningLectureCard.tsx` 174행, `HomeScreen.tsx` 289행)가 진행 중인 조회를 거절해 표시를 건너뜀. 콘솔을 감싸거나 지우는 코드는 없고, 60초 타이머는 첫 표시 때 잡히며 두 표시가 모이면 `flush`는 타이머 없이 바로 돈다. 브라우저 `setTimeout`은 숫자라 `unref`도 호출되지 않음. QA 구간이 60초 미만이라 표시 하나가 빠지면 info가 0건으로 보임.
+- **수정**: 로컬 문서가 없고 서버 확인이 남았으면 로딩을 유지하고, 강의 없음은 서버(또는 서버 실패 시 로컬 폴백)가 없다고 한 뒤에만 표시. 10초 제한은 유지하고, 제한에 걸리고 문서가 없으면 기존 「확인이 늦어지고 있어요」를 보이며 빈 문구는 쓰지 않음(`lectureCardView`). `lectureServer`는 `loadLectureForCard`가 끝날 때(서버를 건너뛴 경우·시간 초과·조회 예외 포함) 카드의 수락 여부와 상관없이 표시. `mistakes`는 `settleBootPhase`가 성공·실패 모두에서 `isCurrent()` 판단 전에 표시. 페이지에서는 60초 폴백 타이머를 `unref`하지 않음. 같은 단계의 첫 표시만 남아 로그는 페이지당 한 번.
+- **방어 조치**: `tests/lectureCardPresence.test.ts`(대기 중 로딩, 서버가 없음 확인, 서버 강의 표시, 시간 초과 시 느린 상태), `tests/bootLogPath.test.ts`(카드를 흉내 내 결과를 버려도 `[boot]`가 한 번 남음), `tests/bootTiming.test.ts`(`unref`는 Node 테스트에서만).
+
 ### [2026-11-26 KST] 홈 첫 화면 부트 캐시 (브랜치 `englead/home-boot-cache-20261126`, QA 시트 67행)
 - **증상**: 새로고침마다 「클라우드 데이터베이스 동기화 중」 전체 화면이 11~23초 이어짐.
 - **원인**: `App.tsx`가 goals를 []로 시작해 Firestore 조회가 끝날 때까지 전체 화면 스피너(`dataLoading && goals.length === 0`)를 띄움.

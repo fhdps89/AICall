@@ -13,16 +13,16 @@ import {
   isLectureAudioRestoring,
   shouldStartPollRefresh,
   isLatestRequest,
-  shouldShowLectureChecking,
-  shouldShowLectureSlow,
   shouldForceStartLecture,
   resolveLectureAutoOpen,
+  lectureCardFlagsAfterLocal,
+  lectureCardFlagsAfterServer,
+  lectureCardView,
 } from "../../services/lecture/lectureSyncPolicy";
 import {
   loadLectureForCard,
   type LectureCardServerStatus,
 } from "../../services/lecture/lectureCardLoad";
-import { markBoot } from "../../services/perf/bootTiming";
 import { LectureModal } from "./LectureModal";
 
 interface MorningLectureCardProps {
@@ -116,11 +116,11 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
         syncServer: (cur) => syncLectureStatus(user.uid, today, cur),
         onLocal: (l, needsServer) => {
           if (!canApply(reqId)) return;
+          const flags = lectureCardFlagsAfterLocal(l, needsServer);
           setLecture(l);
-          setLoading(false);
-          setServerChecking(needsServer);
-          setServerSlow(false);
-          markBoot("lectureLocal");
+          setLoading(flags.loading);
+          setServerChecking(flags.serverChecking);
+          setServerSlow(flags.serverSlow);
           if (!needsServer) {
             maybeCopyAudio(l, reqId);
           }
@@ -138,12 +138,12 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
         },
       });
       if (!canApply(reqId)) return null;
-      markBoot("lectureServer");
+      const settled = lectureCardFlagsAfterServer(result.server);
       if (result.server !== "skipped") {
         setLecture(result.lecture);
         maybeCopyAudio(result.lecture, reqId);
       }
-      setServerSlow(result.server === "timeout");
+      setServerSlow(settled.serverSlow);
       if (!firstRefreshDoneRef.current) {
         applyAutoOpen(result.server, result.lecture?.status);
       }
@@ -238,6 +238,7 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
   };
 
   const status = lecture?.status;
+  const view = lectureCardView({ loading, lecture, serverChecking, serverSlow });
   const restoring = isLectureAudioRestoring(lecture);
   return (
     <section className="bg-[#161D2A] border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-lg">
@@ -248,24 +249,14 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
           </div>
           <div>
             <div className="text-xs font-bold text-sky-400">오늘 아침 강의</div>
-            <div className="text-lg font-black text-white">
-              {loading
-                ? "불러오는 중…"
-                : status === "ready"
-                ? lecture?.title || "오늘 강의 준비 완료"
-                : status === "generating"
-                ? "강의 만드는 중…"
-                : status === "failed"
-                ? "강의 만들기 실패"
-                : "아직 오늘 강의가 없어요"}
-            </div>
-            {shouldShowLectureChecking({ loading, status, serverChecking }) && (
+            <div className="text-lg font-black text-white">{view.headline}</div>
+            {view.checking && (
               <div className="text-[11px] text-slate-400 flex items-center gap-1 mt-0.5">
                 <Loader2 className="w-3 h-3 animate-spin" />
                 <span>오늘 강의가 있는지 확인 중…</span>
               </div>
             )}
-            {shouldShowLectureSlow({ loading, status, serverChecking, serverSlow }) && (
+            {view.slow && (
               <div className="text-[11px] text-slate-400 mt-0.5">
                 확인이 늦어지고 있어요. 잠시 후 다시 열어 주세요
               </div>

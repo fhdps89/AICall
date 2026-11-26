@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createBootTimer } from "../src/services/perf/bootTiming.ts";
+import { createBootTimer, shouldUnrefBootTimer } from "../src/services/perf/bootTiming.ts";
 
 test("records only first call per phase and logs once when mistakes and lectureServer are marked", () => {
   let tick = 10;
@@ -102,4 +102,12 @@ test("calls clearTimer with timer handle when flushed before 60s timeout", () =>
   mark("home");
   assert.equal(logs.length, 1);
   assert.deepEqual(cleared, [timerHandle]);
+});
+
+test("unref is for Node test timers only; a page keeps the 60s fallback", () => {
+  const handle = { unref() {} };
+  assert.equal(shouldUnrefBootTimer(handle, { window: true, node: true }), false);
+  assert.equal(shouldUnrefBootTimer(handle, { window: false, node: true }), true);
+  assert.equal(shouldUnrefBootTimer(handle, { window: false, node: false }), false);
+  assert.equal(shouldUnrefBootTimer(1, { window: false, node: true }), false);
 });
