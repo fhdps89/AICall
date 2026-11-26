@@ -26,6 +26,7 @@ import {
   isInterruptedSession,
 } from "../session/interruptedSession";
 import { kstDateStr } from "../usage/learningLog";
+import { selectDueMistakes } from "../mistakes/mistakeLoadState";
 
 export { isInterruptedSession };
 
@@ -947,30 +948,7 @@ export async function getDueMistakes(
 ): Promise<MistakeData[]> {
   try {
     const all = await getUserMistakes(userId);
-    const deferredList: MistakeData[] = [];
-    const reviewingDueList: MistakeData[] = [];
-
-    for (const m of all) {
-      if (m.status === "deferred") {
-        deferredList.push(m);
-      } else if (m.status === "reviewing") {
-        const targetDate = m.nextReviewAt || m.nextReviewDate || m.createdAt.slice(0, 10);
-        if (targetDate <= todayStr) {
-          reviewingDueList.push(m);
-        }
-      }
-    }
-
-    // deferred must be at the very front
-    // sort reviewingDueList by nextReviewAt asc, then stage desc
-    reviewingDueList.sort((a, b) => {
-      const da = a.nextReviewAt || a.nextReviewDate || "";
-      const db = b.nextReviewAt || b.nextReviewDate || "";
-      if (da !== db) return da.localeCompare(db);
-      return (b.stage || 1) - (a.stage || 1);
-    });
-
-    return [...deferredList, ...reviewingDueList];
+    return selectDueMistakes(all, todayStr);
   } catch (error) {
     console.warn("[db] Failed to get due mistakes:", error);
     return [];

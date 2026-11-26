@@ -8,11 +8,21 @@ import { rebuildTodayLecture } from "../../services/lecture/rebuildTodayLecture"
 import { formatLectureDuration } from "../../services/lecture/lecturePick";
 import {
   shouldCopyLectureAudio,
-  shouldShowLectureImmediately,
-  isLectureAudioRestoring,
   shouldPollLecture,
   readUploadFailAt,
+  isLectureAudioRestoring,
+  shouldStartPollRefresh,
+  isLatestRequest,
+  shouldShowLectureChecking,
+  shouldShowLectureSlow,
+  shouldForceStartLecture,
+  resolveLectureAutoOpen,
 } from "../../services/lecture/lectureSyncPolicy";
+import {
+  loadLectureForCard,
+  type LectureCardServerStatus,
+} from "../../services/lecture/lectureCardLoad";
+import { markBoot } from "../../services/perf/bootTiming";
 import { LectureModal } from "./LectureModal";
 
 interface MorningLectureCardProps {
@@ -33,6 +43,8 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
 }) => {
   const [lecture, setLecture] = useState<LectureDoc | null>(null);
   const [loading, setLoading] = useState(true);
+  const [serverChecking, setServerChecking] = useState(false);
+  const [serverSlow, setServerSlow] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
@@ -43,9 +55,40 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
   const onAutoOpenHandledRef = useRef(onAutoOpenHandled);
   onAutoOpenHandledRef.current = onAutoOpenHandled;
   const firstRefreshDoneRef = useRef(false);
+  const reqRef = useRef(0);
+  const inFlightReqIdRef = useRef<number | null>(null);
+  const busyRef = useRef(false);
+  const mountedRef = useRef(true);
   const today = getKSTToday();
 
-  const maybeCopyAudio = (l: LectureDoc | null) => {
+  const canApply = (reqId: number) =>
+    mountedRef.current && isLatestRequest(reqId, reqRef.current);
+
+  const applyAutoOpen = (
+    serverStatus: LectureCardServerStatus,
+    lectureStatus?: string
+  ) => {
+    const decision = resolveLectureAutoOpen({
+      autoOpen: autoOpenRef.current,
+      alreadyHandled: autoOpenHandledRef.current,
+      serverStatus,
+      lectureStatus,
+    });
+    if (decision.markFirstRefreshDone) {
+      firstRefreshDoneRef.current = true;
+    }
+    if (decision.markHandled) {
+      autoOpenHandledRef.current = true;
+    }
+    if (decision.openModal) {
+      setOpen(true);
+    }
+    if (decision.markHandled) {
+      onAutoOpenHandledRef.current?.();
+    }
+  };
+
+  const maybeCopyAudio = (l: LectureDoc | null, reqId: number) => {
     if (!l) return;
     let store: Storage | undefined;
     try {
@@ -56,89 +99,134 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
     if (!shouldCopyLectureAudio(l, Date.now(), readUploadFailAt(store, user.uid, today))) return;
     void copyLectureAudio(user.uid, today, l)
       .then((updated) => {
-        if (updated) setLecture(updated);
+        if (updated && canApply(reqId)) setLecture(updated);
       })
       .catch(() => { /* stream from the server instead */ });
   };
 
-  const refresh = async () => {
+  const refresh = async (): Promise<{
+    lecture: LectureDoc | null;
+    server: LectureCardServerStatus;
+  } | null> => {
+    const reqId = ++reqRef.current;
+    inFlightReqIdRef.current = reqId;
     try {
-      let l = await getLecture(user.uid, today);
-      if (shouldShowLectureImmediately(l)) {
-        setLecture(l);
-        setLoading(false);
-        if (!isLectureAudioRestoring(l)) {
-          maybeCopyAudio(l);
-          return l;
-        }
+      const result = await loadLectureForCard({
+        readLocal: () => getLecture(user.uid, today),
+        syncServer: (cur) => syncLectureStatus(user.uid, today, cur),
+        onLocal: (l, needsServer) => {
+          if (!canApply(reqId)) return;
+          setLecture(l);
+          setLoading(false);
+          setServerChecking(needsServer);
+          setServerSlow(false);
+          markBoot("lectureLocal");
+          if (!needsServer) {
+            maybeCopyAudio(l, reqId);
+          }
+        },
+        onServerSettled: (l, settledStatus) => {
+          if (!canApply(reqId)) return;
+          if (settledStatus === "ok") {
+            setServerSlow(false);
+            setLecture(l);
+            maybeCopyAudio(l, reqId);
+          }
+          if (!firstRefreshDoneRef.current) {
+            applyAutoOpen(settledStatus, settledStatus === "ok" ? l?.status : undefined);
+          }
+        },
+      });
+      if (!canApply(reqId)) return null;
+      markBoot("lectureServer");
+      if (result.server !== "skipped") {
+        setLecture(result.lecture);
+        maybeCopyAudio(result.lecture, reqId);
       }
-      // Server may have generated it (e.g. via the Grok Bot feed) → metadata only
-      l = (await syncLectureStatus(user.uid, today).catch(() => l)) || l;
-      setLecture(l);
-      maybeCopyAudio(l);
-      return l;
+      setServerSlow(result.server === "timeout");
+      if (!firstRefreshDoneRef.current) {
+        applyAutoOpen(result.server, result.lecture?.status);
+      }
+      return result;
     } finally {
-      setLoading(false);
+      if (inFlightReqIdRef.current === reqId) {
+        inFlightReqIdRef.current = null;
+      }
+      if (canApply(reqId)) {
+        setServerChecking(false);
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
+    mountedRef.current = true;
     let cancelled = false;
-    const finalizeAutoOpen = (l: LectureDoc | null) => {
-      if (cancelled) return;
-      firstRefreshDoneRef.current = true;
-      if (autoOpenRef.current && !autoOpenHandledRef.current) {
-        autoOpenHandledRef.current = true;
-        if (l?.status === "ready") {
-          setOpen(true);
-        }
-        onAutoOpenHandledRef.current?.();
-      }
-    };
 
-    refresh()
-      .then((l) => finalizeAutoOpen(l))
-      .catch(() => finalizeAutoOpen(null));
+    refresh().catch(() => {
+      if (cancelled || !mountedRef.current || firstRefreshDoneRef.current) return;
+      applyAutoOpen("failed", undefined);
+    });
 
     return () => {
       cancelled = true;
-      if (pollRef.current) window.clearInterval(pollRef.current);
+      mountedRef.current = false;
+      reqRef.current += 1;
+      inFlightReqIdRef.current = null;
+      busyRef.current = false;
+      if (pollRef.current) {
+        window.clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
     };
   }, [user.uid]);
 
   useEffect(() => {
     if (!autoOpen || !firstRefreshDoneRef.current || autoOpenHandledRef.current) return;
-    autoOpenHandledRef.current = true;
-    if (lecture?.status === "ready") {
-      setOpen(true);
-    }
-    onAutoOpenHandledRef.current?.();
+    applyAutoOpen("ok", lecture?.status);
   }, [autoOpen, lecture]);
 
+  const pollingNeeded = shouldPollLecture(lecture);
   useEffect(() => {
-    if (shouldPollLecture(lecture) && !pollRef.current) {
+    if (pollingNeeded && !pollRef.current) {
       pollRef.current = window.setInterval(async () => {
-        const l = await refresh().catch(() => null);
+        if (!shouldStartPollRefresh(inFlightReqIdRef.current !== null, busyRef.current)) return;
+        const res = await refresh().catch(() => null);
+        const l = res?.lecture ?? null;
         if (l && !shouldPollLecture(l) && pollRef.current) {
           window.clearInterval(pollRef.current);
           pollRef.current = null;
         }
       }, 5000);
-    } else if (!shouldPollLecture(lecture) && pollRef.current) {
+    } else if (!pollingNeeded && pollRef.current) {
       window.clearInterval(pollRef.current);
       pollRef.current = null;
     }
-  }, [lecture?.status, lecture?.audioStatus]);
+  }, [pollingNeeded, user.uid]);
 
   const runLectureAction = async (action: () => Promise<LectureDoc>) => {
+    // Bump reqRef at action start so any in-flight poll or late response cannot overwrite this action.
+    reqRef.current += 1;
+    inFlightReqIdRef.current = null;
+    busyRef.current = true;
     setBusy(true);
     setError(null);
+    setServerChecking(false);
+    setServerSlow(false);
     try {
-      setLecture(await action());
+      const next = await action();
+      if (!mountedRef.current) return;
+      setLecture(next);
+      setLoading(false);
     } catch (err: any) {
-      setError(friendlyError(err));
+      if (mountedRef.current) {
+        setError(friendlyError(err));
+      }
     } finally {
-      setBusy(false);
+      busyRef.current = false;
+      if (mountedRef.current) {
+        setBusy(false);
+      }
     }
   };
 
@@ -171,6 +259,17 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
                 ? "강의 만들기 실패"
                 : "아직 오늘 강의가 없어요"}
             </div>
+            {shouldShowLectureChecking({ loading, status, serverChecking }) && (
+              <div className="text-[11px] text-slate-400 flex items-center gap-1 mt-0.5">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                <span>오늘 강의가 있는지 확인 중…</span>
+              </div>
+            )}
+            {shouldShowLectureSlow({ loading, status, serverChecking, serverSlow }) && (
+              <div className="text-[11px] text-slate-400 mt-0.5">
+                확인이 늦어지고 있어요. 잠시 후 다시 열어 주세요
+              </div>
+            )}
             {status === "ready" && (
               <div className="text-[11px] text-slate-400">
                 {lecture?.itemCount}개 표현 · {formatLectureDuration(lecture?.durationSec || 0)}{lecture?.listenedAt ? " · 들음" : ""}{restoring ? " · 오디오 복원 중" : ""}
@@ -234,8 +333,8 @@ export const MorningLectureCard: React.FC<MorningLectureCardProps> = ({
             </>
           ) : (
             <button
-              onClick={() => create(status === "failed")}
-              disabled={busy || loading}
+              onClick={() => create(shouldForceStartLecture(status, serverSlow))}
+              disabled={busy || loading || serverChecking}
               className="px-4 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 disabled:opacity-40 text-slate-950 text-xs font-black flex items-center gap-1.5 cursor-pointer"
             >
               {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}

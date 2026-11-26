@@ -1,4 +1,4 @@
-import { syncFeed } from "../feed/feedService";
+import { syncFeedNow } from "../feed/feedService";
 import { getKSTToday } from "../firebase/db";
 import { startLecture, type LectureDoc } from "./lectureService";
 
@@ -26,7 +26,7 @@ export async function rebuildTodayLectureWith(
 
 export function rebuildTodayLecture(uid: string, date = getKSTToday()): Promise<LectureDoc> {
   return rebuildTodayLectureWith(uid, date, {
-    syncFeed: (u, opts) => syncFeed(u, undefined, undefined, opts),
+    syncFeed: (u, opts) => syncFeedNow(u, opts),
     startLecture,
   });
 }
