@@ -29,6 +29,10 @@ import {
   pocUsageCostUsd,
   USAGE_COST_COMPONENTS,
 } from '../src/services/usage/usageService.ts';
+import {
+  POC_TEXT_VARIANT_TITLE,
+  POC_TEXT_VARIANT_OPTION_LABELS,
+} from '../src/ui/settings/settingsText.ts';
 
 function mem(init: Record<string, string> = {}) {
   const m = new Map(Object.entries(init));
@@ -276,4 +280,44 @@ test('pocTextVariantOf reports the variant of the test-mode call ("a" for the no
   assert.equal(pocTextVariantOf(noTag), 'a');
   assert.equal(pocTextVariantOf(fakeProvider('live', log)), 'a');
   assert.equal(pocTextVariantOf(null), 'a');
+});
+
+test('A 확정 표시: 라벨·제목 문구와 명시적 B 선택 외 기본값 A 동작', () => {
+  assert.ok(POC_TEXT_VARIANT_OPTION_LABELS.a.includes('확정'));
+  assert.ok(POC_TEXT_VARIANT_OPTION_LABELS.b.includes('비교용'));
+  assert.equal(POC_TEXT_VARIANT_TITLE.includes('A/B 비교'), false);
+
+  const s = mem();
+  assert.deepEqual(resolvePocTextVariant('', s), { variant: 'a', source: 'default' });
+  assert.equal(s.map.has(POC_TEXT_VARIANT_KEY), false);
+
+  setStoredPocTextVariant('b', s);
+  assert.deepEqual(resolvePocTextVariant('', s), { variant: 'b', source: 'setting' });
+
+  setStoredPocTextVariant('a', s);
+  assert.deepEqual(resolvePocTextVariant('', s), { variant: 'a', source: 'default' });
+  assert.equal(s.map.has(POC_TEXT_VARIANT_KEY), false);
+
+  // Only an explicit B pick selects B; a URL override still wins over the stored value.
+  setStoredPocTextVariant('b', s);
+  assert.deepEqual(resolvePocTextVariant('?pocText=a', s), { variant: 'a', source: 'url' });
+  setStoredPocTextVariant('a', s);
+
+  for (const bad of ['B-model', 'gemini-3.5-flash-lite']) {
+    const badStorage = mem({ [POC_TEXT_VARIANT_KEY]: bad });
+    assert.equal(getStoredPocTextVariant(badStorage), 'a', bad);
+    // A garbage stored value is still reported as source 'setting', but it never selects B.
+    assert.equal(resolvePocTextVariant('', badStorage).variant, 'a', bad);
+  }
+
+  // Storage that throws (privacy mode): falls back to A, never B.
+  const broken = {
+    getItem: () => { throw new Error('denied'); },
+    setItem: () => { throw new Error('denied'); },
+    removeItem: () => { throw new Error('denied'); },
+  };
+  assert.equal(getStoredPocTextVariant(broken), 'a');
+  assert.doesNotThrow(() => setStoredPocTextVariant('b', broken));
+  assert.deepEqual(resolvePocTextVariant('', broken), { variant: 'a', source: 'default' });
+  assert.equal(getStoredPocTextVariant(mem({ [POC_TEXT_VARIANT_KEY]: '' })), 'a');
 });

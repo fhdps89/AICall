@@ -3,6 +3,11 @@ export const POC_TTS_MODEL = "gemini-3.8-flash-tts" as const;
 
 /** Reply-text A/B test (EL-18): the client sends only "a" or "b"; the server maps it here. */
 export type PocTextVariant = "a" | "b";
+/**
+ * 2026-11-27 07:48 KST 찬식님 결정: A(gemini-3.8-flash, thinking low) 확정.
+ * 근거(QA봇 변형당 10회 통화, text/qa=1): A 교정 19/36·답 81%가 1~2문장 vs B(gemini-3.5-flash-lite) 교정 0/40.
+ * B는 비교용으로만 남기며 명시적으로 고를 때만 사용.
+ */
 export const POC_DEFAULT_TEXT_VARIANT: PocTextVariant = "a";
 /**
  * Thinking level = lowest-latency level each model supports (ai.google.dev thinking, 2026-11-27):
