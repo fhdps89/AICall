@@ -75,6 +75,8 @@ export const STT_ROTATE_AFTER_MS = 9 * 60 * 1000;
 export const STT_CONNECT_TIMEOUT_MS = 7000;
 
 const PCM_16K_BYTES_PER_SEC = 32000;
+/** Final segments this soon after the tutor stops are still checked for speaker echo. */
+export const ECHO_GRACE_MS = 1500;
 const MAX_ROTATION_BUFFER_BYTES = 5 * PCM_16K_BYTES_PER_SEC;
 
 const DEFAULT_CLOCK: CascadeClock = {
@@ -225,6 +227,9 @@ export class CascadeSession {
   private allFinalUserText: string[];
   private settleTimer: unknown;
   private lastInterimAt: number;
+  /** When the last final segment of the pending user turn arrived (turn timing base). */
+  private lastFinalAt: number;
+  private lastInterimToFinalMs: number;
   private turnSeq: number;
   private turnInProgress: boolean;
   private turnAborted: boolean;
@@ -256,6 +261,8 @@ export class CascadeSession {
     this.allFinalUserText = [];
     this.settleTimer = null;
     this.lastInterimAt = 0;
+    this.lastFinalAt = 0;
+    this.lastInterimToFinalMs = -1;
     this.turnSeq = 0;
     this.turnInProgress = false;
     this.turnAborted = false;
@@ -490,11 +497,23 @@ export class CascadeSession {
 
     if (finalSegment) {
       const trimmed = finalSegment.trim();
+      // The tutor's own voice picked up by the mic must not become a user turn.
+      if (
+        trimmed &&
+        (this.isTutorSpeaking() || this.clock.now() < this.speakingUntil + ECHO_GRACE_MS) &&
+        isLikelyEcho(trimmed, this.currentTutorText)
+      ) {
+        this.log("[poc] echo_dropped");
+        return;
+      }
       if (trimmed) {
         this.pendingUserText = this.pendingUserText
           ? `${this.pendingUserText} ${trimmed}`
           : trimmed;
         this.allFinalUserText.push(trimmed);
+        const finalNow = this.clock.now();
+        if (this.lastInterimAt > 0) this.lastInterimToFinalMs = Math.max(0, Math.round(finalNow - this.lastInterimAt));
+        this.lastFinalAt = finalNow;
         this.deps.send({ type: "input_transcript", text: finalSegment });
         if (
           this.isTutorSpeaking() &&
@@ -648,17 +667,29 @@ export class CascadeSession {
 
   private endUserTurn(): void {
     this.clearSettleTimer();
+    // A short remark that did not barge in (e.g. one word) waits until the tutor has finished,
+    // so it never cuts the tutor off silently or overlaps two replies.
+    if (this.pendingUserText.trim() && !this.closed && this.isTutorSpeaking()) {
+      const wait = Math.max(CASCADE_SETTLE_MS, Math.ceil(this.speakingUntil - this.clock.now()));
+      this.lastFinalAt = 0; // time the reply from when it can start, not from the deferred remark
+      this.settleTimer = this.clock.setTimeout(() => {
+        this.settleTimer = null;
+        this.endUserTurn();
+      }, wait);
+      return;
+    }
     const text = this.pendingUserText.trim();
     this.pendingUserText = "";
     if (!text || this.closed) return;
 
     this.history.push({ role: "user", text });
-    const finalAt = this.clock.now();
-    const interimToFinalMs =
-      this.lastInterimAt > 0
-        ? Math.max(0, Math.round(finalAt - this.lastInterimAt))
-        : 0;
+    // Latency is measured from the last final segment (before the 0.4 s settle wait), so
+    // finalToAudio includes the settle wait the user actually experiences.
+    const finalAt = this.lastFinalAt > 0 ? this.lastFinalAt : this.clock.now();
+    const interimToFinalMs = this.lastInterimToFinalMs;
     this.lastInterimAt = 0;
+    this.lastFinalAt = 0;
+    this.lastInterimToFinalMs = -1;
 
     void this.runTutorTurn({ finalAt, interimToFinalMs });
   }
@@ -696,6 +727,7 @@ export class CascadeSession {
     this.speakingUntil = this.clock.now();
     this.bargeIns++;
     this.deps.send({ type: "interrupted" });
+    this.deps.send({ type: "poc_usage", usage: this.usage() });
     this.log(`[poc] barge_in reason=${reason}`);
   }
 

@@ -357,3 +357,95 @@ test('cascade socket: init starts a session with the fake AI and relays ready', 
   handlers.close();
   assert.equal(fake.stt[0].closed, true);
 });
+
+test('speaker echo of the tutor is not taken as a user turn', async () => {
+  const fake = makeFakeAi({ ttsBytes: 240000 }); // 5 s per sentence
+  const { session, clock, logs } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'start' });
+  await flush();
+  fake.stt[0].cb.onmessage(finalSeg('how are you today'));
+  clock.advance(CASCADE_SETTLE_MS * 40);
+  await flush();
+  assert.equal(fake.textCalls.length, 1, 'echo did not start a new reply');
+  assert.ok(logs.includes('[poc] echo_dropped'));
+});
+
+test('a one-word remark while the tutor speaks waits for the tutor to finish', async () => {
+  const fake = makeFakeAi({ ttsBytes: 240000 }); // 2 sentences × 5 s
+  const { session, clock, sent } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'start' });
+  await flush();
+  fake.stt[0].cb.onmessage(finalSeg('Yeah.'));
+  clock.advance(CASCADE_SETTLE_MS);
+  await flush();
+  assert.equal(fake.textCalls.length, 1, 'no new reply while the tutor is still talking');
+  assert.ok(!types(sent).includes('interrupted'));
+  clock.advance(10_000);
+  await flush();
+  assert.equal(fake.textCalls.length, 2, 'reply after the tutor finished');
+  const c = fake.textCalls[1].contents;
+  assert.equal(c[c.length - 1].parts[0].text, 'Yeah.');
+});
+
+test('turn timing starts at the last final segment, so finalToAudio includes the 0.4 s wait', async () => {
+  const fake = makeFakeAi();
+  const { session, clock, sent } = makeSession(fake);
+  await session.start();
+  fake.stt[0].cb.onmessage(interim('I went'));
+  clock.advance(300);
+  fake.stt[0].cb.onmessage(finalSeg('I went hiking.'));
+  clock.advance(CASCADE_SETTLE_MS);
+  await flush();
+  const turn = sent.find((m) => m.type === 'poc_turn');
+  assert.equal(turn.interimToFinalMs, 300);
+  assert.equal(turn.finalToTokenMs, CASCADE_SETTLE_MS);
+  assert.equal(turn.finalToAudioMs, CASCADE_SETTLE_MS);
+});
+
+test('STT drop mid-call: one reconnect, then stt_closed if that fails too', async () => {
+  const fake = makeFakeAi();
+  const { session, sent, logs } = makeSession(fake);
+  await session.start();
+  fake.stt[0].cb.onclose();
+  await flush();
+  assert.equal(fake.stt.length, 2);
+  assert.ok(logs.includes('[poc] stt_reconnected'));
+  session.handleClientMessage({ type: 'realtime_audio', audio: Buffer.alloc(320).toString('base64') });
+  assert.equal(fake.stt[1].sent.length, 1, 'audio goes to the new STT session');
+  // Second drop: reconnect fails → client told stt_closed, session itself stays open.
+  fake.ai.connectStt = () => Promise.reject(new Error('down'));
+  fake.stt[1].cb.onerror(new Error('net'));
+  await flush();
+  assert.deepEqual(sent[sent.length - 1], { type: 'error', error: 'stt_closed' });
+});
+
+test('TTS failure mid-turn reports cascade_turn_failed without turnComplete', async () => {
+  const fake = makeFakeAi();
+  fake.ai.synthesize = async () => {
+    throw new Error('tts 500');
+  };
+  const { session, sent, logs } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'hi' });
+  await flush();
+  assert.ok(!types(sent).includes('turnComplete'));
+  assert.ok(!types(sent).includes('audio'));
+  assert.deepEqual(sent[sent.length - 1], { type: 'error', error: 'cascade_turn_failed' });
+  assert.ok(logs.includes('[poc] stage=turn_error msg=tts 500'));
+});
+
+test('STT rotation failure keeps the old session and flushes the buffered audio to it', async () => {
+  const fake = makeFakeAi();
+  const { session, clock, logs } = makeSession(fake);
+  await session.start();
+  clock.advance(STT_ROTATE_AFTER_MS);
+  fake.ai.connectStt = () => Promise.reject(new Error('quota'));
+  session.handleClientMessage({ type: 'text_prompt', text: 'hi' });
+  session.handleClientMessage({ type: 'realtime_audio', audio: Buffer.alloc(320).toString('base64') });
+  await flush();
+  assert.ok(logs.some((l) => l.startsWith('[poc] stage=stt_rotate_failed')));
+  assert.equal(fake.stt[0].closed, false);
+  assert.equal(fake.stt[0].sent.length, 1);
+});

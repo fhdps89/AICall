@@ -25,6 +25,8 @@ export class PocFallbackProvider implements LiveProvider {
   private poc: PocCapableProvider | null = null;
   private engine: ActiveEngine = "cascade_poc";
   private fallbackReason: string | null = null;
+  /** Bumped by disconnect(): a connect that was cancelled must not open the normal engine. */
+  private connectGen = 0;
 
   constructor(makePoc: () => PocCapableProvider, makeLive: () => LiveProvider) {
     this.makePoc = makePoc;
@@ -49,6 +51,7 @@ export class PocFallbackProvider implements LiveProvider {
     if (this.engine === "live" && this.inner) {
       return this.inner.connect(options);
     }
+    const gen = ++this.connectGen;
     if (!this.poc) this.poc = this.makePoc();
     this.inner = this.poc;
     this.name = this.poc.name;
@@ -56,10 +59,16 @@ export class PocFallbackProvider implements LiveProvider {
       await this.poc.connect(options);
       return;
     } catch (err: any) {
+      if (gen !== this.connectGen || err?.code === "POC_CANCELLED") {
+        // Hung up / screen closed during connect: no fallback, nothing left open.
+        console.log("[poc] stage=connect_cancelled");
+        return;
+      }
       this.fallbackReason = String(err?.code || err?.message || err || "unknown").slice(0, 120);
       console.warn(`[poc] fallback=live reason=${this.fallbackReason}`);
       await this.poc.disconnect(false).catch(() => {});
     }
+    if (gen !== this.connectGen) return;
     const live = this.makeLive();
     this.engine = "live";
     this.inner = live;
@@ -104,6 +113,7 @@ export class PocFallbackProvider implements LiveProvider {
     return this.p?.finalizeLiveUsage?.() as LiveUsageTotals;
   }
   disconnect(): Promise<void> {
+    this.connectGen++;
     return this.p ? this.p.disconnect() : Promise.resolve();
   }
 }
