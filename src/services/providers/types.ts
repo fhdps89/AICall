@@ -3,6 +3,8 @@
  * UI and Feature components call these interfaces rather than concrete vendor implementations.
  */
 
+import type { LiveUsageTotals } from "./liveUsage";
+
 export type LiveCommand = "Done" | "Feedback" | "Model answer" | "Pause" | "Slow";
 
 export interface LiveTranscriptItem {
@@ -43,6 +45,8 @@ export interface LiveProvider {
   getResumeToken(): string | null;
   getMediaStream(): MediaStream | null;
   getConnectionStats(): { connectionPath: "direct" | "proxy"; directFailCount: number };
+  getLiveUsage?(): LiveUsageTotals;
+  finalizeLiveUsage?(): LiveUsageTotals;
   disconnect(): Promise<void>;
 }
 

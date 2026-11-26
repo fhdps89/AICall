@@ -1,5 +1,10 @@
-import { recordUsage } from "../../services/usage/usageService";
-import { callUsageDelta } from "../../services/usage/learningLog";
+import {
+  liveCostEstimateUsd,
+  liveMeasuredCostUsd,
+  recordUsage,
+} from "../../services/usage/usageService";
+import { callUsageDelta, liveContextMinutesSq } from "../../services/usage/learningLog";
+import { formatLiveUsageLog } from "../../services/providers/liveUsage";
 import React, { useState, useEffect, useRef } from "react";
 import { useDevMode } from "../../data/devMode";
 import { isQaMode } from "../../data/qaMode";
@@ -384,6 +389,23 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
 
     const finalTranscripts = providerRef.current.getLiveTranscript();
     const stats = providerRef.current.getConnectionStats();
+    const liveUsage = providerRef.current.finalizeLiveUsage?.();
+
+    const durationMin = callDuration > 0 ? callDuration / 60 : 0;
+    const estUsd = liveCostEstimateUsd(durationMin, liveContextMinutesSq(durationMin));
+    if (liveUsage && liveUsage.turns > 0) {
+      const actualUsd = liveMeasuredCostUsd(liveUsage);
+      console.info(
+        formatLiveUsageLog(liveUsage, {
+          durationSec: callDuration,
+          actualUsd,
+          estUsd,
+          qa: qaCallRef.current ? 1 : 0,
+        })
+      );
+    } else {
+      console.info("[live-usage] turns=0 (no usageMetadata received)");
+    }
 
     if (userId) {
       await finalizeCallSession(userId, sessionIdRef.current, {
@@ -391,8 +413,8 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
         connectionPath: stats.connectionPath,
         directFailCount: stats.directFailCount,
       }).catch((err) => console.warn("[NewCallScreen] finalizeCallSession error:", err));
-      // B-10 usage: call minutes & completed calls (>= 10s), skipping learning counts for QA calls
-      recordUsage(userId, callUsageDelta(callDuration, qaCallRef.current));
+      // B-10 usage: call minutes, measured Live tokens & completed calls (>= 10s), skipping learning counts for QA calls
+      recordUsage(userId, callUsageDelta(callDuration, qaCallRef.current, liveUsage));
     }
 
     await providerRef.current.disconnect().catch(() => {});

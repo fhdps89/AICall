@@ -7,6 +7,7 @@ import {
   deriveHomeLearningStatus,
   getRecentMonthKeys,
   kstDateStr,
+  liveContextMinutesSq,
   restBannerTitle,
   summarizeLearningLog,
   type LearningLogSummary,
@@ -505,6 +506,83 @@ test('callUsageDelta isolates QA calls from liveMinutes and calls while keeping 
   const shortM = 5 / 60;
   assert.deepEqual(callUsageDelta(5, false), { liveMinutes: shortM, liveMinutesSq: shortM * shortM, calls: 0 });
   assert.deepEqual(callUsageDelta(Number.NaN, false), { liveMinutes: 0, liveMinutesSq: 0, calls: 0 });
+});
+
+test('callUsageDelta includes measured Live token fields for normal and QA calls when present', () => {
+  const measured = {
+    turns: 4,
+    inAudio: 10_000,
+    inText: 2_000,
+    outAudio: 3_000,
+    outText: 400,
+    thoughts: 600,
+    cached: 0,
+    promptTokens: 12_000,
+    responseTokens: 3_400,
+    totalTokens: 16_000,
+    unsplitPromptTokens: 0,
+  };
+  const normal = callUsageDelta(180, false, measured);
+  assert.deepEqual(normal, {
+    liveMinutes: 3,
+    liveMinutesSq: 9,
+    calls: 1,
+    liveInputAudioTokens: 10_000,
+    liveInputTextTokens: 2_000,
+    liveOutputAudioTokens: 3_000,
+    liveOutputTextTokens: 400,
+    liveThoughtTokens: 600,
+    liveMeasuredMinutes: 3,
+    liveMeasuredMinutesSq: 9,
+    liveMeasuredCalls: 1,
+  });
+
+  const qa = callUsageDelta(180, true, measured);
+  assert.deepEqual(qa, {
+    qaLiveMinutes: 3,
+    qaLiveMinutesSq: 9,
+    qaLiveInputAudioTokens: 10_000,
+    qaLiveInputTextTokens: 2_000,
+    qaLiveOutputAudioTokens: 3_000,
+    qaLiveOutputTextTokens: 400,
+    qaLiveThoughtTokens: 600,
+    qaLiveMeasuredMinutes: 3,
+    qaLiveMeasuredMinutesSq: 9,
+  });
+  assert.equal('calls' in qa, false);
+  assert.equal('liveMeasuredCalls' in qa, false);
+
+  // Zero/empty measured totals leave output unchanged (fallback to duration estimate)
+  const emptyMeasured = {
+    turns: 0,
+    inAudio: 0,
+    inText: 0,
+    outAudio: 0,
+    outText: 0,
+    thoughts: 0,
+    cached: 0,
+    promptTokens: 0,
+    responseTokens: 0,
+    totalTokens: 0,
+    unsplitPromptTokens: 0,
+  };
+  assert.deepEqual(callUsageDelta(180, false, emptyMeasured), { liveMinutes: 3, liveMinutesSq: 9, calls: 1 });
+  assert.deepEqual(callUsageDelta(180, true, null), { qaLiveMinutes: 3, qaLiveMinutesSq: 9 });
+});
+
+test('liveContextMinutesSq supports custom windowTokens and falls back on invalid values', () => {
+  // Default unchanged for long call (180 min > 128k cap)
+  const defaultSq = liveContextMinutesSq(180);
+  // Smaller window (e.g. compression target/trigger 32k tokens) gives smaller sq for long calls
+  const compressedSq = liveContextMinutesSq(180, 32_000);
+  assert.ok(compressedSq < defaultSq);
+  // Short call below smaller cap is unaffected (t^2)
+  assert.equal(liveContextMinutesSq(5, 32_000), 25);
+  // Invalid / non-positive windowTokens fall back to default
+  assert.equal(liveContextMinutesSq(180, 0), defaultSq);
+  assert.equal(liveContextMinutesSq(180, -100), defaultSq);
+  assert.equal(liveContextMinutesSq(180, Number.NaN), defaultSq);
+  assert.equal(liveContextMinutesSq(180, Number.POSITIVE_INFINITY), defaultSq);
 });
 
 test('qaLiveMinutes adds estCostUsd without counting as an active learning day or streak (A18)', () => {
