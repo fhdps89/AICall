@@ -3,7 +3,9 @@ import {
   liveMeasuredCostUsd,
   recordUsage,
 } from "../../services/usage/usageService";
-import { callUsageDelta, liveContextMinutesSq } from "../../services/usage/learningLog";
+import { callUsageDelta, liveContextMinutesSq, pocCallUsageDelta } from "../../services/usage/learningLog";
+import { activeEngineOf, pocUsageOf } from "../../services/providers/cascadeFallbackProvider";
+import { pocCostUsd } from "../../config/cascadePoc";
 import { formatLiveUsageLog } from "../../services/providers/liveUsage";
 import React, { useState, useEffect, useRef } from "react";
 import { useDevMode } from "../../data/devMode";
@@ -81,6 +83,8 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
   const sessionIdRef = useRef<string>(`call-${Date.now()}`);
   const [status, setStatus] = useState<"connecting" | "connected" | "reconnecting" | "closed" | "error">("connecting");
   const [statusMessage, setStatusMessage] = useState<string>(LIVE_STATUS_TEXT.preparing);
+  // Google-streaming test mode (PoC) actually carrying this call (false after a fallback).
+  const [pocActive, setPocActive] = useState<boolean>(false);
   const [transcripts, setTranscripts] = useState<LiveTranscriptItem[]>([]);
   const [callDuration, setCallDuration] = useState<number>(0);
   const [isSpeakingModel, setIsSpeakingModel] = useState<boolean>(false);
@@ -296,6 +300,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
           }
 
           if (newStatus === "connected") {
+            setPocActive(activeEngineOf(provider) === "cascade_poc");
             setWrittenSendError(null);
             if (!timerRef.current) {
               timerRef.current = setInterval(() => {
@@ -390,10 +395,15 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
     const finalTranscripts = providerRef.current.getLiveTranscript();
     const stats = providerRef.current.getConnectionStats();
     const liveUsage = providerRef.current.finalizeLiveUsage?.();
+    const pocUsage = activeEngineOf(providerRef.current) === "cascade_poc" ? pocUsageOf(providerRef.current) : null;
 
     const durationMin = callDuration > 0 ? callDuration / 60 : 0;
     const estUsd = liveCostEstimateUsd(durationMin, liveContextMinutesSq(durationMin));
-    if (liveUsage && liveUsage.turns > 0) {
+    if (pocUsage) {
+      console.info(
+        `[poc-usage] durationSec=${callDuration} turns=${pocUsage.turns} sttAudioSec=${pocUsage.sttAudioSec.toFixed(1)} ttsAudioSec=${pocUsage.ttsAudioSec.toFixed(1)} sttOutEstimated=${pocUsage.sttOutEstimated ? 1 : 0} usd=${pocCostUsd(pocUsage).toFixed(4)} qa=${qaCallRef.current ? 1 : 0}`
+      );
+    } else if (liveUsage && liveUsage.turns > 0) {
       const actualUsd = liveMeasuredCostUsd(liveUsage);
       console.info(
         formatLiveUsageLog(liveUsage, {
@@ -414,7 +424,13 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
         directFailCount: stats.directFailCount,
       }).catch((err) => console.warn("[NewCallScreen] finalizeCallSession error:", err));
       // B-10 usage: call minutes, measured Live tokens & completed calls (>= 10s), skipping learning counts for QA calls
-      recordUsage(userId, callUsageDelta(callDuration, qaCallRef.current, liveUsage));
+      // Test-mode (PoC) calls go to poc* fields only, never to liveMinutes.
+      recordUsage(
+        userId,
+        pocUsage
+          ? pocCallUsageDelta(callDuration, qaCallRef.current, pocUsage)
+          : callUsageDelta(callDuration, qaCallRef.current, liveUsage)
+      );
     }
 
     await providerRef.current.disconnect().catch(() => {});
@@ -576,6 +592,11 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
                 : "자유롭게 영어로 말해 보세요 (다 말했으면 '답변 끝')"
               : statusMessage}
           </p>
+          {pocActive && (
+            <span className="mt-2 inline-block px-2 py-0.5 rounded-full bg-purple-500/20 border border-purple-400/40 text-purple-200 text-[10px] font-bold">
+              시험 모드 · 구글 스트리밍
+            </span>
+          )}
         </div>
 
         {/* Transcript rolling area (Live 자체 받아쓰기 보조 표시) */}

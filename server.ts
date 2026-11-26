@@ -22,6 +22,8 @@ import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive
 import { LIVE_MODEL, TEXT_MODEL, GEMINI_STT_MODEL, GEMINI_TTS_LITE_MODEL } from './src/config/models.ts';
 import { LIVE_LANGUAGE_CODE, normalizeVoiceName } from './src/config/voices.ts';
 import { buildLiveConfigAttempts } from './server/liveConfig.ts';
+import { handleCascadeConnection } from './server/cascadeWs.ts';
+import { POC_WS_PATH } from './src/config/cascadePoc.ts';
 import { userRecordingPath as userRecordingPathIn } from './server/recordingPath.ts';
 import { apiError, noKey, NO_KEY_MESSAGE } from './server/errors.ts';
 import { buildProgressProposal, finalizeCoachProgressResponse, sanitizeTodayGoalId, type CoachProgressChatOut } from './src/data/progressAdjust.ts';
@@ -1728,11 +1730,18 @@ async function startServer() {
 
   // Setup WebSocket Server for Live Native Audio Dialog
   const wss = new WebSocketServer({ noServer: true });
+  // EL-18 Google-streaming test mode (PoC): separate socket server, used only when the
+  // developer switch is on in the browser. Same auth and Live session rate limit as /live.
+  const cascadeWss = new WebSocketServer({ noServer: true });
+  cascadeWss.on('connection', (clientWs: WebSocket) => {
+    handleCascadeConnection(clientWs, { getGenAI: createGenAI });
+  });
 
   server.on('upgrade', (request, socket, head) => {
     try {
       const pathname = new URL(request.url || '/', 'http://localhost').pathname;
-      if (pathname === '/live' || pathname === '/api/gemini/live') {
+      const isCascade = pathname === POC_WS_PATH;
+      if (pathname === '/live' || pathname === '/api/gemini/live' || isCascade) {
         // Auth: Firebase ID token in ?token= (browsers cannot set headers on WebSocket).
         const token = new URL(request.url || '/', 'http://localhost').searchParams.get('token') || '';
         verifyFirebaseIdToken(token)
@@ -1746,8 +1755,9 @@ async function startServer() {
               socket.destroy();
               return;
             }
-            wss.handleUpgrade(request, socket, head, (ws) => {
-              wss.emit('connection', ws, request);
+            const target = isCascade ? cascadeWss : wss;
+            target.handleUpgrade(request, socket, head, (ws) => {
+              target.emit('connection', ws, request);
             });
           })
           .catch((err) => {

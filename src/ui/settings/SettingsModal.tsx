@@ -29,6 +29,10 @@ import {
   isPartialTranscribeEnabled,
   setPartialTranscribeEnabled,
 } from "../../services/recording/partialTranscribeSetting";
+import {
+  isCascadePocEnabled,
+  setCascadePocEnabled,
+} from "../../services/settings/callEngineSetting";
 import { ALLOWED_USER_EMAIL } from "../../services/firebase/auth";
 import { friendlyError } from "../common/friendlyError";
 import { FeedSettingsPanel } from "./FeedSettingsPanel";
@@ -39,7 +43,10 @@ import {
   ADVANCED_TOGGLE_TEXT,
   KEY_TAB_LABEL,
   PARTIAL_TRANSCRIBE_DESCRIPTION,
+  CALL_ENGINE_POC_TITLE,
+  CALL_ENGINE_POC_DESCRIPTION,
 } from "./settingsText";
+import { POC_STT_MODEL, POC_TEXT_MODEL, POC_TTS_MODEL } from "../../config/cascadePoc";
 import { Sparkles, Bell } from "lucide-react";
 
 interface SettingsModalProps {
@@ -81,6 +88,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [enablePartialStt, setEnablePartialStt] = useState<boolean>(() =>
     isPartialTranscribeEnabled()
   );
+  const [enableCascadePoc, setEnableCascadePoc] = useState<boolean>(() => isCascadePocEnabled());
   const [sessionsList, setSessionsList] = useState<SessionData[]>([]);
   const [pendingLocalChunks, setPendingLocalChunks] = useState<LocalRecordingChunk[]>([]);
   const [loadingRecordings, setLoadingRecordings] = useState(false);
@@ -509,6 +517,35 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
                 <p className="text-[11px] text-slate-400 leading-relaxed">
                   {PARTIAL_TRANSCRIBE_DESCRIPTION}
+                </p>
+              </div>
+
+              {/* EL-18 구글 스트리밍 시험 모드 (PoC). 기본 꺼짐, 이 브라우저에만 저장 */}
+              <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2.5 text-xs">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="font-bold text-slate-200 block">{CALL_ENGINE_POC_TITLE}</span>
+                    <span className="text-[11px] text-slate-400 font-mono text-purple-300">
+                      {POC_STT_MODEL} → {POC_TEXT_MODEL} → {POC_TTS_MODEL}
+                    </span>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      aria-label={CALL_ENGINE_POC_TITLE}
+                      checked={enableCascadePoc}
+                      onChange={(e) => {
+                        const val = e.target.checked;
+                        setEnableCascadePoc(val);
+                        setCascadePocEnabled(val);
+                      }}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-amber-500"></div>
+                  </label>
+                </div>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  {CALL_ENGINE_POC_DESCRIPTION}
                 </p>
               </div>
 
