@@ -8,8 +8,9 @@
 - **사고(11/27)**: 06:42에 시작한 생성 잡이 TTS 도중 15분 상한(06:57:00)에 걸려 `TIMED_OUT`. 06:57:03 피드 조회가 같은 서버에서 로컬 대본으로 오디오 rebuild를 시작(오늘 생성 2/3, 리스 TTL 31분 → 07:28:03)했고, 피드는 `ready`·오디오 없음·`audioRestoring`. 07:03–07:04 재배포로 그 rebuild와 로컬 대본이 함께 사라졌다. Firestore days 문서에는 `genControl`만 있고 강의 백업이 없어서, 07:15 새 서버는 처음부터 새 생성을 시도했고 죽은 서버의 rebuild 리스에 막혀 `GEN_SKIPPED`(lease)가 됐다.
 - **원인**: `server/feedStore.ts` `saveLectureFailureBackup` → `saveLectureBackup` → `sanitizeReadyLectureForBackup`가 `status !== 'ready'`면 `null`이라, 실패한 잡(`failed`)의 대본은 영구 저장되지 않았다.
 - **수정**: 대본이 있는 `failed` 상태는 `failedJobScriptBackup`으로 ready + `audioStatus: 'missing'`(오디오 파일·포인터·진행률 제거)으로 바꿔 백업한다. 그날 ready 백업이 이미 있으면(예: 완성된 강의 뒤 「다시 만들기」 실패) 덮어쓰지 않고, 백업 읽기가 실패해도 쓰지 않는다. 새 서버는 `ensureTodayLecture`가 이 대본을 설치하고 쿨다운이 끝나면 `restoreReadyLecture`로 오디오만 다시 만든다. 새 대본 호출과 다른 내용의 강의가 생기지 않는다.
+- **같은 서버·쿨다운**: 같은 서버에 실패 대본이 남아 있으면 `ensureTodayLecture`는 같은 잡의 백업(`createdAt` 같음)을 설치하지 않고 돌아가, `buildFeedToday`가 예전처럼 로컬 대본으로 바로 rebuild한다(TIMED_OUT 즉시 재시도·TTS 조각 캐시 유지). `TIMED_OUT`·`INTERRUPTED` 백업은 `audioRetryAfter`를 빼서 새 서버도 쿨다운 없이 rebuild한다. 그 밖의 실패(`GENERATION_FAILED`)는 기존 쿨다운을 그대로 따른다.
 - **그대로 둔 것**: 일일 상한(`LECTURE_DAILY_GEN_CAP`), 리스 TTL, 15분 잡 상한, `firestore.rules`, 대본·오디오 생성 경로.
-- **방어 조치**: `tests/lectureFailedScriptBackup.test.ts` — 실패 대본 백업·복원, 대본 없으면 안 씀, superseded면 안 씀, 기존 ready 백업 보존, TTS 실패 → 디스크 삭제(재배포) → 새 서버가 새 잡 없이 같은 대본으로 rebuild 요청.
+- **방어 조치**: `tests/lectureFailedScriptBackup.test.ts` — 실패 대본 백업·복원, 대본 없으면 안 씀, superseded면 안 씀, 기존 ready 백업 보존, TTS 실패 → 디스크 삭제(재배포) → 새 서버가 새 잡 없이 같은 대본으로 rebuild 요청, 백업 읽기 실패(503·네트워크)·읽는 중 superseded면 안 씀, genControl만 있는 days 문서의 리스·카운트 보존, 같은 서버 TIMED_OUT 즉시 재시도 유지, 새 서버 TIMED_OUT은 쿨다운 없이 rebuild.
 
 ### [2026-11-27 KST] 시험 엔진 `[poc]` 줄을 ?qa=1에서 경고·html 속성으로도 남긴다 (EL-18 후속)
 - **배경**: QA봇 브라우저 자동화가 게시 사이트에서 console.info/log를 모으지 못한다(`#59`의 `[boot]`와 같음). A/B 비교에 필요한 `[poc]`·`[poc-turn]`·`[poc-play]`·`[poc-tts]`·`[poc-summary]`·`[poc-usage]`가 기록에 안 남았다.

@@ -12,6 +12,8 @@ import {
 } from '../server/lecture.ts';
 import { buildFeedToday, ensureTodayLecture, feedOnFailed, type FeedSyncState } from '../server/feed.ts';
 import {
+  acquireLectureGenLease,
+  decryptLectureBackup,
   failedJobScriptBackup,
   loadLectureBackup,
   saveLectureBackup,
@@ -97,6 +99,9 @@ test('failedJobScriptBackup: only a failed state with a script becomes ready/mis
   assert.equal(out.script?.length, 1);
   assert.equal(failedJobScriptBackup({ ...st, script: [] }), null);
   assert.equal(failedJobScriptBackup({ ...st, status: 'ready' }), null);
+  // TIMED_OUT / INTERRUPTED are retried right away on the same server, so no cooldown is carried over.
+  assert.equal(out.audioRetryAfter, undefined);
+  assert.equal(failedJobScriptBackup({ ...st, error: 'GENERATION_FAILED' })!.audioRetryAfter, st.audioRetryAfter);
 });
 
 test('saveLectureFailureBackup: failed job with a script is backed up and loads back as a ready lecture', async () => {
@@ -215,6 +220,116 @@ test('redeploy after a TTS failure: the new container restores the script and re
   } finally {
     (globalThis as any).fetch = realFetch;
     console.error = origErr;
+    cleanup(uid);
+  }
+});
+
+test('saveLectureFailureBackup: a backup read failure or a job superseded during the read writes nothing', async () => {
+  const realFetch = globalThis.fetch;
+  try {
+    let patches = 0;
+    (globalThis as any).fetch = async (_url: string, init: any = {}) => {
+      if (init.method === 'PATCH') { patches += 1; return { ok: true, status: 200 }; }
+      return { ok: false, status: 503 };
+    };
+    await saveLectureFailureBackup(secret, failedWithScript('u3', '2026-11-27'));
+    (globalThis as any).fetch = async () => { throw new TypeError('fetch failed'); };
+    await saveLectureFailureBackup(secret, failedWithScript('u3', '2026-11-27'));
+    assert.equal(patches, 0);
+
+    const fs_ = fakeFirestore();
+    (globalThis as any).fetch = fs_.fetchFn;
+    let current = true;
+    const save = saveLectureFailureBackup(secret, failedWithScript('u3', '2026-11-27'), () => current);
+    current = false; // superseded while the existing backup is being read
+    await save;
+    assert.equal(fs_.patches(), 0);
+  } finally {
+    (globalThis as any).fetch = realFetch;
+  }
+});
+
+test('saveLectureFailureBackup: a days doc holding only genControl (lease + count) keeps it', async () => {
+  const realFetch = globalThis.fetch;
+  const fs_ = fakeFirestore();
+  (globalThis as any).fetch = fs_.fetchFn;
+  try {
+    const date = '2026-11-27';
+    const lease = await acquireLectureGenLease(secret, date, {
+      owner: 'o1', token: 't1', kind: 'job', ttlMs: 60_000, cap: 3, now: Date.now(),
+    } as any);
+    assert.equal(lease.ok, true);
+    assert.equal(await loadLectureBackup(secret, date), null);
+    await saveLectureFailureBackup(secret, failedWithScript('u4', date));
+    const key = Object.keys(fs_.docs).find((k) => k.endsWith(`/days/${date}`))!;
+    const raw: any = decryptLectureBackup(secret, fs_.docs[key].fields.iv.stringValue, fs_.docs[key].fields.data.stringValue);
+    assert.equal(raw.status, 'ready');
+    assert.equal(raw.genControl?.genCount, 1);
+    assert.equal(raw.genControl?.lease?.token, 't1');
+  } finally {
+    (globalThis as any).fetch = realFetch;
+  }
+});
+
+test('same server after TIMED_OUT: the script-only backup does not replace the local failed state, so the feed retries right away', async () => {
+  const uid = uidFor('same_server');
+  const date = '2026-11-27';
+  const realFetch = globalThis.fetch;
+  const fs_ = fakeFirestore();
+  (globalThis as any).fetch = fs_.fetchFn;
+  try {
+    const local = { ...failedWithScript(uid, date), audioRetryAfter: new Date(Date.now() + 30 * 60_000).toISOString() };
+    const dir = path.join(DATA_DIR, 'lectures', uid);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${date}.json`), JSON.stringify(local));
+    await saveLectureFailureBackup(secret, local);
+    assert.ok(await loadLectureBackup(secret, date));
+
+    const st: FeedSyncState = {
+      uid, secret, quizCount: 10,
+      newMistakes: [{ id: 'm1', myPhrase: 'I go yesterday', naturalPhrase: 'I went yesterday' }],
+      reviewMistakes: [], syncedAt: '2026-11-26T14:00:00.000Z',
+    };
+    let restored = 0;
+    await ensureTodayLecture(ai, st, date, { restoreLecture: (() => { restored += 1; return null; }) as any, genRemote: null });
+    assert.equal(restored, 0);
+    assert.equal(readLectureState(uid, date)?.status, 'failed');
+    assert.equal(readLectureState(uid, date)?.error, 'TIMED_OUT');
+
+    let started = 0;
+    buildFeedToday(ai, st, 'https://example.test', {
+      date, genRemote: null,
+      startJob: ((..._a: any[]) => { started += 1; return readLectureState(uid, date)!; }) as any,
+    });
+    assert.equal(started, 1, 'TIMED_OUT is retried immediately from the local script');
+  } finally {
+    (globalThis as any).fetch = realFetch;
+    cleanup(uid);
+  }
+});
+
+test('new server after a TIMED_OUT job: audio rebuild starts without waiting for a cooldown', async () => {
+  const uid = uidFor('new_server_timeout');
+  const date = '2026-11-27';
+  const realFetch = globalThis.fetch;
+  const fs_ = fakeFirestore();
+  (globalThis as any).fetch = fs_.fetchFn;
+  try {
+    await saveLectureFailureBackup(secret, { ...failedWithScript(uid, date), audioRetryAfter: new Date(Date.now() + 30 * 60_000).toISOString() });
+    const st: FeedSyncState = {
+      uid, secret, quizCount: 10,
+      newMistakes: [{ id: 'm1', myPhrase: 'I go yesterday', naturalPhrase: 'I went yesterday' }],
+      reviewMistakes: [], syncedAt: '2026-11-26T14:00:00.000Z',
+    };
+    const restored: LectureState[] = [];
+    await ensureTodayLecture(ai, st, date, {
+      restoreLecture: ((_a: any, _u: string, _d: string, b: LectureState) => { restored.push(b); return b; }) as any,
+      genRemote: null,
+    });
+    assert.equal(restored.length, 1);
+    assert.equal(restored[0].script?.length, 1);
+  } finally {
+    (globalThis as any).fetch = realFetch;
     cleanup(uid);
   }
 });

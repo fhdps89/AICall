@@ -399,6 +399,8 @@ export function failedJobScriptBackup(state: LectureState): LectureState | null 
   delete next.audioChunks;
   delete next.audioBackup;
   delete next.audioProgress;
+  // The feed retries TIMED_OUT / INTERRUPTED right away on the same server; keep that on a new one.
+  if (state.error === 'TIMED_OUT' || state.error === 'INTERRUPTED') delete next.audioRetryAfter;
   return next;
 }
 
