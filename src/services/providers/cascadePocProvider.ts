@@ -34,6 +34,7 @@ import {
 } from "./audioPlaybackScheduler";
 import type { LiveCommand, LiveSessionOptions, LiveTranscriptItem } from "./types";
 import type { PocCapableProvider } from "./cascadeFallbackProvider";
+import { logPoc } from "../perf/pocQaLog";
 
 /** One deadline from connect start to "server ready + first tutor audio" (plan: 8 s fallback). */
 export const CASCADE_CONNECT_BUDGET_MS = 8000;
@@ -165,7 +166,7 @@ export class CascadePocProvider implements PocCapableProvider {
     this.summaryLogged = true;
     const st = this.stats;
     const c = (k: "echoDrops" | "ttsStreams" | "bargeIns") => st.base[k] + st.last[k];
-    console.log(
+    logPoc(
       `[poc-summary] variant=${this.textVariant} textModel=${POC_TEXT_VARIANTS[this.textVariant].model} turns=${st.turns} medianFinalToToken=${medianOf(st.finalToToken)}ms p90FinalToToken=${percentileOf(st.finalToToken, 90)}ms medianTtsFirstChunk=${medianOf(st.ttsFirstChunk)}ms medianFinalToAudio=${medianOf(st.finalToAudio)}ms p90FinalToAudio=${percentileOf(st.finalToAudio, 90)}ms echoDrops=${c("echoDrops")} ttsStreams=${c("ttsStreams")} bargeIns=${c("bargeIns")}`
     );
   }
@@ -178,12 +179,12 @@ export class CascadePocProvider implements PocCapableProvider {
     this.firstAudioLogged = false;
     this.connectStartedAt = Date.now();
     options.onStatusChange("connecting", LIVE_STATUS_TEXT.preparing);
-    console.log("[poc] stage=connect_start");
+    logPoc("[poc] stage=connect_start");
     const chosen = this.resolveTextVariant();
     this.textVariant = chosen.variant === "b" ? "b" : "a";
     this.stats = emptyStats();
     this.summaryLogged = false;
-    console.log(
+    logPoc(
       `[poc] variant=${this.textVariant} textModel=${POC_TEXT_VARIANTS[this.textVariant].model} source=${chosen.source}`
     );
 
@@ -198,7 +199,7 @@ export class CascadePocProvider implements PocCapableProvider {
     if (!options.skipMic) {
       this.micInit = this.initAudioCapture(gen)
         .then((live) => {
-          if (live) console.log("[poc] stage=mic_ready");
+          if (live) logPoc("[poc] stage=mic_ready");
         })
         .catch((err: any) => {
           if (gen !== this.generation) return;
@@ -216,7 +217,7 @@ export class CascadePocProvider implements PocCapableProvider {
     if (gen !== this.generation) throw cascadeError("POC_CANCELLED", "cancelled");
     this.commitMic();
     options.onStatusChange("connected", LIVE_STATUS_TEXT.connected);
-    console.log(`[poc] stage=connected ms=${Date.now() - this.connectStartedAt}`);
+    logPoc(`[poc] stage=connected ms=${Date.now() - this.connectStartedAt}`);
   }
 
   /** Attach the recorder now if the mic is ready; otherwise initAudioCapture() does it when it is. */
@@ -335,7 +336,7 @@ export class CascadePocProvider implements PocCapableProvider {
               bargeIns: st.base.bargeIns + st.last.bargeIns,
             };
             st.last = { echoDrops: 0, ttsStreams: 0, bargeIns: 0 };
-            console.log(
+            logPoc(
               `[poc] stage=ready ms=${Date.now() - this.connectStartedAt} variant=${String(msg.textVariant ?? "?")} textModel=${String(msg.models?.text ?? "?")}`
             );
             resolve();
@@ -402,7 +403,7 @@ export class CascadePocProvider implements PocCapableProvider {
         this.options?.onAudioData(buffer);
         if (!this.firstAudioLogged) {
           this.firstAudioLogged = true;
-          console.log(`[poc] stage=first_tutor_audio ms=${Date.now() - this.connectStartedAt}`);
+          logPoc(`[poc] stage=first_tutor_audio ms=${Date.now() - this.connectStartedAt}`);
         }
         this.firstAudioWaiter?.resolve();
         return;
@@ -452,7 +453,7 @@ export class CascadePocProvider implements PocCapableProvider {
           ttsStreams: nonNegInt(msg.ttsStreams),
           bargeIns: nonNegInt(msg.bargeIns),
         };
-        console.log(
+        logPoc(
           `[poc-turn] n=${msg.turn} variant=${this.textVariant} interimToFinal=${msg.interimToFinalMs}ms finalToToken=${msg.finalToTokenMs}ms tokenToAudio=${msg.tokenToAudioMs}ms ttsFirstChunk=${msg.ttsFirstChunkMs ?? -1}ms finalToAudio=${msg.finalToAudioMs}ms`
         );
         return;
@@ -653,7 +654,7 @@ export class CascadePocProvider implements PocCapableProvider {
     const s = this.playbackScheduler;
     const p = this.turnPlay;
     p.turn += 1;
-    console.log(
+    logPoc(
       `[poc-play] n=${p.turn} chunks=${p.chunks} underruns=${s.underruns - p.underrunsAtStart} gaps=${p.gaps} leadMs=${Math.round(s.leadSec * 1000)}${interrupted ? " interrupted=1" : ""}`
     );
     this.turnPlay = { chunks: 0, underrunsAtStart: s.underruns, gaps: 0, turn: p.turn };

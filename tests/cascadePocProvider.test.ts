@@ -66,6 +66,8 @@ const tick = async (n = 20) => {
 
 const { CascadePocProvider } = await import('../src/services/providers/cascadePocProvider.ts');
 const { PocFallbackProvider } = await import('../src/services/providers/cascadeFallbackProvider.ts');
+const { infoPoc } = await import('../src/services/perf/pocQaLog.ts');
+const { pocCostUsd, POC_TEXT_VARIANTS } = await import('../src/config/cascadePoc.ts');
 
 function opts(statuses: string[], extra: Record<string, unknown> = {}) {
   return {
@@ -594,4 +596,119 @@ test('A/B: browser [poc-summary] adds counters across a reconnect and sees drops
   assert.deepEqual(summary, [
     '[poc-summary] variant=a textModel=gemini-3.8-flash turns=1 medianFinalToToken=0ms p90FinalToToken=0ms medianTtsFirstChunk=0ms medianFinalToAudio=0ms p90FinalToAudio=0ms echoDrops=3 ttsStreams=3 bargeIns=1',
   ]);
+});
+
+test('text-only (skipMic + typed text_prompt): ?qa=1 warns and writes data-poc-summary / data-poc-usage', async () => {
+  // QA봇 measures A/B with 「마이크 없이 전화 걸기」: skipMic, typed turns (server handleUserTextTurn).
+  FakeWs.all = [];
+  const attrs = new Map<string, string>();
+  const dataset: Record<string, string | undefined> = {};
+  for (const [prop, attr] of [
+    ['pocSummary', 'data-poc-summary'],
+    ['pocUsage', 'data-poc-usage'],
+  ] as const) {
+    Object.defineProperty(dataset, prop, {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return attrs.get(attr);
+      },
+      set(value: string) {
+        attrs.set(attr, String(value));
+      },
+    });
+  }
+  const html = {
+    dataset,
+    getAttribute: (name: string) => attrs.get(name) ?? null,
+  };
+  const g = globalThis as any;
+  const hadDocument = Object.prototype.hasOwnProperty.call(g, 'document');
+  const prevDocument = g.document;
+  const loc = g.window.location;
+  const hadSearch = Object.prototype.hasOwnProperty.call(loc, 'search');
+  const prevSearch = loc.search;
+  loc.search = '?qa=1';
+  g.document = { documentElement: html };
+
+  const logs: string[] = [];
+  const warns: string[] = [];
+  const orig = { log: console.log, info: console.info, warn: console.warn, error: console.error };
+  console.log = (...a: unknown[]) => void logs.push(a.join(' '));
+  console.info = (...a: unknown[]) => void logs.push(`info:${a.join(' ')}`);
+  console.warn = (...a: unknown[]) => void warns.push(a.join(' '));
+  console.error = () => {};
+
+  try {
+    const p = new CascadePocProvider({
+      connectBudgetMs: 2000,
+      resolveTextVariant: () => ({ variant: 'a', source: 'url' }),
+    });
+    const ws = await connected(p, []);
+    // Typed learner turn: the same text_prompt the server routes to handleUserTextTurn.
+    assert.equal(p.sendTextPrompt('I went to the park yesterday.'), true);
+    const typed = ws.sent[ws.sent.length - 1];
+    assert.equal(typed.type, 'text_prompt');
+    assert.equal(typed.text, 'I went to the park yesterday.');
+    ws.push({ type: 'audio', audio: Buffer.alloc(4).toString('base64'), mimeType: 'audio/pcm;rate=24000' });
+    ws.push({
+      type: 'poc_turn',
+      turn: 1,
+      interimToFinalMs: 0,
+      finalToTokenMs: 900,
+      tokenToAudioMs: 400,
+      ttsFirstChunkMs: 350,
+      finalToAudioMs: 1300,
+      echoDrops: 0,
+      ttsStreams: 1,
+      bargeIns: 0,
+    });
+    ws.push({
+      type: 'poc_usage',
+      usage: {
+        turns: 1,
+        sttAudioSec: 0,
+        ttsAudioSec: 1.2,
+        sttOutTokens: 0,
+        textInTokens: 20,
+        textOutTokens: 25,
+        ttsInTokens: 25,
+        sttOutEstimated: false,
+      },
+    });
+    await p.disconnect();
+
+    // NewCallScreen hang-up uses the same infoPoc line for textOnly and mic calls.
+    const usage = p.getPocUsage();
+    const variant = p.getPocTextVariant();
+    const usageLine =
+      `[poc-usage] durationSec=40 turns=${usage.turns} sttAudioSec=${usage.sttAudioSec.toFixed(1)} ttsAudioSec=${usage.ttsAudioSec.toFixed(1)} sttOutEstimated=${usage.sttOutEstimated ? 1 : 0} variant=${variant} textModel=${POC_TEXT_VARIANTS[variant].model} usd=${pocCostUsd(usage, Date.now(), variant).toFixed(4)} qa=1`;
+    infoPoc(usageLine);
+
+    const summary = logs.find((l) => l.startsWith('[poc-summary]'));
+    assert.ok(summary, 'text-only hang-up must print [poc-summary]');
+    assert.match(
+      summary!,
+      /^\[poc-summary\] variant=a textModel=gemini-3\.8-flash turns=1 .*medianFinalToToken=900ms .*medianTtsFirstChunk=350ms .*medianFinalToAudio=1300ms/
+    );
+    assert.ok(warns.includes('[poc] stage=connect_start'));
+    assert.ok(warns.some((l) => l.startsWith('[poc-turn] n=1') && l.includes('variant=a') && l.includes('finalToToken=900ms')));
+    assert.ok(warns.includes(summary!));
+    assert.ok(warns.includes(usageLine));
+    assert.equal(html.getAttribute('data-poc-summary'), summary);
+    assert.equal(html.getAttribute('data-poc-usage'), usageLine);
+    assert.equal(g.window.__AICALL_POC_SUMMARY__, summary);
+    assert.equal(g.window.__AICALL_POC_USAGE__, usageLine);
+    assert.match(usageLine, /variant=a textModel=gemini-3\.8-flash/);
+    assert.equal(usage.turns, 1);
+    assert.equal(usage.sttAudioSec, 0);
+  } finally {
+    Object.assign(console, orig);
+    if (hadDocument) g.document = prevDocument;
+    else delete g.document;
+    if (hadSearch) loc.search = prevSearch;
+    else delete loc.search;
+    delete g.window.__AICALL_POC_SUMMARY__;
+    delete g.window.__AICALL_POC_USAGE__;
+  }
 });

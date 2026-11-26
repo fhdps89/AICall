@@ -4,6 +4,15 @@
 
 ---
 
+### [2026-11-27 KST] 시험 엔진 `[poc]` 줄을 ?qa=1에서 경고·html 속성으로도 남긴다 (EL-18 후속)
+- **배경**: QA봇 브라우저 자동화가 게시 사이트에서 console.info/log를 모으지 못한다(`#59`의 `[boot]`와 같음). A/B 비교에 필요한 `[poc]`·`[poc-turn]`·`[poc-play]`·`[poc-tts]`·`[poc-summary]`·`[poc-usage]`가 기록에 안 남았다.
+- **수정**: `#59`와 같은 도우미(`src/services/perf/qaReadable.ts`의 `publishQaReadableLine`)를 쓴다. 브라우저 `console.log`/`console.info`의 그 줄은 그대로 두고, 주소에 `?qa=1`이 있을 때만 같은 문자열을 `console.warn`으로도 낸다. 저장된 QA 플래그(`oc_qa_mode`)는 조건이 아니다. `?qa=1`일 때 마지막 `[poc-summary]`는 `<html data-poc-summary>`, 마지막 `[poc-usage]`는 `<html data-poc-usage>`(및 `window.__AICALL_POC_SUMMARY__`·`__AICALL_POC_USAGE__`)에 덮어 쓴다. 일반 사용자(`?qa=1` 아님)는 경고도 속성도 없다.
+- **`[poc-usage]`**: 속성에서 A/B가 바로 보이게 `variant=` 옆에 `textModel=`을 추가한다(기존 `variant=`·`usd=`는 유지).
+- **`[poc-tts]`**: 서버 로그로만 남아 있고 브라우저에는 원래 없다. 같은 도우미가 접두를 알아보므로, 나중에 페이지에 찍히면 같은 규칙으로 경고만 낸다(속성은 summary·usage만).
+- **시험 엔진 스위치**: `?qa=1`과 `?qa=0`이 설정을 따로 저장하지 않는다. 스위치는 공통 키 `onecall_call_engine`(`callEngineSetting.ts`) 하나다. QA 모드는 `oc_qa_mode`만 따로 둔다. 이 관찰은 버그로 고치지 않았다.
+- **그대로 둔 것**: `models.ts`, `geminiLiveProvider.ts`, `server/liveConfig.ts`, `audioPlaybackScheduler.ts`, `firestore.rules`, 시험 엔진 기본 꺼짐, 일반 사용자 로그 문구(usage의 `textModel=` 추가만 예외).
+- **방어 조치**: `tests/pocQaLog.test.ts` — `?qa=1`이면 경고+속성, 아니면 둘 다 없음. `tests/cascadePocProvider.test.ts` — 마이크 없이(`skipMic`) 글로 보낸 턴(`text_prompt` → 서버 `handleUserTextTurn`)을 끊으면 같은 경고·속성이 남는지 확인. `[boot]` 기존 테스트는 유지.
+
 ### [2026-11-27 KST] 시험 통화 엔진 답변 모델 A/B 비교 (EL-18 후속, PR #64)
 - **배경**: 찬식님 결정(05:30 KST, 영어학습봇 전달). QA봇이 두 구성을 비교해 최종안을 고른다. A(기본) = `gemini-3.8-flash` thinking `low`, B = `gemini-3.5-flash-lite`. 받아쓰기·음성은 같음.
 - **B 모델 확인(공식 문서 2026-11-27)**: thinking `minimal`·`low`·`medium`·`high` 지원, 기본값 `minimal`(「near-off thinking, lowest latency」) → `minimal` 사용. temperature 무시(3.6/3.5-Lite부터 폐지), prefill 400, `maxOutputTokens`는 사고 포함. v1·v1beta 모두 지원(v1beta 전용 아님, 텍스트 생성·thinking은 v1에도 있음) → 기본 클라이언트 그대로. 단가 입력 $0.30·출력 $2.50(사고 포함, 2027 변경 표기 없음). 지원 중단 일정 없음.

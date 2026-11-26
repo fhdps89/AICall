@@ -1,4 +1,4 @@
-import { parseQaParam } from "../../data/qaMode";
+import { publishQaReadableLine } from "./qaReadable";
 
 export type BootPhase =
   | "auth"
@@ -7,13 +7,6 @@ export type BootPhase =
   | "mistakes"
   | "lectureLocal"
   | "lectureServer";
-
-declare global {
-  interface Window {
-    /** Flushed `[boot] ...` line. QA automation reads this when console.info is dropped. */
-    __AICALL_BOOT__?: string;
-  }
-}
 
 const BOOT_PHASES: readonly BootPhase[] = [
   "auth",
@@ -34,16 +27,7 @@ export type BootTimerFn = (cb: () => void, ms: number) => unknown;
  * `console.warn` fires only when the page URL has `?qa=1` (not the persisted QA flag).
  */
 function publishBootSummary(summary: string): void {
-  if (typeof document !== "undefined" && document.documentElement) {
-    document.documentElement.dataset.bootTiming = summary;
-  }
-  if (typeof window !== "undefined") {
-    window.__AICALL_BOOT__ = summary;
-    const search = window.location?.search;
-    if (typeof search === "string" && parseQaParam(search) === "on") {
-      console.warn(summary);
-    }
-  }
+  publishQaReadableLine(summary, { datasetKey: "bootTiming", windowKey: "__AICALL_BOOT__" });
 }
 
 /**
