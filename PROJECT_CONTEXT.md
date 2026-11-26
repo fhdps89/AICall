@@ -58,6 +58,7 @@
   - 강의 TTS: 세그먼트 캐시 미스로 실제 생성한 오디오 초(`ttsAudioSec`)를 오디오 토큰으로 과금한다. 옛 기록은 글자 수 ÷ 10자/초로 추정.
   - 개발자 모드 항목별 비용 행은 `USAGE_COST_COMPONENTS` 한 목록에서 그린다(통화·QA 통화·받아쓰기·텍스트·강의 TTS·실수 묶기 임베딩). 행 합 = 예상 비용 합계(2026-11-26, QA 63행).
   - 범위 밖: 서버 쪽 재생성 낭비, 그록봇 피드 강의, 퀴즈 받아쓰기, 발음 듣기 lite TTS. Live 실제 `usageMetadata`로 가정값 보정은 후속 과제.
+- **통화 비용 절감 제안 (2026-11-26, Track 1, 승인 전)**: [`docs/plan/live-cost-optimization-proposal.md`](./docs/plan/live-cost-optimization-proposal.md). 공식 단가(접속일 2026-11-26) 기준 대안 1·2·3과 추가 대안의 2026/2027-01-01 월 원가 비교, 1순위 하이브리드 H1(`gemini-3.8-live` 유지 + 명시 압축 12k/6k→6k/3k + 무음 차단 + 프롬프트 경량화 + 임시 STT OFF + 강의 TTS Flex), 차선책 구글 단일 스트리밍 PoC, 엔진 변경 전 Track 2 실측 항목. Phase Gate: 이 문서로 엔진·모델명은 바뀌지 않는다.
 - **공급자 추상화 레이어 (`src/services/providers/`)**: `LiveProvider`, `SttProvider`, `LlmProvider`, `TtsProvider` 인터페이스 분리(`types.ts`). 브라우저에 구현된 것은 Live(`GeminiLiveProvider`)뿐이고, **통화마다 새 인스턴스**를 만듦(`createLiveProvider()`, v2.8.0). 같은 통화 안의 "다시 시도"는 같은 인스턴스를 써서 대화 기록·세션 재개 핸들을 이어 감. 받아쓰기·텍스트·음성 합성은 서버(`server.ts`, `server/lecture.ts`, `server/sttBench.ts`)에서 처리하며, 브라우저용 빈 뼈대 구현은 v2.8.0에서 삭제.
 
 ---
