@@ -25,7 +25,8 @@ test("App.tsx wires boot cache before loadProfileAndGoals, writes on sync, clear
   assert.ok(loadIdx > -1, "App.tsx should call loadProfileAndGoals");
   assert.ok(readIdx < loadIdx, "readBootCache must run before loadProfileAndGoals");
 
-  assert.ok(appSrc.includes("writeBootCache("), "App.tsx should call writeBootCache");
+  assert.ok(appSrc.includes("commitBootGoals("), "App.tsx should call commitBootGoals");
+  assert.equal(appSrc.includes("writeBootCache("), false);
   assert.match(
     appSrc,
     /const handleLogout[\s\S]*?activeUidRef\.current\s*=\s*null;[\s\S]*?clearBootCache\(defaultBootStore\(\)\)[\s\S]*?logOut\(\)[\s\S]*?clearBootCache\(defaultBootStore\(\)\)/
@@ -61,14 +62,20 @@ test("App.tsx guards late goal writes by active uid and uses goalsRef for progre
   assert.ok(guardIdx > -1);
   assert.ok(guardIdx > update.indexOf("await updateGoalProgress("));
   assert.ok(guardIdx < update.indexOf("setGoals("));
-  assert.ok(guardIdx < update.indexOf("writeBootCache("));
+  assert.ok(guardIdx < update.indexOf("commitBootGoals("));
+  const updateClaim = update.indexOf("goalsCommitGateRef.current.claim(");
+  assert.ok(updateClaim > guardIdx);
+  assert.ok(updateClaim < update.indexOf("setGoals("));
 
   for (const name of ["handleSaveInitialProgress", "refreshGoals"]) {
     const body = fnBody(name);
     const g = body.indexOf("activeUidRef.current !== uid");
     assert.ok(g > -1, `${name} should check activeUidRef`);
     assert.ok(g < body.indexOf("setGoals("), `${name} guard before setGoals`);
-    assert.ok(g < body.indexOf("writeBootCache("), `${name} guard before writeBootCache`);
+    assert.ok(g < body.indexOf("commitBootGoals("), `${name} guard before commitBootGoals`);
+    const claim = body.indexOf("goalsCommitGateRef.current.claim(");
+    assert.ok(claim > g, `${name} claims after the uid guard`);
+    assert.ok(claim < body.indexOf("setGoals("), `${name} claim before setGoals`);
   }
 
   // loadUserData: guard (isActive) before setGoals / writeBootCache, and isActive compares activeUidRef
@@ -76,8 +83,11 @@ test("App.tsx guards late goal writes by active uid and uses goalsRef for progre
   const loadStart = appSrc.indexOf("const loadUserData = async");
   const loadGuard = appSrc.indexOf("if (!isActive()) return;", loadStart);
   assert.ok(loadGuard > loadStart);
-  assert.ok(loadGuard < appSrc.indexOf("writeBootCache(", loadStart));
+  assert.ok(loadGuard < appSrc.indexOf("commitBootGoals(", loadStart));
   assert.ok(loadGuard < appSrc.indexOf("setGoals(userGoals)", loadStart));
+  const loadClaim = appSrc.indexOf("goalsCommitGateRef.current.claim(readStartedAt)", loadStart);
+  assert.ok(loadClaim > loadGuard);
+  assert.ok(loadClaim < appSrc.indexOf("setGoals(userGoals)", loadStart));
   assert.match(appSrc, /if \(!user\) \{\s*activeUidRef\.current = null;/);
 });
 

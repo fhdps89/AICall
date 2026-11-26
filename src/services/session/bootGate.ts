@@ -24,3 +24,22 @@ export function nextGoalsSyncState(event: BootGoalsEvent): GoalsSyncState {
 export function canStartCall(state: GoalsSyncState): boolean {
   return state === "fresh";
 }
+
+/**
+ * 목표 목록을 반영해도 되는 조회인지 가른다.
+ * 시작 시각이 이미 반영된 조회보다 이르면 거절해, 늦은 응답이 더 새로운 진도를 덮지 못하게 한다.
+ */
+export interface GoalsCommitGate {
+  claim(startedAt: number): boolean;
+}
+
+export function createGoalsCommitGate(): GoalsCommitGate {
+  let newestApplied = Number.NEGATIVE_INFINITY;
+  return {
+    claim(startedAt: number): boolean {
+      if (!Number.isFinite(startedAt) || startedAt < newestApplied) return false;
+      newestApplied = startedAt;
+      return true;
+    },
+  };
+}

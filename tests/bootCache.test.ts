@@ -1,15 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  BOOT_CACHE_FUTURE_SKEW_MS,
   BOOT_CACHE_PREFIX,
   BOOT_CACHE_TTL_MS,
   bootCacheKey,
   clearBootCache,
+  commitBootGoals,
   defaultBootStore,
   readBootCache,
   writeBootCache,
   type BootCacheStore,
 } from "../src/services/session/bootCache.ts";
+import { createGoalsCommitGate } from "../src/services/session/bootGate.ts";
 import type { GoalData } from "../src/services/firebase/db.ts";
 
 function makeMemoryStore(
@@ -109,6 +112,12 @@ test("readBootCache returns null and deletes entry when a goal element has a bro
     [{ ...good, title: undefined }],
     [{ ...good, lessons: "not-array" }],
     [{ id: "opic", title: "OPIc" }],
+    [{ ...good, lessons: [null] }],
+    [{ ...good, lessons: [good.lessons[0], { index: "2", title: "집" }] }],
+    [{ ...good, lessons: [{ index: 1 }] }],
+    [{ ...good, why: { text: "비밀" } }],
+    [{ ...good, nextLessonIndex: "2" }],
+    [{ ...good, id: "" }],
   ];
 
   for (const goals of brokenGoalLists) {
@@ -249,6 +258,153 @@ test("clearBootCache removes single uid or all boot cache keys without touching 
   clearBootCache(minimalStore, "u1");
   assert.equal(minimalStore.map.has(`${BOOT_CACHE_PREFIX}u1`), false);
   assert.equal(minimalStore.map.has(`${BOOT_CACHE_PREFIX}u2`), true);
+});
+
+test("writeBootCache drops tutorPrompt, unknown fields, and broken lesson entries", () => {
+  const store = makeMemoryStore();
+  const now = Date.UTC(2026, 10, 20, 0, 0, 0);
+  const dirty = [
+    {
+      ...SAMPLE_GOALS[0],
+      tutorPrompt: "Speak naturally",
+      secretNote: "do-not-store",
+      lessons: [SAMPLE_GOALS[0].lessons[0], null, { index: 9 }],
+    },
+  ] as unknown as GoalData[];
+
+  writeBootCache(store, "user-1", dirty, now);
+  const raw = store.map.get(bootCacheKey("user-1"));
+  assert.ok(raw);
+  assert.equal(raw.includes("Speak naturally"), false);
+  assert.equal(raw.includes("do-not-store"), false);
+  assert.equal(raw.includes("secretNote"), false);
+  const read = readBootCache(store, "user-1", now);
+  assert.ok(read);
+  assert.equal(read[0].tutorPrompt, "");
+  assert.equal(read[0].lessons.length, 1);
+  assert.equal(read[0].lessons[0].title, SAMPLE_GOALS[0].lessons[0].title);
+  assert.equal("secretNote" in read[0], false);
+});
+
+test("readBootCache deletes a cache whose savedAt is in the future", () => {
+  const store = makeMemoryStore();
+  const now = Date.UTC(2026, 10, 20, 0, 0, 0);
+  const key = bootCacheKey("user-1");
+  store.setItem(
+    key,
+    JSON.stringify({
+      v: 1,
+      uid: "user-1",
+      goals: STORED_GOALS,
+      savedAt: now + BOOT_CACHE_FUTURE_SKEW_MS + 1,
+    })
+  );
+
+  assert.equal(readBootCache(store, "user-1", now), null);
+  assert.equal(store.map.has(key), false);
+});
+
+test("commitBootGoals keeps a cache saved after the read started and replaces an older one", () => {
+  const store = makeMemoryStore();
+  const uid = "user-1";
+  const older = SAMPLE_GOALS.map((g) => ({ ...g, nextLessonIndex: 2 }));
+  const newer = SAMPLE_GOALS.map((g) => ({ ...g, nextLessonIndex: 6 }));
+
+  commitBootGoals(store, uid, newer, 5_000, 5_000);
+  commitBootGoals(store, uid, older, 6_000, 1_000);
+
+  assert.equal(readBootCache(store, uid, 6_000)?.[0].nextLessonIndex, 6);
+
+  commitBootGoals(store, uid, older, 7_000, 6_500);
+  assert.equal(readBootCache(store, uid, 7_000)?.[0].nextLessonIndex, 2);
+});
+
+test("an earlier goals read that finishes first does not block the later read's cache write", () => {
+  const store = makeMemoryStore();
+  const uid = "user-1";
+  const earlier = SAMPLE_GOALS.map((g) => ({ ...g, nextLessonIndex: 2 }));
+  const later = SAMPLE_GOALS.map((g) => ({ ...g, nextLessonIndex: 6 }));
+
+  commitBootGoals(store, uid, earlier, 5_000, 1_000);
+  commitBootGoals(store, uid, later, 5_100, 2_000);
+
+  const read = readBootCache(store, uid, 5_100);
+  assert.equal(read?.[0].nextLessonIndex, 6);
+  const raw = store.map.get(bootCacheKey(uid));
+  assert.ok(raw);
+  assert.equal((JSON.parse(raw) as { savedAt: number }).savedAt, 2_000);
+});
+
+test("commitBootGoals clears the cache when the server list is empty unless a newer cache exists", () => {
+  const store = makeMemoryStore();
+  const uid = "user-1";
+  const key = bootCacheKey(uid);
+
+  commitBootGoals(store, uid, SAMPLE_GOALS, 1_000, 1_000);
+  commitBootGoals(store, uid, [], 3_000, 2_000);
+  assert.equal(store.map.has(key), false);
+  assert.equal(readBootCache(store, uid, 3_000), null);
+
+  commitBootGoals(store, uid, SAMPLE_GOALS, 5_000, 5_000);
+  commitBootGoals(store, uid, [], 6_000, 1_000);
+  assert.equal(readBootCache(store, uid, 6_000)?.[0].id, "opic");
+});
+
+test("commitBootGoals drops a stale cache when the new list does not fit, and keeps a newer one", () => {
+  const uid = "user-1";
+  const key = bootCacheKey(uid);
+  const now = 4_000;
+
+  const quotaStore = makeMemoryStore();
+  commitBootGoals(quotaStore, uid, SAMPLE_GOALS, 1_000, 1_000);
+  quotaStore.setItem = () => {
+    throw new Error("quota exceeded");
+  };
+  commitBootGoals(
+    quotaStore,
+    uid,
+    SAMPLE_GOALS.map((g) => ({ ...g, nextLessonIndex: 8 })),
+    now,
+    2_000
+  );
+  assert.equal(quotaStore.map.has(key), false);
+
+  const newerStore = makeMemoryStore();
+  commitBootGoals(newerStore, uid, SAMPLE_GOALS, 5_000, 5_000);
+  let setCalls = 0;
+  newerStore.setItem = (k: string, v: string) => {
+    setCalls += 1;
+    newerStore.map.set(k, v);
+    throw new Error("quota exceeded");
+  };
+  commitBootGoals(
+    newerStore,
+    uid,
+    SAMPLE_GOALS.map((g) => ({ ...g, nextLessonIndex: 3 })),
+    6_000,
+    1_000
+  );
+  assert.equal(setCalls, 0);
+  assert.equal(readBootCache(newerStore, uid, 6_000)?.[0].nextLessonIndex, 2);
+});
+
+test("a slow goals read cannot overwrite a newer commit in memory or in the cache", () => {
+  const gate = createGoalsCommitGate();
+  const store = makeMemoryStore();
+  const uid = "user-1";
+  const slowStarted = 1_000;
+  const newerAt = 2_000;
+  const lesson6 = SAMPLE_GOALS.map((g) => ({ ...g, nextLessonIndex: 6 }));
+  const lesson2 = SAMPLE_GOALS.map((g) => ({ ...g, nextLessonIndex: 2 }));
+
+  assert.equal(gate.claim(newerAt), true);
+  commitBootGoals(store, uid, lesson6, newerAt, newerAt);
+
+  assert.equal(gate.claim(slowStarted), false);
+  commitBootGoals(store, uid, lesson2, 3_000, slowStarted);
+
+  assert.equal(readBootCache(store, uid, 3_000)?.[0].nextLessonIndex, 6);
+  assert.equal(gate.claim(newerAt), true);
 });
 
 test("defaultBootStore safely returns undefined when localStorage is unavailable or throws", () => {

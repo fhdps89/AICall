@@ -8,6 +8,7 @@
 - **증상**: 새로고침마다 「클라우드 데이터베이스 동기화 중」 전체 화면이 11~23초 이어짐.
 - **원인**: `App.tsx`가 goals를 []로 시작해 Firestore 조회가 끝날 때까지 전체 화면 스피너(`dataLoading && goals.length === 0`)를 띄움.
 - **수정**: `src/services/session/bootCache.ts`(기기 캐시, 7일 TTL, 스키마 검사, tutorPrompt 제외), `src/services/session/bootGate.ts`(`syncing`/`fresh`/`failed`, `canStartCall`). 캐시로 홈을 먼저 그리고, 서버 확인 전 통화 시작·진도 변경 버튼 비활성, 실패 시 「다시 확인」. 늦은 응답 uid 가드, 로그아웃·인증 해제 시 캐시 삭제. 서버 코드 변경 없음.
+- **재심사 보완**: 더 늦게 시작한 목표 조회만 반영(`createGoalsCommitGate`)해 부트 조회가 코치·진도 저장의 새 목록을 덮지 못하게 함. 조회 시작 뒤에 저장된 캐시는 덮지 않고, 서버 목록이 비면 캐시를 지움. `lessons`의 null·객체형 `why`처럼 홈을 멈추는 캐시는 삭제. 홈 필드만 저장(`tutorPrompt`와 그 외 필드는 제외). 새 목록이 용량을 넘으면 더 오래된 캐시만 지움. 미래 `savedAt`는 버림.
 - **측정**: 가짜 Firestore 모델 두 번째 방문 홈 표시 0.85→0초(첫 방문 변화 없음).
 - **방어 조치**: `tests/bootCache.test.ts`, `tests/bootGate.test.ts`, `tests/bootCacheWiring.test.ts` 추가.
 
