@@ -304,3 +304,28 @@ test('accumulator commits a late snapshot of the previous request instead of ove
   assert.equal(t.promptTokens, 280);
   assert.equal(t.responseTokens, 50);
 });
+
+test('accumulator does not double count a repeated snapshot of the same request after interrupted/turnComplete commit', () => {
+  const acc = createLiveUsageAccumulator();
+  const meta = (prompt: number, resp: number) => ({
+    promptTokenCount: prompt,
+    responseTokenCount: resp,
+    promptTokensDetails: [{ modality: 'AUDIO', tokenCount: prompt }],
+    responseTokensDetails: [{ modality: 'AUDIO', tokenCount: resp }],
+  });
+  acc.observe(meta(1000, 50));
+  acc.commitTurn(); // interrupted
+  acc.observe(meta(1000, 60)); // late update of the same request
+  acc.commitTurn(); // turnComplete
+  let t = acc.finalize();
+  assert.equal(t.turns, 1);
+  assert.equal(t.inAudio, 1000);
+  assert.equal(t.outAudio, 60);
+
+  acc.observe(meta(1800, 40)); // next request
+  acc.commitTurn();
+  t = acc.finalize();
+  assert.equal(t.turns, 2);
+  assert.equal(t.inAudio, 2800);
+  assert.equal(t.outAudio, 100);
+});

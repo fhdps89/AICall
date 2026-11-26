@@ -9,6 +9,7 @@
 - **2-1 실측 계측**: `src/services/providers/liveUsage.ts`(턴 단위 스냅샷, 턴 안 마지막 값만, 턴 끝·재연결·종료 때 합산, AUDIO/TEXT 분리, 잘못된 값 무시). 직연결은 `geminiLiveProvider.ts`, 서버 중계는 `server.ts`가 `sanitizeLiveUsageMetadata`(`server/usageMeta.ts`)로 숫자만 `usage_metadata`로 전달. 통화 종료 때 `[live-usage] …` 한 줄(숫자만)과 실측 토큰 필드를 사용량 문서에 저장.
 - **2-2 임시 받아쓰기 기본 끔**: `onecall_enable_partial_transcribe`가 `"true"`일 때만 1분 임시 받아쓰기. `App.tsx`·`SettingsModal.tsx` 판별을 `partialTranscribeSetting.ts` 하나로 합침. 설정 안내 문구 갱신. 성공한 임시 받아쓰기 분만 `partialSttMinutes`로 기록.
 - **2-3 비용식**: 받아쓰기 비용 = (`sttMinutes` + `partialSttMinutes`) × 분당 단가. 통화 분을 무조건 더하던 것 제거(옛 문서 하위호환은 코드 주석). Live는 실측 토큰 × 단가 + 실측 없는 나머지만 추정식. `PRICING_RATES.liveOutTextPer1M = 4.5` 추가. `liveContextMinutesSq`에 창 크기 인자. 개발자 모드 사용량에 실측/추정 표시.
+- **2차 검증 수정**: 커밋된 턴과 프롬프트 토큰 수가 같은 스냅샷이 커밋 뒤에 다시 오면(interrupted 뒤 갱신본 등) 새 턴으로 더하지 않고 그 턴을 다시 열어 이중 집계를 막음(`liveUsage.ts`, 테스트 추가).
 - **테스트**: `tests/liveUsage.test.ts` 신규, `liveMessage`·`usageCost`·`learningLog`·`chunkRecorder`·`unfinishedSessionSummary` 테스트 보강.
 - **남은 일**: 실제 10분 통화 실측(`[live-usage]` 대 추정치 비교)은 배포 뒤 통화 1회가 필요함.
 

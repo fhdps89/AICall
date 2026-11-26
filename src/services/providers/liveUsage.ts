@@ -158,9 +158,15 @@ export function parseUsageMetadata(raw: unknown): LiveUsageTotals | null {
 export function createLiveUsageAccumulator(): LiveUsageAccumulator {
   let committed: LiveUsageTotals = emptyTotals();
   let pending: LiveUsageTotals | null = null;
+  // 직전에 커밋한 스냅샷과 그 커밋 전 합계. 같은 요청(프롬프트 토큰 수 동일)의 스냅샷이 커밋 뒤에
+  // 다시 오면(예: interrupted 뒤 turnComplete와 함께 갱신본 도착) 새 턴으로 더하지 않고 그 턴을 다시 연다(이중 집계 방지).
+  let lastCommitted: LiveUsageTotals | null = null;
+  let committedBeforeLast: LiveUsageTotals = emptyTotals();
 
   const commitTurn = (): void => {
     if (!pending) return;
+    committedBeforeLast = committed;
+    lastCommitted = pending;
     committed = addTotals(committed, pending);
     pending = null;
   };
@@ -172,6 +178,10 @@ export function createLiveUsageAccumulator(): LiveUsageAccumulator {
       // 같은 생성 요청의 스냅샷은 프롬프트 토큰 수가 같다. 프롬프트 수가 달라졌다면 앞 요청의
       // 스냅샷이 turnComplete 뒤에 늦게 도착한 것이므로, 덮어쓰지 말고 먼저 커밋한다(과소 집계 방지).
       if (pending && pending.promptTokens !== parsed.promptTokens) commitTurn();
+      if (!pending && lastCommitted && lastCommitted.promptTokens === parsed.promptTokens) {
+        committed = committedBeforeLast;
+        lastCommitted = null;
+      }
       pending = parsed;
     },
     commitTurn,
@@ -185,6 +195,8 @@ export function createLiveUsageAccumulator(): LiveUsageAccumulator {
     reset(): void {
       committed = emptyTotals();
       pending = null;
+      lastCommitted = null;
+      committedBeforeLast = emptyTotals();
     },
     hasData(): boolean {
       return committed.turns > 0 || pending !== null;
