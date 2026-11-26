@@ -64,6 +64,9 @@ export class CascadePocProvider implements PocCapableProvider {
   private ready = false;
   private closing = false;
   private reconnects = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Rejects the socket handshake in progress (used by disconnect()). */
+  private cancelOpen: ((e: Error) => void) | null = null;
   private generation = 0;
   private connectStartedAt = 0;
   private firstAudioLogged = false;
@@ -149,11 +152,23 @@ export class CascadePocProvider implements PocCapableProvider {
 
   /** Opens the cascade socket and resolves on the server's "ready", rejects otherwise. */
   private async openSocket(gen: number, timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
     let idToken = "";
+    let tokenTimer: ReturnType<typeof setTimeout> | null = null;
     try {
-      idToken = (await auth.currentUser?.getIdToken()) || "";
-    } catch (e) {
+      // The token refresh counts against the same budget, so a stuck refresh still falls back in time.
+      idToken =
+        (await Promise.race([
+          auth.currentUser?.getIdToken() ?? Promise.resolve(""),
+          new Promise<string>((_, reject) => {
+            tokenTimer = setTimeout(() => reject(cascadeError("POC_CONNECT_TIMEOUT", "id token timeout")), timeoutMs);
+          }),
+        ])) || "";
+    } catch (e: any) {
+      if (e?.code === "POC_CONNECT_TIMEOUT") throw e;
       console.warn("[poc] stage=id_token_failed", e);
+    } finally {
+      if (tokenTimer) clearTimeout(tokenTimer);
     }
     if (gen !== this.generation || this.closing) throw cascadeError("POC_CANCELLED", "cancelled");
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -165,11 +180,15 @@ export class CascadePocProvider implements PocCapableProvider {
       this.socket = socket;
       this.ready = false;
       let settled = false;
-      const timer = setTimeout(() => fail("POC_CONNECT_TIMEOUT", `cascade not ready within ${this.connectBudgetMs}ms`), timeoutMs);
+      const timer = setTimeout(
+        () => fail("POC_CONNECT_TIMEOUT", `cascade not ready within ${this.connectBudgetMs}ms`),
+        Math.max(0, deadline - Date.now())
+      );
       const fail = (code: string, msg: string) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        this.cancelOpen = null;
         try {
           socket.close();
         } catch {
@@ -178,6 +197,7 @@ export class CascadePocProvider implements PocCapableProvider {
         if (this.socket === socket) this.socket = null;
         reject(cascadeError(code, msg));
       };
+      this.cancelOpen = (e: any) => fail(e?.code || "POC_CANCELLED", e?.message || "cancelled");
 
       socket.onopen = () => {
         socket.send(
@@ -201,6 +221,7 @@ export class CascadePocProvider implements PocCapableProvider {
           if (msg.type === "ready") {
             settled = true;
             clearTimeout(timer);
+            this.cancelOpen = null;
             this.ready = true;
             // A new server session counts usage from zero: keep what earlier sessions reported.
             this.pocUsageBase = addPocUsage(this.pocUsageBase, this.pocUsage);
@@ -243,11 +264,16 @@ export class CascadePocProvider implements PocCapableProvider {
     console.warn(`[poc] stage=reconnect attempt=${this.reconnects} code=${code}`);
     this.stopAudioPlayback();
     this.options?.onStatusChange("reconnecting", "연결이 잠깐 끊겼어요. 다시 연결하는 중...");
-    setTimeout(() => {
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
       if (this.closing || gen !== this.generation) return;
       this.openSocket(gen, this.connectBudgetMs)
-        .then(() => this.options?.onStatusChange("connected", LIVE_STATUS_TEXT.connected))
+        .then(() => {
+          if (this.closing || gen !== this.generation) return;
+          this.options?.onStatusChange("connected", LIVE_STATUS_TEXT.connected);
+        })
         .catch((err) => {
+          if (this.closing || gen !== this.generation) return;
           console.warn("[poc] stage=reconnect_failed", err?.code || err);
           this.handleDrop(gen, -1);
         });
@@ -493,6 +519,11 @@ export class CascadePocProvider implements PocCapableProvider {
 
   public async disconnect(notifyClosed: boolean = true): Promise<void> {
     this.closing = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.cancelOpen?.(cascadeError("POC_CANCELLED", "disconnected"));
     this.firstAudioWaiter?.reject(cascadeError("POC_CANCELLED", "disconnected"));
     this.generation++;
     this.ready = false;

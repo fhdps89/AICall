@@ -219,6 +219,8 @@ export class CascadeSession {
   private sttGen: number;
   private sttStartedAt: number;
   private rotating: boolean;
+  /** The old STT session closed or errored while a rotation was in flight. */
+  private sttLostDuringRotation: boolean;
   private reconnectAttemptedForGen: number;
   private rotationBuffer: BufferedAudioChunk[];
   private rotationBufferBytes: number;
@@ -253,6 +255,7 @@ export class CascadeSession {
     this.sttGen = 0;
     this.sttStartedAt = 0;
     this.rotating = false;
+    this.sttLostDuringRotation = false;
     this.reconnectAttemptedForGen = -1;
     this.rotationBuffer = [];
     this.rotationBufferBytes = 0;
@@ -529,12 +532,14 @@ export class CascadeSession {
 
   private handleSttError(gen: number, err: unknown): void {
     if (this.closed || gen !== this.sttGen) return;
+    if (this.rotating) this.sttLostDuringRotation = true;
     this.log(`[poc] stage=stt_error msg=${errorMessage(err)}`);
     void this.reconnectSttOnce(gen);
   }
 
   private handleSttClose(gen: number): void {
     if (this.closed || gen !== this.sttGen) return;
+    if (this.rotating) this.sttLostDuringRotation = true;
     this.log("[poc] stage=stt_closed");
     void this.reconnectSttOnce(gen);
   }
@@ -621,16 +626,22 @@ export class CascadeSession {
       }
       this.flushRotationBuffer(newStt);
       this.rotating = false;
+      this.sttLostDuringRotation = false;
       this.log("[poc] stt_rotated");
     } catch (err) {
       this.rotating = false;
-      if (this.stt === oldStt) {
+      this.log(`[poc] stage=stt_rotate_failed msg=${errorMessage(err)}`);
+      if (this.stt === oldStt && !this.sttLostDuringRotation) {
         this.flushRotationBuffer(oldStt);
+      } else if (this.sttLostDuringRotation && !this.closed) {
+        // The old session died meanwhile: take the normal one-reconnect path (it keeps the
+        // buffered audio for the new session, or tells the client stt_closed).
+        this.sttLostDuringRotation = false;
+        await this.reconnectSttOnce(this.sttGen);
       } else {
         this.rotationBuffer = [];
         this.rotationBufferBytes = 0;
       }
-      this.log(`[poc] stage=stt_rotate_failed msg=${errorMessage(err)}`);
     }
   }
 
@@ -696,9 +707,15 @@ export class CascadeSession {
 
   private handleUserTextTurn(text: string): void {
     this.clearSettleTimer();
+    // Speech still waiting for its 0.4 s settle belongs before the button/typed prompt.
+    const pendingVoice = this.pendingUserText.trim();
+    this.pendingUserText = "";
+    this.lastFinalAt = 0;
+    this.lastInterimToFinalMs = -1;
     if (this.isTutorSpeaking()) {
       this.bargeIn("text");
     }
+    if (pendingVoice) this.history.push({ role: "user", text: pendingVoice });
     this.history.push({ role: "user", text });
     void this.runTutorTurn({ finalAt: this.clock.now(), interimToFinalMs: 0 });
   }

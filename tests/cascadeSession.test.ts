@@ -449,3 +449,79 @@ test('STT rotation failure keeps the old session and flushes the buffered audio 
   assert.equal(fake.stt[0].closed, false);
   assert.equal(fake.stt[0].sent.length, 1);
 });
+
+test('echo rule boundary: 70% overlap is echo, 2 of 3 words (67%) is not', () => {
+  // via the exported text helpers used by the session
+  return import('../server/cascadeText.ts').then(({ isLikelyEcho }) => {
+    const tutor = 'alpha beta gamma delta epsilon zeta eta';
+    assert.equal(isLikelyEcho('alpha beta gamma delta epsilon zeta eta x y z', tutor), true); // 7/10
+    assert.equal(isLikelyEcho('alpha beta qqq', tutor), false); // 2/3
+  });
+});
+
+test('echo grace: an echo final 1.5 s after the tutor finishes is dropped, after that it is a user turn', async () => {
+  const fake = makeFakeAi({ ttsBytes: 48000, reply: 'Nice to meet you.' }); // 1 s of audio
+  const { session, clock } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'start' });
+  await flush();
+  clock.advance(1000 + 1499); // tutor audio ended 1.499 s ago
+  fake.stt[0].cb.onmessage(finalSeg('nice to meet you'));
+  clock.advance(CASCADE_SETTLE_MS * 3);
+  await flush();
+  assert.equal(fake.textCalls.length, 1, 'inside the grace window: dropped');
+  fake.stt[0].cb.onmessage(finalSeg('nice to meet you'));
+  clock.advance(CASCADE_SETTLE_MS);
+  await flush();
+  assert.equal(fake.textCalls.length, 2, 'after the grace window: a real user turn (repeat practice)');
+});
+
+test('barge-in also reports usage so interrupted turns are billed', async () => {
+  const fake = makeFakeAi({ holdTts: true });
+  const { session, sent } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'start' });
+  await flush();
+  session.handleClientMessage({ type: 'interrupt' });
+  const i = types(sent).indexOf('interrupted');
+  assert.equal(sent[i + 1].type, 'poc_usage');
+  fake.ttsRelease.forEach((r) => r());
+  await flush();
+});
+
+test('a button prompt during the 0.4 s wait keeps the pending speech, in order', async () => {
+  const fake = makeFakeAi();
+  const { session, clock } = makeSession(fake);
+  await session.start();
+  fake.stt[0].cb.onmessage(finalSeg('I think so.'));
+  session.handleClientMessage({ type: 'control_command', command: 'Feedback' });
+  await flush();
+  const last = fake.textCalls[0].contents.at(-1).parts[0].text;
+  assert.equal(last, 'I think so.\nFeedback. (Please provide quick feedback on what I just said.)');
+  clock.advance(CASCADE_SETTLE_MS * 2);
+  await flush();
+  assert.equal(fake.textCalls.length, 1, 'the speech is not sent a second time');
+});
+
+test('old STT dying during a failed rotation goes through the one-reconnect path', async () => {
+  const fake = makeFakeAi();
+  const { session, clock, sent } = makeSession(fake);
+  await session.start();
+  clock.advance(STT_ROTATE_AFTER_MS);
+  let release!: (v: unknown) => void;
+  const realConnect = fake.ai.connectStt.bind(fake.ai);
+  let calls = 0;
+  fake.ai.connectStt = (cb) => {
+    calls++;
+    if (calls === 1) return new Promise((_, rej) => (release = rej));
+    return realConnect(cb);
+  };
+  session.handleClientMessage({ type: 'text_prompt', text: 'hi' });
+  await flush();
+  fake.stt[0].cb.onclose(); // old session dies mid-rotation
+  release(new Error('rotate failed'));
+  await flush();
+  assert.equal(calls, 2, 'reconnected after the failed rotation');
+  assert.equal(fake.stt.length, 2);
+  assert.ok(!sent.some((m) => m.error === 'stt_closed'));
+});

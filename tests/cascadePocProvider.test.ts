@@ -37,6 +37,18 @@ class FakeWs {
 }
 
 (globalThis as any).window = { location: { protocol: 'https:', host: 'app.test' } };
+let micOpens = 0;
+Object.defineProperty(globalThis, 'navigator', {
+  configurable: true,
+  value: {
+    mediaDevices: {
+      getUserMedia: async () => {
+        micOpens++;
+        return { getTracks: () => [{ stop() {} }] };
+      },
+    },
+  },
+});
 (globalThis as any).WebSocket = FakeWs;
 
 const quiet = async <T>(fn: () => Promise<T>): Promise<T> => {
@@ -175,4 +187,50 @@ test('hang-up during connect: no fallback to the normal engine', async () => {
     await done;
   });
   assert.equal(liveMade, 0);
+});
+
+test('mic opens only after the first tutor audio: never on fallback, once on success', async () => {
+  const withMic = (statuses: string[]) => ({ ...opts(statuses), skipMic: false, onMicWarning() {} });
+  FakeWs.all = [];
+  micOpens = 0;
+  const failing = new CascadePocProvider({ connectBudgetMs: 50 });
+  await quiet(async () => {
+    const done = failing.connect(withMic([])).catch(() => {});
+    await tick();
+    FakeWs.all[0].open();
+    FakeWs.all[0].push({ type: 'ready' });
+    await done; // budget runs out without tutor audio
+  });
+  assert.equal(micOpens, 0, 'fallback path never touched the mic');
+
+  FakeWs.all = [];
+  const ok = new CascadePocProvider({ connectBudgetMs: 2000 });
+  await quiet(async () => {
+    const statuses: string[] = [];
+    const done = ok.connect(withMic(statuses));
+    await tick();
+    FakeWs.all[0].open();
+    FakeWs.all[0].push({ type: 'ready' });
+    await tick();
+    assert.equal(micOpens, 0, 'not before the first tutor audio');
+    FakeWs.all[0].push({ type: 'audio', audio: Buffer.alloc(4).toString('base64'), mimeType: 'audio/pcm;rate=24000' });
+    await done;
+  });
+  assert.equal(micOpens, 1);
+  await quiet(() => ok.disconnect());
+});
+
+test('hang-up during the handshake ends connect at once with POC_CANCELLED', async () => {
+  FakeWs.all = [];
+  const p = new CascadePocProvider({ connectBudgetMs: 8000 });
+  const t0 = Date.now();
+  const err: any = await quiet(async () => {
+    const done = p.connect(opts([])).then(() => null, (e) => e);
+    await tick();
+    FakeWs.all[0].open();
+    await p.disconnect();
+    return done;
+  });
+  assert.equal(err?.code, 'POC_CANCELLED');
+  assert.ok(Date.now() - t0 < 1000, 'did not wait for the 8 s budget');
 });
