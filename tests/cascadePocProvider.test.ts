@@ -104,7 +104,7 @@ test('connect: init on the cascade path, kickoff after ready, connected only aft
     const ws = FakeWs.all[0];
     assert.match(ws.url, /^wss:\/\/app\.test\/api\/gemini\/cascade\?token=/);
     ws.open();
-    assert.deepEqual(ws.sent[0], { type: 'init', systemInstruction: 'SYS', voiceName: 'Kore', history: [], textVariant: 'a' });
+    assert.deepEqual(ws.sent[0], { type: 'init', systemInstruction: 'SYS', voiceName: 'Kore', history: [], textVariant: 'a', firstTts: 'full' });
     ws.push({ type: 'ready' });
     await tick();
     assert.equal(ws.sent[1].type, 'text_prompt', 'kickoff sent after ready');
@@ -542,13 +542,13 @@ test('A/B: the chosen variant is logged at call start, sent as "a"/"b" only, and
   } finally {
     Object.assign(console, orig);
   }
-  assert.ok(lines.includes('[poc] variant=b textModel=gemini-3.5-flash-lite source=url'));
-  assert.ok(lines.some((l) => /^\[poc-turn\] n=2 variant=b .*finalToToken=1100ms .*ttsFirstChunk=600ms finalToAudio=1900ms$/.test(l)));
+  assert.ok(lines.includes('[poc] variant=b textModel=gemini-3.5-flash-lite source=url firstTts=full ttsFirstModel=gemini-3.8-flash-tts'));
+  assert.ok(lines.some((l) => /^\[poc-turn\] n=2 variant=b .*finalToToken=1100ms .*ttsFirstChunk=600ms finalToAudio=1900ms ttsModel=\?$/.test(l)));
   const summary = lines.filter((l) => l.startsWith('[poc-summary]'));
   assert.equal(summary.length, 1);
   assert.equal(
     summary[0],
-    '[poc-summary] variant=b textModel=gemini-3.5-flash-lite turns=3 medianFinalToToken=1100ms p90FinalToToken=2000ms medianTtsFirstChunk=500ms medianFinalToAudio=1900ms p90FinalToAudio=2600ms echoDrops=3 ttsStreams=4 bargeIns=0'
+    '[poc-summary] variant=b textModel=gemini-3.5-flash-lite firstTts=full ttsFirstModel=gemini-3.8-flash-tts turns=3 medianFinalToToken=1100ms p90FinalToToken=2000ms medianTtsFirstChunk=500ms medianFinalToAudio=1900ms p90FinalToAudio=2600ms echoDrops=3 ttsStreams=4 bargeIns=0 textInterrupts=0'
   );
 });
 
@@ -594,7 +594,7 @@ test('A/B: browser [poc-summary] adds counters across a reconnect and sees drops
   }
   const summary = lines.filter((l) => l.startsWith('[poc-summary]'));
   assert.deepEqual(summary, [
-    '[poc-summary] variant=a textModel=gemini-3.8-flash turns=1 medianFinalToToken=0ms p90FinalToToken=0ms medianTtsFirstChunk=0ms medianFinalToAudio=0ms p90FinalToAudio=0ms echoDrops=3 ttsStreams=3 bargeIns=1',
+    '[poc-summary] variant=a textModel=gemini-3.8-flash firstTts=full ttsFirstModel=gemini-3.8-flash-tts turns=1 medianFinalToToken=0ms p90FinalToToken=0ms medianTtsFirstChunk=0ms medianFinalToAudio=0ms p90FinalToAudio=0ms echoDrops=3 ttsStreams=3 bargeIns=1 textInterrupts=0',
   ]);
 });
 
@@ -689,7 +689,7 @@ test('text-only (skipMic + typed text_prompt): ?qa=1 warns and writes data-poc-s
     assert.ok(summary, 'text-only hang-up must print [poc-summary]');
     assert.match(
       summary!,
-      /^\[poc-summary\] variant=a textModel=gemini-3\.8-flash turns=1 .*medianFinalToToken=900ms .*medianTtsFirstChunk=350ms .*medianFinalToAudio=1300ms/
+      /^\[poc-summary\] variant=a textModel=gemini-3\.8-flash firstTts=full ttsFirstModel=gemini-3\.8-flash-tts turns=1 .*medianFinalToToken=900ms .*medianTtsFirstChunk=350ms .*medianFinalToAudio=1300ms/
     );
     assert.ok(warns.includes('[poc] stage=connect_start'));
     assert.ok(warns.some((l) => l.startsWith('[poc-turn] n=1') && l.includes('variant=a') && l.includes('finalToToken=900ms')));
@@ -711,4 +711,86 @@ test('text-only (skipMic + typed text_prompt): ?qa=1 warns and writes data-poc-s
     delete g.window.__AICALL_POC_SUMMARY__;
     delete g.window.__AICALL_POC_USAGE__;
   }
+});
+
+test('firstTts lite: init sends "lite" only, logs start/ready/turn ttsModel and summary with textInterrupts across reconnect', async () => {
+  FakeWs.all = [];
+  const lines: string[] = [];
+  const p = new CascadePocProvider({
+    connectBudgetMs: 2000,
+    reconnectDelayMs: 1,
+    resolveTextVariant: () => ({ variant: 'a', source: 'default' }),
+    resolveFirstTts: () => 'lite',
+  });
+  const orig = { log: console.log, warn: console.warn, error: console.error };
+  console.log = (...a: unknown[]) => void lines.push(a.join(' '));
+  console.warn = console.error = () => {};
+  try {
+    const done = p.connect(opts([]));
+    await tick();
+    const ws1 = FakeWs.all[0];
+    ws1.open();
+    assert.equal(ws1.sent[0].firstTts, 'lite');
+    assert.equal(
+      Object.values(ws1.sent[0]).some((v) => typeof v === 'string' && v.startsWith('gemini-')),
+      false,
+      'no model ID sent from browser'
+    );
+    assert.equal(p.getPocFirstTts(), 'lite');
+    ws1.push({
+      type: 'ready',
+      model: 'cascade-poc',
+      textVariant: 'a',
+      firstTts: 'lite',
+      models: { stt: 'gemini-3.5-transcribe-live', text: 'gemini-3.8-flash', tts: 'gemini-3.8-flash-tts', ttsFirst: 'gemini-3.8-flash-lite-tts' },
+    });
+    await tick();
+    ws1.push({ type: 'audio', audio: Buffer.alloc(4).toString('base64'), mimeType: 'audio/pcm;rate=24000' });
+    await done;
+
+    ws1.push({
+      type: 'poc_turn',
+      turn: 1,
+      interimToFinalMs: 0,
+      finalToTokenMs: 800,
+      tokenToAudioMs: 300,
+      ttsFirstChunkMs: 250,
+      finalToAudioMs: 1100,
+      ttsFirstModel: 'gemini-3.8-flash-lite-tts',
+      echoDrops: 0,
+      ttsStreams: 2,
+      bargeIns: 0,
+      textInterrupts: 1,
+    });
+    ws1.push({
+      type: 'poc_usage',
+      usage: { turns: 1, ttsLiteInTokens: 10, ttsLiteAudioSec: 1.5, ttsInTokens: 5, ttsAudioSec: 0.5 },
+      counters: { echoDrops: 0, ttsStreams: 2, bargeIns: 0, textInterrupts: 1 },
+    });
+    ws1.drop();
+    await new Promise((r) => setTimeout(r, 10));
+    await tick();
+    const ws2 = FakeWs.all[1];
+    ws2.open();
+    assert.equal(ws2.sent[0].firstTts, 'lite', 'reconnect keeps the first-segment TTS choice');
+    ws2.push({ type: 'ready', textVariant: 'a', firstTts: 'lite', models: { text: 'gemini-3.8-flash' } });
+    await tick();
+    ws2.push({
+      type: 'poc_usage',
+      usage: { turns: 0, ttsLiteInTokens: 6, ttsLiteAudioSec: 1.0 },
+      counters: { echoDrops: 1, ttsStreams: 1, bargeIns: 0, textInterrupts: 2 },
+    });
+    assert.equal(p.getPocUsage().ttsLiteInTokens, 16);
+    assert.equal(p.getPocUsage().ttsLiteAudioSec, 2.5);
+    await p.disconnect();
+  } finally {
+    Object.assign(console, orig);
+  }
+  assert.ok(lines.includes('[poc] variant=a textModel=gemini-3.8-flash source=default firstTts=lite ttsFirstModel=gemini-3.8-flash-lite-tts'));
+  assert.ok(lines.some((l) => /^\[poc\] stage=ready ms=\d+ variant=a textModel=gemini-3\.8-flash firstTts=lite ttsFirstModel=gemini-3\.8-flash-lite-tts$/.test(l)));
+  assert.ok(lines.some((l) => /^\[poc-turn\] n=1 variant=a .* ttsModel=gemini-3\.8-flash-lite-tts$/.test(l)));
+  const summary = lines.filter((l) => l.startsWith('[poc-summary]'));
+  assert.deepEqual(summary, [
+    '[poc-summary] variant=a textModel=gemini-3.8-flash firstTts=lite ttsFirstModel=gemini-3.8-flash-lite-tts turns=1 medianFinalToToken=800ms p90FinalToToken=800ms medianTtsFirstChunk=250ms medianFinalToAudio=1100ms p90FinalToAudio=1100ms echoDrops=1 ttsStreams=3 bargeIns=0 textInterrupts=3',
+  ]);
 });

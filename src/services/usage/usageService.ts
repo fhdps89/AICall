@@ -25,14 +25,24 @@ import { db } from "../firebase/config";
 import { PRICING_RATES, USAGE_ASSUMPTIONS } from "../../config/models";
 import { getKSTToday } from "../firebase/db";
 import { liveContextMinutesSq } from "./learningLog";
-import { pocCostUsd } from "../../config/cascadePoc";
+import { POC_AUDIO_TOKENS_PER_SEC, pocCostUsd, pocTtsLiteRates } from "../../config/cascadePoc";
 import type { PocPricing, PocUsageTotals } from "../../config/cascadePoc";
-import { POC_COUNTERS, POC_USAGE_FIELDS } from "./pocUsageFields";
-import type { PocVariantFieldName, PocVariantUsage } from "./pocUsageFields";
-export { POC_USAGE_FIELDS, pocVariantUsageDelta } from "./pocUsageFields";
-export type { PocVariantUsage } from "./pocUsageFields";
+import { POC_COUNTERS, POC_TTS_LITE_FIELDS, POC_USAGE_FIELDS } from "./pocUsageFields";
+import type {
+  PocTtsLiteFieldName,
+  PocTtsLiteUsage,
+  PocVariantFieldName,
+  PocVariantUsage,
+} from "./pocUsageFields";
+export {
+  POC_TTS_LITE_FIELDS,
+  POC_USAGE_FIELDS,
+  pocTtsLiteUsageDelta,
+  pocVariantUsageDelta,
+} from "./pocUsageFields";
+export type { PocTtsLiteUsage, PocVariantUsage } from "./pocUsageFields";
 
-export interface UsageDelta extends PocVariantUsage {
+export interface UsageDelta extends PocVariantUsage, PocTtsLiteUsage {
   liveMinutes?: number;
   qaLiveMinutes?: number;
   liveMinutesSq?: number;
@@ -78,7 +88,7 @@ export interface UsageDelta extends PocVariantUsage {
   pocTtsAudioSec?: number;
 }
 
-export interface UsageDay extends PocVariantUsage {
+export interface UsageDay extends PocVariantUsage, PocTtsLiteUsage {
   liveMinutes?: number;
   qaLiveMinutes?: number;
   liveMinutesSq?: number;
@@ -120,7 +130,7 @@ export interface UsageDay extends PocVariantUsage {
   pocTtsAudioSec?: number;
 }
 
-export interface UsageMonth extends PocVariantUsage {
+export interface UsageMonth extends PocVariantUsage, PocTtsLiteUsage {
   liveMinutes: number;
   qaLiveMinutes?: number;
   liveMinutesSq?: number;
@@ -182,6 +192,8 @@ export interface UsageCostBreakdown {
   pocA: number;
   /** Test mode, reply text variant B (gemini-3.5-flash-lite) */
   pocB: number;
+  /** Test mode, first-segment lite TTS (gemini-3.8-flash-lite-tts) */
+  pocTtsLite: number;
   total: number;
 }
 
@@ -197,6 +209,7 @@ const USAGE_COST_COMPONENT_LABELS = {
   poc: "시험 통화 비용(A/B 이전 기록)",
   pocA: "시험 통화 비용 A",
   pocB: "시험 통화 비용 B",
+  pocTtsLite: "시험 통화 첫 음성(라이트)",
 } as const satisfies Record<UsageCostComponentKey, string>;
 
 /** Ordered breakdown components (excluding total) shown in dev-mode usage cost tables. */
@@ -357,6 +370,22 @@ function pocCountersOf(
   return out;
 }
 
+/** Cost of first-segment lite TTS counters (gemini-3.8-flash-lite-tts), priced at today's date. */
+export function pocTtsLiteCostUsd(
+  u: UsageDelta | UsageDay | UsageMonth | null | undefined,
+  nowMs: number = Date.now()
+): number {
+  if (!u) return 0;
+  const inTokens = nonNeg(u.pocTtsLiteInTokens);
+  const audioSec = nonNeg(u.pocTtsLiteAudioSec);
+  if (inTokens <= 0 && audioSec <= 0) return 0;
+  const rates = pocTtsLiteRates(nowMs);
+  return (
+    (inTokens * rates.inPer1M + audioSec * POC_AUDIO_TOKENS_PER_SEC * rates.outAudioPer1M) /
+    1_000_000
+  );
+}
+
 /**
  * Test-mode (PoC) cost from the stored poc* counters: variant A and B counters are priced with
  * their own text rates; untagged legacy counters (written before the A/B split) with the legacy
@@ -371,7 +400,8 @@ export function pocUsageCostUsd(
   if (!u) return 0;
   const rec = u as unknown as Partial<Record<string, unknown>>;
   const sets: PocPricing[] = pricing ? [pricing] : ["legacy", "a", "b"];
-  return sets.reduce((acc, p) => acc + pocCostUsd(pocCountersOf(rec, p), nowMs, p), 0);
+  const base = sets.reduce((acc, p) => acc + pocCostUsd(pocCountersOf(rec, p), nowMs, p), 0);
+  return pricing ? base : base + pocTtsLiteCostUsd(u, nowMs);
 }
 
 export function priceUsage(u: UsageDay | UsageMonth | null | undefined): UsageCostBreakdown {
@@ -411,7 +441,8 @@ export function priceUsage(u: UsageDay | UsageMonth | null | undefined): UsageCo
   const poc = pocUsageCostUsd(u, undefined, "legacy");
   const pocA = pocUsageCostUsd(u, undefined, "a");
   const pocB = pocUsageCostUsd(u, undefined, "b");
-  const parts = { live, qaLive, stt, text, tts, sie, poc, pocA, pocB };
+  const pocTtsLite = pocTtsLiteCostUsd(u);
+  const parts = { live, qaLive, stt, text, tts, sie, poc, pocA, pocB, pocTtsLite };
   return { ...parts, total: sumUsageCostComponents(parts) };
 }
 
@@ -472,6 +503,8 @@ export function estimateCostUsd(d: UsageDelta): number {
     pocTextOutTokens: d.pocTextOutTokens,
     pocTtsInTokens: d.pocTtsInTokens,
     pocTtsAudioSec: d.pocTtsAudioSec,
+    pocTtsLiteInTokens: d.pocTtsLiteInTokens,
+    pocTtsLiteAudioSec: d.pocTtsLiteAudioSec,
     ...pocVariantFieldsOf(d),
   });
 
@@ -489,7 +522,9 @@ export function estimateCostUsd(d: UsageDelta): number {
   return sumUsageCostComponents({ ...base, stt, tts });
 }
 
-export interface UsageFields<T> extends Partial<Record<PocVariantFieldName, T>> {
+export interface UsageFields<T>
+  extends Partial<Record<PocVariantFieldName, T>>,
+    Partial<Record<PocTtsLiteFieldName, T>> {
   liveMinutes: T;
   qaLiveMinutes: T;
   liveMinutesSq: T;
@@ -593,12 +628,22 @@ export function buildUsageFields<T>(
         target[name] = inc(nonNeg(rec[name] as number | undefined));
       }
     }
+    if (nonNeg(d.pocTtsLiteInTokens) > 0) {
+      fields[POC_TTS_LITE_FIELDS.ttsLiteInTokens] = inc(nonNeg(d.pocTtsLiteInTokens));
+    }
+    if (nonNeg(d.pocTtsLiteAudioSec) > 0) {
+      fields[POC_TTS_LITE_FIELDS.ttsLiteAudioSec] = inc(nonNeg(d.pocTtsLiteAudioSec));
+    }
   }
   return fields;
 }
 
 function pocSetHasValue(rec: Partial<Record<string, unknown>>, p: PocPricing): boolean {
   return POC_COUNTERS.some((c) => nonNeg(rec[POC_USAGE_FIELDS[p][c]] as number | undefined) > 0);
+}
+
+function pocTtsLiteHasValue(d: UsageDelta): boolean {
+  return nonNeg(d.pocTtsLiteInTokens) > 0 || nonNeg(d.pocTtsLiteAudioSec) > 0;
 }
 
 /** Copies only the A/B variant counters (for re-pricing a delta). */
@@ -621,7 +666,8 @@ function hasPocUsage(d: UsageDelta): boolean {
     nonNeg(d.pocCalls) > 0 ||
     pocSetHasValue(rec, "legacy") ||
     pocSetHasValue(rec, "a") ||
-    pocSetHasValue(rec, "b")
+    pocSetHasValue(rec, "b") ||
+    pocTtsLiteHasValue(d)
   );
 }
 

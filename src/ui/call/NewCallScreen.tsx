@@ -4,7 +4,12 @@ import {
   recordUsage,
 } from "../../services/usage/usageService";
 import { callUsageDelta, liveContextMinutesSq, pocCallUsageDelta } from "../../services/usage/learningLog";
-import { activeEngineOf, pocTextVariantOf, pocUsageOf } from "../../services/providers/cascadeFallbackProvider";
+import {
+  activeEngineOf,
+  pocFirstTtsOf,
+  pocTextVariantOf,
+  pocUsageOf,
+} from "../../services/providers/cascadeFallbackProvider";
 import { pocCostUsd, POC_TEXT_VARIANTS } from "../../config/cascadePoc";
 import { infoPoc } from "../../services/perf/pocQaLog";
 import { formatLiveUsageLog } from "../../services/providers/liveUsage";
@@ -398,12 +403,13 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
     const liveUsage = providerRef.current.finalizeLiveUsage?.();
     const pocUsage = activeEngineOf(providerRef.current) === "cascade_poc" ? pocUsageOf(providerRef.current) : null;
     const pocVariant = pocTextVariantOf(providerRef.current);
+    const pocFirstTts = pocFirstTtsOf(providerRef.current);
 
     const durationMin = callDuration > 0 ? callDuration / 60 : 0;
     const estUsd = liveCostEstimateUsd(durationMin, liveContextMinutesSq(durationMin));
     if (pocUsage) {
       infoPoc(
-        `[poc-usage] durationSec=${callDuration} turns=${pocUsage.turns} sttAudioSec=${pocUsage.sttAudioSec.toFixed(1)} ttsAudioSec=${pocUsage.ttsAudioSec.toFixed(1)} sttOutEstimated=${pocUsage.sttOutEstimated ? 1 : 0} variant=${pocVariant} textModel=${POC_TEXT_VARIANTS[pocVariant].model} usd=${pocCostUsd(pocUsage, Date.now(), pocVariant).toFixed(4)} qa=${qaCallRef.current ? 1 : 0}`
+        `[poc-usage] durationSec=${callDuration} turns=${pocUsage.turns} sttAudioSec=${pocUsage.sttAudioSec.toFixed(1)} ttsAudioSec=${pocUsage.ttsAudioSec.toFixed(1)} ttsLiteAudioSec=${pocUsage.ttsLiteAudioSec.toFixed(1)} sttOutEstimated=${pocUsage.sttOutEstimated ? 1 : 0} variant=${pocVariant} textModel=${POC_TEXT_VARIANTS[pocVariant].model} firstTts=${pocFirstTts} usd=${pocCostUsd(pocUsage, Date.now(), pocVariant).toFixed(4)} qa=${qaCallRef.current ? 1 : 0}`
       );
     } else if (liveUsage && liveUsage.turns > 0) {
       const actualUsd = liveMeasuredCostUsd(liveUsage);

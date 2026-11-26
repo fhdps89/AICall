@@ -68,3 +68,25 @@ export function pocVariantUsageDelta(
   }
   return out as PocVariantUsage;
 }
+
+/** Stored field names of first-segment lite TTS counters (independent of text variant A/B). */
+export const POC_TTS_LITE_FIELDS = {
+  ttsLiteInTokens: "pocTtsLiteInTokens",
+  ttsLiteAudioSec: "pocTtsLiteAudioSec",
+} as const;
+
+export type PocTtsLiteFieldName = (typeof POC_TTS_LITE_FIELDS)[keyof typeof POC_TTS_LITE_FIELDS];
+
+export type PocTtsLiteUsage = Partial<Record<"pocTtsLiteInTokens" | "pocTtsLiteAudioSec", number>>;
+
+/** Maps one call's lite TTS totals to stored field names (only positive values). */
+export function pocTtsLiteUsageDelta(
+  poc: Partial<PocUsageTotals> | null | undefined
+): PocTtsLiteUsage {
+  const out: PocTtsLiteUsage = {};
+  const inTokens = nonNeg(poc?.ttsLiteInTokens);
+  const audioSec = nonNeg(poc?.ttsLiteAudioSec);
+  if (inTokens > 0) out.pocTtsLiteInTokens = inTokens;
+  if (audioSec > 0) out.pocTtsLiteAudioSec = audioSec;
+  return out;
+}

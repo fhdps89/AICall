@@ -5,7 +5,7 @@
  */
 import type { LiveCommand, LiveProvider, LiveSessionOptions, LiveTranscriptItem } from "./types";
 import type { LiveUsageTotals } from "./liveUsage";
-import type { PocTextVariant, PocUsageTotals } from "../../config/cascadePoc";
+import type { PocFirstTts, PocTextVariant, PocUsageTotals } from "../../config/cascadePoc";
 import { logPoc } from "../perf/pocQaLog";
 
 export const POC_FALLBACK_NOTICE = "시험 모드 연결 실패, 기본 엔진으로 연결합니다";
@@ -17,6 +17,8 @@ export interface PocCapableProvider extends LiveProvider {
   getPocUsage(): PocUsageTotals;
   /** Reply-text A/B variant of this call (missing = "a"). */
   getPocTextVariant?(): PocTextVariant;
+  /** First-segment TTS mode of this call (missing = "full"). */
+  getPocFirstTts?(): PocFirstTts;
   disconnect(notifyClosed?: boolean): Promise<void>;
 }
 
@@ -47,6 +49,10 @@ export class PocFallbackProvider implements LiveProvider {
   /** Cascade usage for this call, or null when the call ran on the normal engine. */
   public getPocTextVariant(): PocTextVariant {
     return this.poc?.getPocTextVariant?.() ?? "a";
+  }
+
+  public getPocFirstTts(): PocFirstTts {
+    return this.poc?.getPocFirstTts?.() ?? "full";
   }
 
   public getPocUsage(): PocUsageTotals | null {
@@ -133,6 +139,11 @@ export function activeEngineOf(provider: LiveProvider | null | undefined): Activ
 /** Reply-text variant of a test-mode call ("a" when unknown). */
 export function pocTextVariantOf(provider: LiveProvider | null | undefined): PocTextVariant {
   return provider instanceof PocFallbackProvider ? provider.getPocTextVariant() : "a";
+}
+
+/** First-segment TTS mode of a test-mode call ("full" when unknown). */
+export function pocFirstTtsOf(provider: LiveProvider | null | undefined): PocFirstTts {
+  return provider instanceof PocFallbackProvider ? provider.getPocFirstTts() : "full";
 }
 
 /** Test-mode usage for this call, or null when the call ran on the normal engine. */

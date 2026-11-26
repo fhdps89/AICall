@@ -10,6 +10,8 @@ import {
   setStoredPocTextVariant,
   parsePocTextParam,
   resolvePocTextVariant,
+  parsePocTtsParam,
+  resolvePocFirstTts,
 } from '../src/services/settings/callEngineSetting.ts';
 import {
   PocFallbackProvider,
@@ -17,16 +19,28 @@ import {
   activeEngineOf,
   pocUsageOf,
   pocTextVariantOf,
+  pocFirstTtsOf,
 } from '../src/services/providers/cascadeFallbackProvider.ts';
 import type { PocCapableProvider } from '../src/services/providers/cascadeFallbackProvider.ts';
 import type { LiveProvider, LiveSessionOptions } from '../src/services/providers/types.ts';
-import { emptyPocUsage, pocCostUsd, parsePocTextVariant, POC_TEXT_VARIANTS } from '../src/config/cascadePoc.ts';
+import {
+  emptyPocUsage,
+  pocCostUsd,
+  parsePocTextVariant,
+  POC_TEXT_VARIANTS,
+  POC_TTS_MODEL,
+  POC_TTS_LITE_MODEL,
+  parsePocFirstTts,
+  pocFirstTtsModel,
+  pocTtsLiteRates,
+} from '../src/config/cascadePoc.ts';
 import { pocCallUsageDelta, callUsageDelta, summarizeLearningLog } from '../src/services/usage/learningLog.ts';
 import {
   buildUsageFields,
   estimateCostUsd,
   priceUsage,
   pocUsageCostUsd,
+  pocTtsLiteUsageDelta,
   USAGE_COST_COMPONENTS,
 } from '../src/services/usage/usageService.ts';
 import {
@@ -320,4 +334,107 @@ test('A 확정 표시: 라벨·제목 문구와 명시적 B 선택 외 기본값
   assert.doesNotThrow(() => setStoredPocTextVariant('b', broken));
   assert.deepEqual(resolvePocTextVariant('', broken), { variant: 'a', source: 'default' });
   assert.equal(getStoredPocTextVariant(mem({ [POC_TEXT_VARIANT_KEY]: '' })), 'a');
+});
+
+test('firstTts param & parser: only "lite" selects flash-lite-tts; absent/invalid/model ID falls back to "full"', () => {
+  assert.equal(parsePocFirstTts('lite'), 'lite');
+  assert.equal(parsePocFirstTts(' LITE '), 'lite');
+  for (const bad of ['full', '', 'fast', 'gemini-3.8-flash-lite-tts', null, undefined, 1, {}, ['lite']]) {
+    assert.equal(parsePocFirstTts(bad), 'full', String(bad));
+  }
+  assert.equal(pocFirstTtsModel('lite'), POC_TTS_LITE_MODEL);
+  assert.equal(pocFirstTtsModel('full'), POC_TTS_MODEL);
+
+  assert.equal(parsePocTtsParam('?qa=1'), null);
+  assert.equal(parsePocTtsParam('?pocTts=lite'), 'lite');
+  assert.equal(parsePocTtsParam('pocTts=LITE'), 'lite');
+  assert.equal(parsePocTtsParam('?pocTts=full'), 'full');
+  assert.equal(parsePocTtsParam('?pocTts=gemini-3.8-flash-lite-tts'), 'full');
+  assert.equal(parsePocTtsParam('?pocTts=invalid'), 'full');
+
+  assert.equal(resolvePocFirstTts('?qa=1&pocTts=lite'), 'lite');
+  assert.equal(resolvePocFirstTts('?qa=1'), 'full');
+  assert.equal(resolvePocFirstTts('?pocTts=bogus'), 'full');
+  assert.equal(resolvePocFirstTts(undefined), 'full', 'no location in node -> full');
+});
+
+test('pocCostUsd & pocTtsLiteRates: 2026 ($0.50/$6.00) vs 2027 ($1.00/$12.00) lite TTS pricing', () => {
+  const t2026 = Date.parse('2026-11-27T03:00:00Z');
+  const t2027 = Date.parse('2027-01-02T00:00:00Z');
+  assert.deepEqual(pocTtsLiteRates(t2026), { inPer1M: 0.5, outAudioPer1M: 6 });
+  assert.deepEqual(pocTtsLiteRates(t2027), { inPer1M: 1, outAudioPer1M: 12 });
+  // Boundary: 2027-01-01 00:00 KST = 2026-12-31T15:00:00Z.
+  assert.deepEqual(pocTtsLiteRates(Date.parse('2026-12-31T14:59:59Z')), { inPer1M: 0.5, outAudioPer1M: 6 });
+  assert.deepEqual(pocTtsLiteRates(Date.parse('2026-12-31T15:00:00Z')), { inPer1M: 1, outAudioPer1M: 12 });
+
+  const liteOnly = { ttsLiteInTokens: 1_000_000, ttsLiteAudioSec: 40_000 }; // 1M text in + 1M audio out
+  assert.ok(Math.abs(pocCostUsd(liteOnly, t2026, 'a') - (0.5 + 6)) < 1e-9);
+  assert.ok(Math.abs(pocCostUsd(liteOnly, t2027, 'a') - (1 + 12)) < 1e-9);
+
+  // Mixed call: seg1 lite (40k sec = 1M audio tokens) + seg2 full (40k sec = 1M audio tokens)
+  const mixed = { ttsLiteAudioSec: 40_000, ttsAudioSec: 40_000 };
+  assert.ok(Math.abs(pocCostUsd(mixed, t2026, 'a') - (6 + 9)) < 1e-9);
+  assert.ok(Math.abs(pocCostUsd(mixed, t2027, 'a') - (12 + 18)) < 1e-9);
+});
+
+test('pocTtsLiteUsageDelta, usageService row pocTtsLite, buildUsageFields, and pocFirstTtsOf', async () => {
+  assert.deepEqual(pocTtsLiteUsageDelta(null), {});
+  assert.deepEqual(pocTtsLiteUsageDelta({ ttsLiteInTokens: 0, ttsLiteAudioSec: -1 }), {});
+  assert.deepEqual(pocTtsLiteUsageDelta({ ttsLiteInTokens: 120, ttsLiteAudioSec: 4.5 }), {
+    pocTtsLiteInTokens: 120,
+    pocTtsLiteAudioSec: 4.5,
+  });
+
+  // Component row exists with Korean-only label (no lowercase ASCII or underscore)
+  const liteRow = USAGE_COST_COMPONENTS.find((c) => c.key === 'pocTtsLite');
+  assert.ok(liteRow);
+  assert.equal(liteRow!.label, '시험 통화 첫 음성(라이트)');
+  assert.equal(/[a-z_]/.test(liteRow!.label), false);
+
+  const u = { ...emptyPocUsage(), textInTokens: 100_000, ttsInTokens: 500, ttsAudioSec: 20, ttsLiteInTokens: 400, ttsLiteAudioSec: 15, turns: 4 };
+  const d = pocCallUsageDelta(120, false, u, 'a');
+  assert.equal(d.pocTtsLiteInTokens, 400);
+  assert.equal(d.pocTtsLiteAudioSec, 15);
+  assert.equal(d.pocATtsAudioSec, 20);
+
+  const qa = pocCallUsageDelta(120, true, u, 'b');
+  assert.equal(qa.pocMinutes, undefined);
+  assert.equal(qa.pocTtsLiteInTokens, 400);
+  assert.equal(qa.pocTtsLiteAudioSec, 15);
+
+  const fields = buildUsageFields(d, (n) => n);
+  assert.equal(fields.pocTtsLiteInTokens, 400);
+  assert.equal(fields.pocTtsLiteAudioSec, 15);
+  const now = Date.now();
+  assert.ok(Math.abs((fields.estCostUsd as number) - pocCostUsd(u, now, 'a')) < 1e-9);
+  assert.ok(Math.abs(estimateCostUsd(d) - pocUsageCostUsd(d, now)) < 1e-9);
+
+  // Full call does not write lite fields
+  const fullOnly = pocCallUsageDelta(120, false, { ...emptyPocUsage(), ttsAudioSec: 20 }, 'a');
+  const fullFields = buildUsageFields(fullOnly, (n) => n);
+  assert.equal('pocTtsLiteInTokens' in fullFields, false);
+  assert.equal('pocTtsLiteAudioSec' in fullFields, false);
+
+  // priceUsage separates pocTtsLite from pocA and adds it to total
+  const month = {
+    liveMinutes: 0, sttMinutes: 0, textTokens: 0, ttsChars: 0, estCostUsd: 0,
+    pocATtsAudioSec: 40_000,
+    pocTtsLiteAudioSec: 40_000,
+  };
+  const b = priceUsage(month);
+  assert.ok(b.pocA > 0 && b.pocTtsLite > 0);
+  assert.ok(b.pocA > b.pocTtsLite, 'full TTS ($9) > lite TTS ($6)');
+  assert.ok(Math.abs(b.total - (b.pocA + b.pocTtsLite)) < 1e-9);
+
+  // pocFirstTtsOf
+  const log: string[] = [];
+  const pocLite = Object.assign(fakeProvider('poc', log), { getPocFirstTts: () => 'lite' as const });
+  const p = new PocFallbackProvider(() => pocLite as PocCapableProvider, () => fakeProvider('live', log));
+  await p.connect(opts([]));
+  assert.equal(pocFirstTtsOf(p), 'lite');
+  const noTag = new PocFallbackProvider(() => fakeProvider('poc', log) as PocCapableProvider, () => fakeProvider('live', log));
+  await noTag.connect(opts([]));
+  assert.equal(pocFirstTtsOf(noTag), 'full');
+  assert.equal(pocFirstTtsOf(fakeProvider('live', log)), 'full');
+  assert.equal(pocFirstTtsOf(null), 'full');
 });

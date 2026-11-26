@@ -4,6 +4,17 @@
 
 ---
 
+### [2026-11-27 KST] 시험 통화 엔진 첫 음성 구간 TTS 비교(`?pocTts=full|lite`)와 끼어들기 지표 분리
+- **배경**: 찬식님 08:13 「제안한 방식으로 qa를 해보자. 4.3초는 너무 길어」. A 기준 말 끝→첫 소리 중앙값 4.27초 중 음성 첫 조각이 2.38초. 제안 ②(첫 구간만 lite TTS) 측정용.
+- **선택**: 주소 `?pocTts=lite`면 매 튜터 턴(인사말 포함) 첫 구간만 `gemini-3.8-flash-lite-tts`, 나머지는 `gemini-3.8-flash-tts`, 같은 목소리. 없거나 `full`·잘못된 값이면 지금과 같음. 저장·설정 UI 없음. 브라우저는 `full`/`lite`만 보내고 서버가 모델 ID를 고름. 문장 자르기 규칙은 그대로(비교를 깨끗하게).
+- **공식 문서(ai.google.dev, 2026-11-27)**: lite TTS는 v1beta 필수(지금 음성 클라이언트가 이미 v1beta), API 스키마가 flash-tts와 같고 같은 30개 기본 목소리 지원. 단가 입력 $0.50·오디오 출력 $6.00/1M(2027-01-01부터 $1.00/$12.00), flash-tts는 $9.00($18.00). 문서는 lite를 「실시간 음성 에이전트 cascade」용, flash-tts를 「최고 음질」용으로 설명 → 목소리 결이 다를 수 있어 귀로 확인 필요.
+- **로그**: `[poc-tts] model=`, `[poc-turn] ttsModel=`, `[poc-summary] firstTts= ttsFirstModel= … textInterrupts=`(서버는 `ttsLiteAudioSec=` 추가), `[poc-usage] ttsLiteAudioSec= firstTts=`. `data-poc-summary`는 같은 줄을 그대로 담음.
+- **사용량**: lite 구간은 `pocTtsLiteInTokens`·`pocTtsLiteAudioSec`(텍스트 변형과 무관), 사용량 탭 새 행 「시험 통화 첫 음성(라이트)」. 「시험 통화 비용 A/B」는 full TTS만. QA 통화도 같은 규칙(토큰·초만). `firestore.rules` 변경 불필요.
+- **끼어들기 지표**: 글·버튼 입력 중단은 `textInterrupts`, 음성 끼어들기만 `bargeIns`. QA봇 글 입력 통화의 `bargeIns=1`은 이제 `textInterrupts=1`로 나온다(끊기는 원래 세지 않음).
+- **그대로 둔 것**: `models.ts`, `geminiLiveProvider.ts`, `server/liveConfig.ts`, `firestore.rules`, `audioPlaybackScheduler.ts` diff 0줄, 시험 엔진 기본 꺼짐, A 기본.
+
+---
+
 ### [2026-11-27 KST] 시험 통화 엔진 답변 모델 A 확정 표시
 - **결정(07:48, 찬식님, 영어학습봇 전달)**: 시험 엔진 답변 모델은 A(`gemini-3.8-flash`, thinking `low`)로 확정. 근거는 QA봇 변형당 10회 통화(글 입력, `?qa=1`): A는 의도한 교정 19/36을 하고 답의 81%가 1~2문장, B(`gemini-3.5-flash-lite`)는 교정 0/40.
 - **바꾼 것**: `POC_DEFAULT_TEXT_VARIANT`("a" 그대로) 위에 결정·근거 주석. 설정 「시험 엔진 답변 모델」(제목에서 「A/B 비교」 뺌) 선택지를 「A · 확정(기본)」·「B · 비교용」으로, 설명에 B는 직접 고르거나 `?pocText=b`일 때만 쓴다고 적음(`POC_TEXT_VARIANT_OPTION_LABELS`).

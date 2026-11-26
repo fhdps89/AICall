@@ -7,7 +7,9 @@ import {
   POC_STT_MODEL,
   POC_TEXT_VARIANTS,
   POC_TTS_MODEL,
+  parsePocFirstTts,
   parsePocTextVariant,
+  pocFirstTtsModel,
 } from '../src/config/cascadePoc.ts';
 import { normalizeVoiceName } from '../src/config/voices.ts';
 import { CascadeSession, createGeminiCascadeAi } from './cascadeSession.ts';
@@ -72,16 +74,19 @@ export function handleCascadeConnection(clientWs: CascadeClientSocket, deps: Cas
     if (msg.type === 'init') {
       if (initStarted) return;
       initStarted = true;
-      // Only "a"/"b" is read from the client; the model ID always comes from cascadePoc.ts.
+      // Only "a"/"b" and "full"/"lite" are read from the client; model IDs always come from cascadePoc.ts.
       const textVariant = parsePocTextVariant(msg.textVariant);
+      const firstTts = parsePocFirstTts(msg.firstTts);
+      const ttsFirstModel = pocFirstTtsModel(firstTts);
       const variant = POC_TEXT_VARIANTS[textVariant];
       const models: CascadeModels = {
         stt: POC_STT_MODEL,
         text: variant.model,
         tts: POC_TTS_MODEL,
+        ttsFirst: ttsFirstModel,
         thinkingLevel: variant.thinkingLevel,
       };
-      log(`[poc] stage=init_received variant=${textVariant} textModel=${models.text}`);
+      log(`[poc] stage=init_received variant=${textVariant} textModel=${models.text} firstTts=${firstTts} ttsFirstModel=${ttsFirstModel}`);
       const genAI = deps.getGenAI();
       if (!genAI) {
         log('[poc] stage=no_api_key -> fallback_required');
@@ -98,6 +103,7 @@ export function handleCascadeConnection(clientWs: CascadeClientSocket, deps: Cas
           voiceName: normalizeVoiceName(msg.voiceName),
           history: msg.history,
           textVariant,
+          firstTts,
         }
       );
       session.start().catch((err) => {
