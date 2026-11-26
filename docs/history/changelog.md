@@ -4,6 +4,11 @@
 
 ---
 
+### [2026-11-26 KST] `[boot]` 요약을 콘솔 없이도 읽기 (브랜치 `englead/boot-timing-readable-20261126`)
+- **증상**: 게시 사이트 https://aicall.ai.studio/ 에서 QA 브라우저 자동화가 info·log를 수집하지 않음(error·warning만). `[boot] auth=… data=… home=… mistakes=… lectureLocal=… lectureServer=…` `console.info`가 안 보이고, 페이지의 "Service Worker registered successfully" `console.log`도 안 보임. 로거는 번들에 있음.
+- **수정**: `src/services/perf/bootTiming.ts`의 `flush`가 같은 요약 문자열을 `<html data-boot-timing>`(`document.documentElement.dataset.bootTiming`)과 `window.__AICALL_BOOT__`에 둔다. `document`·`window`가 없으면 그 쓰기만 건너뛴다. `console.info`는 그대로 두고, URL에 `?qa=1`이 있을 때만 `console.warn`. 이 브라우저에 저장된 QA 플래그는 경고 조건이 아님.
+- **방어 조치**: `tests/bootTiming.test.ts`가 속성, `window.__AICALL_BOOT__`, `?qa=1`일 때만 경고, 그리고 기본 경로의 `console.info`를 확인.
+
 ### [2026-11-26 KST] 아침 강의 카드가 없는 강의를 잠깐 보여주고, `[boot]` 로그가 안 남던 문제 (브랜치 `englead/lecture-card-unknown-20261126`)
 - **증상**: 첫 방문에서 홈 아침 강의 카드가 약 2–5초 「아직 오늘 강의가 없어요」를 보인 뒤 실제 강의로 바뀜(카드는 5.2–7.3초에 자리 잡음). 같은 배포의 `[boot]` 한 줄은 라이브에서 한 번도 안 나옴. 페이지 로드 전에 콘솔을 붙잡아 둔 기록은 첫 방문 약 50초·새로고침 약 27초 동안 info가 0건이었고, 홈과 강의 카드는 약 7초 안에 자리 잡았음. 번들 `index-DOgNslPT.js`에는 로거가 들어 있음.
 - **원인 (강의 카드)**: `MorningLectureCard.tsx` `onLocal`이 로컬 문서가 없어도 `setLoading(false)`를 호출함(수정 전 120행). 헤드라인의 나머지 분기는 상태가 없으면 「아직 오늘 강의가 없어요」를 그림(수정 전 260행). 서버 확인(`needsServer`)이 아직 참이어도 빈 상태가 먼저 보임. 10초 제한에 걸리고 로컬 문서가 없으면 같은 빈 문구에 느린 안내만 붙음.

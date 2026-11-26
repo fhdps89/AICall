@@ -1,3 +1,5 @@
+import { parseQaParam } from "../../data/qaMode";
+
 export type BootPhase =
   | "auth"
   | "data"
@@ -5,6 +7,13 @@ export type BootPhase =
   | "mistakes"
   | "lectureLocal"
   | "lectureServer";
+
+declare global {
+  interface Window {
+    /** Flushed `[boot] ...` line. QA automation reads this when console.info is dropped. */
+    __AICALL_BOOT__?: string;
+  }
+}
 
 const BOOT_PHASES: readonly BootPhase[] = [
   "auth",
@@ -20,8 +29,27 @@ const BOOT_LOG_TIMEOUT_MS = 60_000;
 export type BootTimerFn = (cb: () => void, ms: number) => unknown;
 
 /**
+ * Put the flushed line where automation can read it without a console.
+ * `document` and `window` are guarded separately so Node tests can flush.
+ * `console.warn` fires only when the page URL has `?qa=1` (not the persisted QA flag).
+ */
+function publishBootSummary(summary: string): void {
+  if (typeof document !== "undefined" && document.documentElement) {
+    document.documentElement.dataset.bootTiming = summary;
+  }
+  if (typeof window !== "undefined") {
+    window.__AICALL_BOOT__ = summary;
+    const search = window.location?.search;
+    if (typeof search === "string" && parseQaParam(search) === "on") {
+      console.warn(summary);
+    }
+  }
+}
+
+/**
  * Create a per-page boot timing recorder that logs once when both `mistakes` and
  * `lectureServer` have settled, or after 60s if any phase lags.
+ * The same line is copied to `<html data-boot-timing>` and `window.__AICALL_BOOT__`.
  */
 export function createBootTimer(
   now: () => number,
@@ -41,11 +69,12 @@ export function createBootTimer(
       clearTimer(timeoutHandle);
       timeoutHandle = undefined;
     }
-    const summary = BOOT_PHASES.map((phase) => {
+    const summary = `[boot] ${BOOT_PHASES.map((phase) => {
       const value = marks[phase];
       return `${phase}=${value !== undefined ? `${Math.round(value)}ms` : "-"}`;
-    }).join(" ");
-    log(`[boot] ${summary}`);
+    }).join(" ")}`;
+    log(summary);
+    publishBootSummary(summary);
   };
 
   return (phase: BootPhase) => {

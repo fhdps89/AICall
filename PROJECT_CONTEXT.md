@@ -196,6 +196,9 @@
 - 배포 서버는 `node server.ts`(Node 타입 스트리핑, tsx 없음)로 실행된다. 서버가 불러오는 `src/` 모듈과 그 모듈이 다시 불러오는 상대 경로는 반드시 `.ts` 확장자를 붙인다(`tsconfig.json` `allowImportingTsExtensions: true`). 테스트는 tsx로 돌아 확장자 누락을 못 잡으므로 `tests/serverNodeImports.test.ts`가 순수 node로 서버 import 대상을 불러 확인한다.
 
 ## 5. 버전 히스토리
+- **v2.10.0 이후 수정(미배포) — `[boot]` 한 줄을 콘솔 밖에서도 읽기 (2026-11-26 KST, 브랜치 `englead/boot-timing-readable-20261126`)**:
+  - **원인**: 게시본 https://aicall.ai.studio/ 에서 QA 브라우저 자동화는 error·warning만 남기고 info·log는 비운다. `[boot]` 요약은 `console.info`라 `bootTiming.ts`가 번들에 있어도 기록에 안 남는다. 같은 이유로 페이지의 "Service Worker registered successfully" `console.log`도 안 보인다.
+  - **수정**: `flush`가 그 요약 문자열을 `document.documentElement.dataset.bootTiming`(`<html data-boot-timing>`)과 `window.__AICALL_BOOT__`에 쓴다. `document`와 `window`가 없으면(Node 테스트) 그 쓰기만 건너뛴다. `console.info`는 유지하고, 주소에 `?qa=1`이 있을 때만 같은 문자열을 `console.warn`으로 한 번 더 낸다. 저장된 QA 플래그는 보지 않는다.
 - **v2.10.0 이후 수정(미배포) — 아침 강의 미확정 상태와 `[boot]` 로그 (2026-11-26 KST, 브랜치 `englead/lecture-card-unknown-20261126`)**:
   - **강의 카드**: 로컬 문서가 없으면 `MorningLectureCard` `onLocal`이 `setLoading(false)`를 호출해, 서버 확인이 끝나기 전에 「아직 오늘 강의가 없어요」가 먼저 보였다(수정 전 120행·헤드라인 260행). `lectureCardView`가 `unknown` / `none` / `lecture`를 나누고, 문서가 없고 확인이 남았거나 10초 제한에 걸리면 「불러오는 중…」을 유지한다. 없음은 서버가 없다고 한 뒤(실패 시 로컬 폴백 포함)에만 보인다. 제한에 걸리고 문서가 없으면 기존 「확인이 늦어지고 있어요. 잠시 후 다시 열어 주세요」를 쓴다. 10초 제한은 그대로다.
   - **`[boot]`**: 한 줄 로그는 `mistakes`와 `lectureServer`가 둘 다 찍혀야 `flush`가 돈다(`bootTiming.ts`, 아니면 60초). 두 표시가 카드의 `canApply`/`isCurrent()` 뒤에 있어(수정 전 `MorningLectureCard.tsx` 140–141행, `HomeScreen.tsx` 182–185행), 첫 그리기가 홈을 올렸다가 `dataLoading`으로 내리는 경로(`App.tsx` 116·234·675행, 정리 174·289행)에서는 조회가 끝나도 표시가 빠졌다. 실수 조회 실패 catch에도 표시가 없었다. 콘솔을 지우거나 감싸지 않았고, 타이머는 첫 표시 때 60초로 잡힌다. QA가 본 50초·27초 구간은 그 전이라 info가 0건이었다. 이제 `loadLectureForCard`가 끝날 때 `lectureServer`를, `settleBootPhase`가 성공·실패 모두 `mistakes`를 카드 수락 전에 찍는다. 페이지 타이머는 `unref`하지 않는다. 로그는 페이지당 한 번.
