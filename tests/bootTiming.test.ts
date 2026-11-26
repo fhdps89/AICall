@@ -1,6 +1,106 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createBootTimer, shouldUnrefBootTimer } from "../src/services/perf/bootTiming.ts";
+import { createBootTimer, markBoot, shouldUnrefBootTimer } from "../src/services/perf/bootTiming.ts";
+
+const FULL_LINE =
+  "[boot] auth=20ms data=30ms home=40ms mistakes=60ms lectureLocal=50ms lectureServer=70ms";
+
+interface BootHtml {
+  dataset: { bootTiming?: string };
+  getAttribute(name: string): string | null;
+}
+
+/** Stand-in for `<html>`: assigning `dataset.bootTiming` sets `data-boot-timing`. */
+function bootHtml(): BootHtml {
+  const attrs = new Map<string, string>();
+  const dataset = {};
+  Object.defineProperty(dataset, "bootTiming", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      return attrs.get("data-boot-timing");
+    },
+    set(value: string) {
+      attrs.set("data-boot-timing", String(value));
+    },
+  });
+  return {
+    dataset: dataset as { bootTiming?: string },
+    getAttribute: (name: string) => attrs.get(name) ?? null,
+  };
+}
+
+function bootWindow(search: string | undefined): Window {
+  const win: { __AICALL_BOOT__?: string; location?: { search: string } } = {};
+  if (search !== undefined) win.location = { search };
+  return win as unknown as Window;
+}
+
+function withBootPage(
+  page: { html: BootHtml | null | "bare"; win: Window | null; storage?: Storage },
+  run: () => void
+): void {
+  const g = globalThis as unknown as {
+    document?: Document;
+    window?: Window;
+    localStorage?: Storage;
+  };
+  const hadDocument = Object.prototype.hasOwnProperty.call(g, "document");
+  const hadWindow = Object.prototype.hasOwnProperty.call(g, "window");
+  const hadStorage = Object.prototype.hasOwnProperty.call(g, "localStorage");
+  const prevDocument = g.document;
+  const prevWindow = g.window;
+  const prevStorage = g.localStorage;
+  if (page.html === "bare") g.document = {} as Document;
+  else if (page.html) g.document = { documentElement: page.html } as unknown as Document;
+  else delete g.document;
+  if (page.win) g.window = page.win;
+  else delete g.window;
+  if (page.storage) g.localStorage = page.storage;
+  else if (!hadStorage) delete g.localStorage;
+  try {
+    run();
+  } finally {
+    if (hadDocument) g.document = prevDocument;
+    else delete g.document;
+    if (hadWindow) g.window = prevWindow;
+    else delete g.window;
+    if (hadStorage) g.localStorage = prevStorage;
+    else delete g.localStorage;
+  }
+}
+
+function flushFullLine(log: (msg: string) => void): { late: () => void; again: () => void } {
+  let tick = 10;
+  let timerCb: (() => void) | undefined;
+  const mark = createBootTimer(
+    () => (tick += 10),
+    log,
+    (cb) => {
+      timerCb = cb;
+      return 1;
+    }
+  );
+  mark("auth");
+  mark("data");
+  mark("home");
+  mark("lectureLocal");
+  mark("mistakes");
+  mark("lectureServer");
+  return {
+    late: () => timerCb?.(),
+    again: () => mark("home"),
+  };
+}
+
+const persistedQa = {
+  getItem: (key: string) => (key === "oc_qa_mode" ? "1" : null),
+  setItem() {},
+  removeItem() {},
+  clear() {},
+  key: () => null,
+  length: 0,
+} as Storage;
 
 test("records only first call per phase and logs once when mistakes and lectureServer are marked", () => {
   let tick = 10;
@@ -110,4 +210,165 @@ test("unref is for Node test timers only; a page keeps the 60s fallback", () => 
   assert.equal(shouldUnrefBootTimer(handle, { window: false, node: true }), true);
   assert.equal(shouldUnrefBootTimer(handle, { window: false, node: false }), false);
   assert.equal(shouldUnrefBootTimer(1, { window: false, node: true }), false);
+});
+
+test("flush writes the summary to data-boot-timing and window.__AICALL_BOOT__", () => {
+  const html = bootHtml();
+  const win = bootWindow("");
+  const logs: string[] = [];
+  const warns: string[] = [];
+  const originalWarn = console.warn;
+  const originalInfo = console.info;
+  console.warn = (msg?: unknown) => {
+    warns.push(String(msg));
+  };
+  console.info = (msg?: unknown) => {
+    logs.push(`info:${String(msg)}`);
+  };
+  try {
+    withBootPage({ html, win, storage: persistedQa }, () => {
+      const flushed = flushFullLine((msg) => logs.push(msg));
+      assert.equal(logs.length, 1);
+      assert.equal(logs[0], FULL_LINE);
+      assert.equal(html.dataset.bootTiming, FULL_LINE);
+      assert.equal(html.getAttribute("data-boot-timing"), FULL_LINE);
+      assert.equal(win.__AICALL_BOOT__, FULL_LINE);
+      assert.deepEqual(warns, []);
+      flushed.late();
+      flushed.again();
+      assert.equal(html.dataset.bootTiming, FULL_LINE);
+      assert.equal(win.__AICALL_BOOT__, FULL_LINE);
+      assert.deepEqual(warns, []);
+    });
+  } finally {
+    console.warn = originalWarn;
+    console.info = originalInfo;
+  }
+  assert.equal(logs.some((line) => line.startsWith("info:")), false);
+});
+
+test("flush warns the same summary only when the URL has ?qa=1", () => {
+  const cases: { search: string | undefined; warn: boolean }[] = [
+    { search: "?qa=1", warn: true },
+    { search: "?x=2&qa=1", warn: true },
+    { search: "qa=1", warn: true },
+    { search: "?qa=0", warn: false },
+    { search: "?qa=yes", warn: false },
+    { search: "?qa=10", warn: false },
+    { search: "", warn: false },
+    { search: undefined, warn: false },
+  ];
+
+  for (const item of cases) {
+    const html = bootHtml();
+    const win = bootWindow(item.search);
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (msg?: unknown) => {
+      warns.push(String(msg));
+    };
+    try {
+      withBootPage({ html, win, storage: persistedQa }, () => {
+        const flushed = flushFullLine(() => {});
+        if (item.warn) {
+          assert.deepEqual(warns, [FULL_LINE], `search ${item.search}`);
+        } else {
+          assert.deepEqual(warns, [], `search ${String(item.search)}`);
+        }
+        assert.equal(html.getAttribute("data-boot-timing"), FULL_LINE);
+        assert.equal(win.__AICALL_BOOT__, FULL_LINE);
+        flushed.late();
+        flushed.again();
+        assert.equal(warns.length, item.warn ? 1 : 0);
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+  }
+});
+
+test("flush skips a missing document or window and still logs", () => {
+  const warns: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (msg?: unknown) => {
+    warns.push(String(msg));
+  };
+  try {
+    const html = bootHtml();
+    withBootPage({ html, win: null }, () => {
+      const logs: string[] = [];
+      flushFullLine((msg) => logs.push(msg));
+      assert.deepEqual(logs, [FULL_LINE]);
+      assert.equal(html.getAttribute("data-boot-timing"), FULL_LINE);
+      assert.equal(html.dataset.bootTiming, FULL_LINE);
+      assert.deepEqual(warns, []);
+    });
+
+    const win = bootWindow("?qa=1");
+    withBootPage({ html: null, win }, () => {
+      const logs: string[] = [];
+      flushFullLine((msg) => logs.push(msg));
+      assert.deepEqual(logs, [FULL_LINE]);
+      assert.equal(win.__AICALL_BOOT__, FULL_LINE);
+      assert.deepEqual(warns, [FULL_LINE]);
+    });
+
+    const bareWin = bootWindow("?qa=1");
+    withBootPage({ html: "bare", win: bareWin }, () => {
+      const logs: string[] = [];
+      flushFullLine((msg) => logs.push(msg));
+      assert.deepEqual(logs, [FULL_LINE]);
+      assert.equal(bareWin.__AICALL_BOOT__, FULL_LINE);
+      assert.deepEqual(warns, [FULL_LINE, FULL_LINE]);
+    });
+
+    withBootPage({ html: null, win: null }, () => {
+      const logs: string[] = [];
+      flushFullLine((msg) => logs.push(msg));
+      assert.deepEqual(logs, [FULL_LINE]);
+      assert.deepEqual(warns, [FULL_LINE, FULL_LINE]);
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("default markBoot keeps console.info and mirrors the line, warning only for ?qa=1", () => {
+  const html = bootHtml();
+  const win = bootWindow("?qa=1");
+  const infos: string[] = [];
+  const warns: string[] = [];
+  const originalInfo = console.info;
+  const originalWarn = console.warn;
+  console.info = (msg?: unknown) => {
+    infos.push(String(msg));
+  };
+  console.warn = (msg?: unknown) => {
+    warns.push(String(msg));
+  };
+  try {
+    withBootPage({ html, win }, () => {
+      markBoot("auth");
+      markBoot("data");
+      markBoot("home");
+      markBoot("mistakes");
+      markBoot("lectureLocal");
+      markBoot("lectureServer");
+      assert.equal(infos.length, 1);
+      assert.match(
+        infos[0],
+        /^\[boot\] auth=\d+ms data=\d+ms home=\d+ms mistakes=\d+ms lectureLocal=\d+ms lectureServer=\d+ms$/
+      );
+      assert.equal(html.dataset.bootTiming, infos[0]);
+      assert.equal(html.getAttribute("data-boot-timing"), infos[0]);
+      assert.equal(win.__AICALL_BOOT__, infos[0]);
+      assert.deepEqual(warns, [infos[0]]);
+      markBoot("home");
+      assert.equal(infos.length, 1);
+      assert.equal(warns.length, 1);
+    });
+  } finally {
+    console.info = originalInfo;
+    console.warn = originalWarn;
+  }
 });
