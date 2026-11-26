@@ -10,11 +10,12 @@ const root = path.resolve(import.meta.dirname, "..");
 
 /**
  * HomeScreen and MorningLectureCard used to mark only after isCurrent/canApply.
- * A superseded mount (or a thrown mistakes read) settled the screen and skipped
- * the mark, so flush never ran. These calls are that seam: the test discards
- * the results the way those guards do, and does not call markBoot itself.
+ * App marked `data` only after loadProfileAndGoals and isActive(). A superseded
+ * effect (or a thrown read) skipped the mark, and flush used to run on mistakes
+ * plus lectureServer alone. These calls are that seam: the test discards the
+ * results the way those guards do, and does not call markBoot itself.
  */
-test("discarded lecture and mistakes reads still log [boot] once", async () => {
+test("a stale profile load still records data, and flush waits for it", async () => {
   const logs: string[] = [];
   const original = console.info;
   console.info = (msg?: unknown) => {
@@ -50,13 +51,29 @@ test("discarded lecture and mistakes reads still log [boot] once", async () => {
     );
 
     await mistakes;
-    assert.equal(logs.length, 0);
-
     await lecture;
+    assert.equal(logs.length, 0, "flush waits until data settles");
+
+    let passedGuard = false;
+    const loaded = await settleBootPhase("data", async () => ({
+      profile: { email: "a@b.c" },
+      goals: [],
+    })).then((result) => {
+      assert.equal(logs.length, 1, "data is marked before the stale guard");
+      const isActive = false;
+      if (!isActive) return null;
+      passedGuard = true;
+      return result;
+    });
+
+    assert.equal(passedGuard, false);
+    assert.equal(loaded, null);
     assert.equal(logs.length, 1);
     assert.match(logs[0], /^\[boot\] /);
+    assert.match(logs[0], /data=\d+ms/);
     assert.match(logs[0], /mistakes=\d+ms/);
     assert.match(logs[0], /lectureServer=\d+ms/);
+    assert.doesNotMatch(logs[0], /data=-/);
     assert.doesNotMatch(logs[0], /mistakes=-/);
     assert.doesNotMatch(logs[0], /lectureServer=-/);
 
@@ -73,7 +90,8 @@ test("discarded lecture and mistakes reads still log [boot] once", async () => {
   }
 });
 
-test("HomeScreen and MorningLectureCard mark through the settle seam, not after the accept guard", () => {
+test("HomeScreen, MorningLectureCard, and App mark through the settle seam, not after the accept guard", () => {
+  const app = fs.readFileSync(path.join(root, "src/App.tsx"), "utf8");
   const home = fs.readFileSync(path.join(root, "src/ui/home/HomeScreen.tsx"), "utf8");
   const card = fs.readFileSync(
     path.join(root, "src/ui/lecture/MorningLectureCard.tsx"),
@@ -83,6 +101,13 @@ test("HomeScreen and MorningLectureCard mark through the settle seam, not after 
     path.join(root, "src/services/lecture/lectureCardLoad.ts"),
     "utf8"
   );
+
+  const dataSettle = app.indexOf('settleBootPhase("data"');
+  const activeGuard = app.indexOf("if (!isActive()) return;");
+  assert.ok(dataSettle > -1, "App should settle the data phase around loadProfileAndGoals");
+  assert.ok(activeGuard > dataSettle, "isActive() runs after settleBootPhase marks data");
+  assert.equal(app.includes('markBoot("data")'), false);
+  assert.ok(app.indexOf("loadProfileAndGoals(") > dataSettle);
 
   assert.match(home, /settleBootPhase\(\s*"mistakes"/);
   assert.match(home, /settleBootPhase\(\s*"mistakes"[\s\S]{0,160}if \(!isCurrent\(\)\) return/);
