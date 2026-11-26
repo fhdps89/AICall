@@ -1,8 +1,33 @@
 export const POC_VOICE_ADDENDUM =
   "Voice call output rules: Your reply will be spoken aloud by text-to-speech on a phone call. " +
-  "Answer in 1 to 3 short, natural spoken sentences. " +
+  "Say 1 to 2 short, natural spoken sentences (about 25 words in total), and end with exactly one open question " +
+  "(except when giving the requested feedback or model answer for a button command). " +
   "Do not use markdown, bullet lists, numbered lists, emoji, or stage directions. " +
   "Keep Korean only where the instructions specifically ask for Korean explanations.";
+
+export const TTS_FIRST_SEGMENT_MIN_CHARS = 80;
+
+export function takeFirstSpeechSegment(
+  sentences: string[],
+  streamDone: boolean,
+): { segment: string; used: number } | null {
+  if (sentences.length === 0) return null;
+  let joined = "";
+  const limit = Math.min(sentences.length, 2);
+  for (let i = 0; i < limit; i++) {
+    joined = i === 0 ? sentences[i] : `${joined} ${sentences[i]}`;
+    if (joined.length >= TTS_FIRST_SEGMENT_MIN_CHARS) {
+      return { segment: joined, used: i + 1 };
+    }
+  }
+  if (sentences.length >= 2) {
+    return { segment: `${sentences[0]} ${sentences[1]}`, used: 2 };
+  }
+  if (streamDone) {
+    return { segment: sentences.join(" "), used: sentences.length };
+  }
+  return null;
+}
 
 const ABBREVIATIONS = new Set([
   "mr.",
@@ -322,6 +347,18 @@ export function percentile(xs: number[], p: number): number {
 
 export function median(xs: number[]): number {
   return percentile(xs, 50);
+}
+
+/**
+ * Gemini 3.6+ rejects a request whose last non-empty turn is the model's (prefill → 400).
+ * The session always pushes the user turn first, so this only guards unexpected states; the
+ * placeholder is request-only and never stored in history.
+ */
+export function endWithUserTurn<T extends { role: "user" | "model"; parts: [{ text: string }] }>(
+  contents: T[],
+): Array<T | { role: "user"; parts: [{ text: string }] }> {
+  if (contents.length === 0 || contents[contents.length - 1].role === "user") return contents;
+  return [...contents, { role: "user", parts: [{ text: "(continue)" }] }];
 }
 
 export function estimateTextTokens(text: string): number {

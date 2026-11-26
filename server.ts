@@ -265,7 +265,9 @@ setAfterAuthHook(async (idToken, user) => {
 
 // Initialize GoogleGenAI client with official header
 // Server key only: client-supplied API keys are no longer accepted (no client sends one).
-function createGenAI() {
+// apiVersion is only passed by the test-engine (cascade) speech client: 3.8 TTS streaming lives on
+// v1beta (Interactions API). Every other caller keeps the SDK default.
+function createGenAI(apiVersion?: string) {
   const apiKey = resolveGeminiApiKey();
 
   if (!isUsableKey(apiKey)) return null;
@@ -273,6 +275,7 @@ function createGenAI() {
   return new GoogleGenAI({
     apiKey,
     httpOptions: {
+      ...(apiVersion ? { apiVersion } : {}),
       headers: {
         'User-Agent': 'aistudio-build',
       },
@@ -1734,7 +1737,7 @@ async function startServer() {
   // developer switch is on in the browser. Same auth and Live session rate limit as /live.
   const cascadeWss = new WebSocketServer({ noServer: true });
   cascadeWss.on('connection', (clientWs: WebSocket) => {
-    handleCascadeConnection(clientWs, { getGenAI: createGenAI });
+    handleCascadeConnection(clientWs, { getGenAI: () => createGenAI(), getTtsGenAI: () => createGenAI('v1beta') });
   });
 
   server.on('upgrade', (request, socket, head) => {

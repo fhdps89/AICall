@@ -102,7 +102,7 @@ test('connect: init on the cascade path, kickoff after ready, connected only aft
     const ws = FakeWs.all[0];
     assert.match(ws.url, /^wss:\/\/app\.test\/api\/gemini\/cascade\?token=/);
     ws.open();
-    assert.deepEqual(ws.sent[0], { type: 'init', systemInstruction: 'SYS', voiceName: 'Kore', history: [] });
+    assert.deepEqual(ws.sent[0], { type: 'init', systemInstruction: 'SYS', voiceName: 'Kore', history: [], textVariant: 'a' });
     ws.push({ type: 'ready' });
     await tick();
     assert.equal(ws.sent[1].type, 'text_prompt', 'kickoff sent after ready');
@@ -189,35 +189,127 @@ test('hang-up during connect: no fallback to the normal engine', async () => {
   assert.equal(liveMade, 0);
 });
 
-test('mic opens only after the first tutor audio: never on fallback, once on success', async () => {
-  const withMic = (statuses: string[]) => ({ ...opts(statuses), skipMic: false, onMicWarning() {} });
-  FakeWs.all = [];
-  micOpens = 0;
-  const failing = new CascadePocProvider({ connectBudgetMs: 50 });
-  await quiet(async () => {
-    const done = failing.connect(withMic([])).catch(() => {});
-    await tick();
-    FakeWs.all[0].open();
-    FakeWs.all[0].push({ type: 'ready' });
-    await done; // budget runs out without tutor audio
-  });
-  assert.equal(micOpens, 0, 'fallback path never touched the mic');
+class FakeAudioCtx {
+  state = 'running';
+  currentTime = 0;
+  destination = {};
+  async resume() {}
+  async close() {}
+  createMediaStreamSource() {
+    return { connect() {}, disconnect() {} };
+  }
+  createMediaStreamDestination() {
+    return { stream: { id: 'rec' } };
+  }
+  createScriptProcessor() {
+    const node = { connect() {}, disconnect() {}, onaudioprocess: null as any };
+    FakeAudioCtx.processors.push(node);
+    return node;
+  }
+  createBuffer(_c: number, length: number, rate: number) {
+    return { duration: length / rate, getChannelData: () => new Float32Array(length) };
+  }
+  createBufferSource() {
+    return { buffer: null, connect() {}, start() {}, stop() {}, onended: null };
+  }
+  createGain() {
+    return { gain: { value: 1 }, connect() {} };
+  }
+  static processors: { onaudioprocess: any }[] = [];
+}
+const micFrame = () => ({ inputBuffer: { getChannelData: () => new Float32Array(2048).fill(0.1) } });
 
-  FakeWs.all = [];
-  const ok = new CascadePocProvider({ connectBudgetMs: 2000 });
-  await quiet(async () => {
-    const statuses: string[] = [];
-    const done = ok.connect(withMic(statuses));
-    await tick();
-    FakeWs.all[0].open();
-    FakeWs.all[0].push({ type: 'ready' });
-    await tick();
-    assert.equal(micOpens, 0, 'not before the first tutor audio');
-    FakeWs.all[0].push({ type: 'audio', audio: Buffer.alloc(4).toString('base64'), mimeType: 'audio/pcm;rate=24000' });
-    await done;
+test('mic handoff: opened at connect start, never attached or left open on fallback, attached once on success', async () => {
+  const win = (globalThis as any).window;
+  win.AudioContext = FakeAudioCtx;
+  const realNav = (globalThis as any).navigator;
+  const tracks: { stopped: boolean }[] = [];
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: {
+      mediaDevices: {
+        getUserMedia: async () => {
+          micOpens++;
+          const tr = { stopped: false, stop() { tr.stopped = true; } };
+          tracks.push(tr);
+          return { getTracks: () => [tr] };
+        },
+      },
+    },
   });
-  assert.equal(micOpens, 1);
-  await quiet(() => ok.disconnect());
+  try {
+    const ready: unknown[] = [];
+    const withMic = (statuses: string[]) => ({
+      ...opts(statuses),
+      skipMic: false,
+      onMicWarning() {},
+      onMediaStreamReady: (s: unknown) => void ready.push(s),
+    });
+
+    // 1) Fallback: the mic opened in parallel is stopped before the wrapper starts the normal engine.
+    FakeWs.all = [];
+    micOpens = 0;
+    let liveConnectSawOpenMic: boolean | null = null;
+    const fake = {
+      name: 'gemini-live-fake',
+      async connect() {
+        liveConnectSawOpenMic = tracks.some((tr) => !tr.stopped);
+      },
+      async disconnect() {},
+      sendAudioChunk() {},
+      sendTextPrompt: () => true,
+      appendUserText() {},
+      sendControlCommand: () => true,
+      getLiveTranscript: () => [],
+      getResumeToken: () => null,
+      getMediaStream: () => null,
+      getConnectionStats: () => ({}),
+    } as any;
+    const wrapper = new PocFallbackProvider(
+      () => new CascadePocProvider({ connectBudgetMs: 60 }),
+      () => fake
+    );
+    await quiet(async () => {
+      const done = wrapper.connect(withMic([]));
+      await tick();
+      assert.equal(micOpens, 1, 'mic opens at connect start, before ready');
+      FakeWs.all[0].open();
+      FakeWs.all[0].push({ type: 'ready' });
+      await done; // budget runs out without tutor audio -> fallback
+    });
+    assert.equal(liveConnectSawOpenMic, false, 'the PoC mic was stopped before the normal engine connected');
+    assert.equal(ready.length, 0, 'no recorder was attached to the PoC mic on fallback');
+
+    // 2) Success: one mic, recorder attached exactly once, only after the first tutor audio.
+    FakeWs.all = [];
+    micOpens = 0;
+    tracks.length = 0;
+    FakeAudioCtx.processors = [];
+    const ok = new CascadePocProvider({ connectBudgetMs: 2000 });
+    await quiet(async () => {
+      const done = ok.connect(withMic([]));
+      await tick();
+      const proc = FakeAudioCtx.processors.at(-1)!;
+      FakeWs.all[0].open();
+      proc.onaudioprocess(micFrame());
+      assert.equal(FakeWs.all[0].sent.filter((m) => m.type === 'realtime_audio').length, 0, 'no mic audio before ready');
+      FakeWs.all[0].push({ type: 'ready' });
+      await tick();
+      assert.equal(micOpens, 1);
+      assert.equal(ready.length, 0, 'recorder waits for the engine to be committed');
+      proc.onaudioprocess(micFrame());
+      assert.equal(FakeWs.all[0].sent.filter((m) => m.type === 'realtime_audio').length, 1, 'mic audio flows after ready');
+      FakeWs.all[0].push({ type: 'audio', audio: Buffer.alloc(4).toString('base64'), mimeType: 'audio/pcm;rate=24000' });
+      await done;
+    });
+    assert.equal(micOpens, 1);
+    assert.equal(ready.length, 1);
+    await quiet(() => ok.disconnect());
+    assert.ok(tracks.every((tr) => tr.stopped), 'hang-up releases the mic');
+  } finally {
+    delete win.AudioContext;
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: realNav });
+  }
 });
 
 test('hang-up during the handshake ends connect at once with POC_CANCELLED', async () => {
@@ -233,4 +325,273 @@ test('hang-up during the handshake ends connect at once with POC_CANCELLED', asy
   });
   assert.equal(err?.code, 'POC_CANCELLED');
   assert.ok(Date.now() - t0 < 1000, 'did not wait for the 8 s budget');
+});
+
+test('playback diagnostics: one [poc-play] line per tutor turn with chunk and underrun counts', async () => {
+  const win = (globalThis as any).window;
+  win.AudioContext = FakeAudioCtx;
+  const lines: string[] = [];
+  try {
+    FakeWs.all = [];
+    const p = new CascadePocProvider({ connectBudgetMs: 2000 });
+    await quiet(async () => {
+      const ws = await connected(p, []);
+      const chunk = { type: 'audio', audio: Buffer.alloc(480).toString('base64'), mimeType: 'audio/pcm;rate=24000' };
+      ws.push(chunk);
+      ws.push(chunk);
+      const orig = console.log;
+      console.log = (...a: unknown[]) => void lines.push(a.join(' '));
+      try {
+        ws.push({ type: 'turnComplete' });
+        ws.push(chunk);
+        ws.push({ type: 'turnComplete' });
+      } finally {
+        console.log = orig;
+      }
+      await p.disconnect();
+    });
+  } finally {
+    delete win.AudioContext;
+  }
+  const play = lines.filter((l) => l.startsWith('[poc-play]'));
+  assert.equal(play.length, 2);
+  assert.match(play[0], /^\[poc-play\] n=1 chunks=3 underruns=\d+ gaps=0 leadMs=\d+$/);
+  assert.match(play[1], /^\[poc-play\] n=2 chunks=1 underruns=\d+ gaps=0 leadMs=\d+$/);
+});
+
+test('mic edge cases: permission prompt still open at fallback, and a denied mic', async () => {
+  const win = (globalThis as any).window;
+  win.AudioContext = FakeAudioCtx;
+  const realNav = (globalThis as any).navigator;
+  let grant!: () => void;
+  const track = { stopped: false, stop() { track.stopped = true; } };
+  let deny = false;
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: {
+      mediaDevices: {
+        getUserMedia: () => {
+          if (deny) return Promise.reject(Object.assign(new Error('denied'), { name: 'NotAllowedError' }));
+          return new Promise((r) => (grant = () => r({ getTracks: () => [track] })));
+        },
+      },
+    },
+  });
+  try {
+    // 1) Prompt still open when the budget runs out: the late grant is released before Live connects.
+    FakeWs.all = [];
+    const order: string[] = [];
+    const ready: unknown[] = [];
+    const fake = {
+      name: 'gemini-live-fake',
+      async connect() {
+        order.push(`live.connect stopped=${track.stopped}`);
+      },
+      async disconnect() {},
+    } as any;
+    const wrapper = new PocFallbackProvider(() => new CascadePocProvider({ connectBudgetMs: 40 }), () => fake);
+    await quiet(async () => {
+      const done = wrapper.connect({ ...opts([]), skipMic: false, onMicWarning() {}, onMediaStreamReady: (s: unknown) => void ready.push(s) });
+      await tick();
+      FakeWs.all[0].open();
+      FakeWs.all[0].push({ type: 'ready' });
+      await new Promise((r) => setTimeout(r, 80)); // budget gone, wrapper is in poc.disconnect waiting for the prompt
+      grant();
+      await done;
+    });
+    assert.deepEqual(order, ['live.connect stopped=true']);
+    assert.equal(ready.length, 0);
+
+    // 2) Denied mic: the call still connects (tutor audible) and the user gets the warning once.
+    deny = true;
+    FakeWs.all = [];
+    const warnings: string[] = [];
+    const statuses: string[] = [];
+    const p = new CascadePocProvider({ connectBudgetMs: 2000 });
+    await quiet(async () => {
+      const done = p.connect({ ...opts(statuses), skipMic: false, onMicWarning: (m: string) => void warnings.push(m) });
+      await tick();
+      FakeWs.all[0].open();
+      FakeWs.all[0].push({ type: 'ready' });
+      await tick();
+      FakeWs.all[0].push({ type: 'audio', audio: Buffer.alloc(4).toString('base64'), mimeType: 'audio/pcm;rate=24000' });
+      await done;
+      await p.disconnect();
+    });
+    assert.ok(statuses.includes('connected'));
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /마이크 권한/);
+  } finally {
+    delete win.AudioContext;
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: realNav });
+  }
+});
+
+test('playback diagnostics: an interrupted turn is logged on its own and does not leak into the next', async () => {
+  const win = (globalThis as any).window;
+  win.AudioContext = FakeAudioCtx;
+  const lines: string[] = [];
+  try {
+    FakeWs.all = [];
+    const p = new CascadePocProvider({ connectBudgetMs: 2000 });
+    await quiet(async () => {
+      const ws = await connected(p, []);
+      const chunk = { type: 'audio', audio: Buffer.alloc(480).toString('base64'), mimeType: 'audio/pcm;rate=24000' };
+      ws.push({ type: 'turnComplete' });
+      ws.push(chunk);
+      ws.push(chunk);
+      const orig = console.log;
+      console.log = (...a: unknown[]) => void lines.push(a.join(' '));
+      try {
+        ws.push({ type: 'interrupted' });
+        ws.push(chunk);
+        ws.push({ type: 'turnComplete' });
+      } finally {
+        console.log = orig;
+      }
+      await p.disconnect();
+    });
+  } finally {
+    delete win.AudioContext;
+  }
+  const play = lines.filter((l) => l.startsWith('[poc-play]'));
+  assert.equal(play.length, 2);
+  assert.match(play[0], /^\[poc-play\] n=2 chunks=2 .* interrupted=1$/);
+  assert.match(play[1], /^\[poc-play\] n=3 chunks=1 underruns=\d+ gaps=0 leadMs=\d+$/);
+});
+
+test('playback diagnostics count real underruns and 1 s+ holes per turn, and reset at a reconnect', async () => {
+  const win = (globalThis as any).window;
+  win.AudioContext = FakeAudioCtx;
+  const lines: string[] = [];
+  let ctx: FakeAudioCtx | null = null;
+  const RealCtx = FakeAudioCtx;
+  win.AudioContext = class extends RealCtx {
+    constructor() {
+      super();
+      ctx = this;
+    }
+  };
+  try {
+    FakeWs.all = [];
+    const p = new CascadePocProvider({ connectBudgetMs: 2000, reconnectDelayMs: 1 } as any);
+    await quiet(async () => {
+      const ws = await connected(p, []);
+      ws.push({ type: 'turnComplete' });
+      // 0.1 s chunks (2400 samples at 24 kHz).
+      const chunk = { type: 'audio', audio: Buffer.alloc(4800).toString('base64'), mimeType: 'audio/pcm;rate=24000' };
+      const orig = console.log;
+      console.log = (...a: unknown[]) => void lines.push(a.join(' '));
+      try {
+        ctx!.currentTime = 10;
+        ws.push(chunk); // new utterance (first chunk of the turn)
+        ctx!.currentTime = 10.5; // past the scheduled end (≈10.22) but < 1 s later → underrun
+        ws.push(chunk);
+        ctx!.currentTime = 12; // > 1 s after the scheduled end → audible hole (gap)
+        ws.push(chunk);
+        ws.push({ type: 'turnComplete' });
+        ctx!.currentTime = 12.1;
+        ws.push(chunk); // next turn, partial
+      } finally {
+        console.log = orig;
+      }
+      const lines2: string[] = [];
+      console.log = (...a: unknown[]) => void lines2.push(a.join(' '));
+      const warn = console.warn;
+      console.warn = (...a: unknown[]) => void lines2.push(a.join(' '));
+      try {
+        ws.drop(); // reconnect: the half-played turn is logged on its own
+      } finally {
+        console.log = orig;
+        console.warn = warn;
+      }
+      lines.push(...lines2);
+      await p.disconnect();
+    });
+  } finally {
+    delete win.AudioContext;
+  }
+  const play = lines.filter((l) => l.startsWith('[poc-play]'));
+  assert.match(play[0], /^\[poc-play\] n=2 chunks=3 underruns=1 gaps=1 leadMs=\d+$/);
+  assert.match(play[1], /^\[poc-play\] n=3 chunks=1 underruns=0 gaps=0 leadMs=\d+ interrupted=1$/);
+});
+
+test('A/B: the chosen variant is logged at call start, sent as "a"/"b" only, and summarized on hang-up', async () => {
+  FakeWs.all = [];
+  const lines: string[] = [];
+  const p = new CascadePocProvider({
+    connectBudgetMs: 2000,
+    resolveTextVariant: () => ({ variant: 'b', source: 'url' }),
+  });
+  const orig = { log: console.log, warn: console.warn, error: console.error };
+  console.log = (...a: unknown[]) => void lines.push(a.join(' '));
+  console.warn = console.error = () => {};
+  try {
+    const ws = await connected(p, []);
+    assert.equal(ws.sent[0].textVariant, 'b');
+    assert.equal(Object.values(ws.sent[0]).some((v) => typeof v === 'string' && v.startsWith('gemini-')), false, 'no model ID from the client');
+    assert.equal(p.getPocTextVariant(), 'b');
+    const turn = (n: number, f2t: number, tts: number, f2a: number) =>
+      ws.push({ type: 'poc_turn', turn: n, interimToFinalMs: 0, finalToTokenMs: f2t, tokenToAudioMs: 0, ttsFirstChunkMs: tts, finalToAudioMs: f2a, echoDrops: n, ttsStreams: n + 1, bargeIns: 0 });
+    turn(1, 900, 400, 1500);
+    turn(2, 1100, 600, 1900);
+    turn(3, 2000, 500, 2600);
+    await p.disconnect();
+  } finally {
+    Object.assign(console, orig);
+  }
+  assert.ok(lines.includes('[poc] variant=b textModel=gemini-3.5-flash-lite source=url'));
+  assert.ok(lines.some((l) => /^\[poc-turn\] n=2 variant=b .*finalToToken=1100ms .*ttsFirstChunk=600ms finalToAudio=1900ms$/.test(l)));
+  const summary = lines.filter((l) => l.startsWith('[poc-summary]'));
+  assert.equal(summary.length, 1);
+  assert.equal(
+    summary[0],
+    '[poc-summary] variant=b textModel=gemini-3.5-flash-lite turns=3 medianFinalToToken=1100ms p90FinalToToken=2000ms medianTtsFirstChunk=500ms medianFinalToAudio=1900ms p90FinalToAudio=2600ms echoDrops=3 ttsStreams=4 bargeIns=0'
+  );
+});
+
+test('A/B: default resolution with no URL param or setting sends "a"', async () => {
+  FakeWs.all = [];
+  const p = new CascadePocProvider({ connectBudgetMs: 2000, resolveTextVariant: () => ({ variant: 'a', source: 'default' }) });
+  await quiet(async () => {
+    const ws = await connected(p, []);
+    assert.equal(ws.sent[0].textVariant, 'a');
+    await p.disconnect();
+  });
+});
+
+test('A/B: browser [poc-summary] adds counters across a reconnect and sees drops after the last finished turn', async () => {
+  FakeWs.all = [];
+  const lines: string[] = [];
+  const p = new CascadePocProvider({
+    connectBudgetMs: 2000,
+    reconnectDelayMs: 1,
+    resolveTextVariant: () => ({ variant: 'a', source: 'setting' }),
+  });
+  const orig = { log: console.log, warn: console.warn, error: console.error };
+  console.log = (...a: unknown[]) => void lines.push(a.join(' '));
+  console.warn = console.error = () => {};
+  try {
+    const ws1 = await connected(p, []);
+    // Turn with no first token / no TTS chunk (e.g. reply_empty): those samples stay empty.
+    ws1.push({ type: 'poc_turn', turn: 1, interimToFinalMs: 0, finalToTokenMs: -1, tokenToAudioMs: -1, ttsFirstChunkMs: -1, finalToAudioMs: -1, echoDrops: 1, ttsStreams: 0, bargeIns: 0 });
+    // Echo drop after the last finished turn: only poc_usage reports it.
+    ws1.push({ type: 'poc_usage', usage: { turns: 1 }, counters: { echoDrops: 2, ttsStreams: 1, bargeIns: 1 } });
+    ws1.drop();
+    await new Promise((r) => setTimeout(r, 10));
+    await tick();
+    const ws2 = FakeWs.all[1];
+    ws2.open();
+    ws2.push({ type: 'ready' });
+    await tick();
+    // New server session counts from zero again.
+    ws2.push({ type: 'poc_usage', usage: { turns: 0 }, counters: { echoDrops: 1, ttsStreams: 2, bargeIns: 0 } });
+    await p.disconnect();
+  } finally {
+    Object.assign(console, orig);
+  }
+  const summary = lines.filter((l) => l.startsWith('[poc-summary]'));
+  assert.deepEqual(summary, [
+    '[poc-summary] variant=a textModel=gemini-3.8-flash turns=1 medianFinalToToken=0ms p90FinalToToken=0ms medianTtsFirstChunk=0ms medianFinalToAudio=0ms p90FinalToAudio=0ms echoDrops=3 ttsStreams=3 bargeIns=1',
+  ]);
 });

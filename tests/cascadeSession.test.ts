@@ -8,8 +8,14 @@ import {
   CASCADE_SETTLE_MS,
   STT_ROTATE_AFTER_MS,
   STT_CONNECT_TIMEOUT_MS,
+  POC_REPLY_TOKEN_CAP,
+  POC_LONG_REPLY_TOKEN_CAP,
+  POC_THINKING_HEADROOM_TOKENS,
+  maxOutputTokensFor,
+  replyTokenCapFor,
 } from '../server/cascadeSession.ts';
 import type { CascadeAi, CascadeClock } from '../server/cascadeSession.ts';
+import { estimateTextTokens, endWithUserTurn } from '../server/cascadeText.ts';
 import { handleCascadeConnection } from '../server/cascadeWs.ts';
 
 class FakeClock implements CascadeClock {
@@ -46,10 +52,25 @@ const flush = async (n = 30) => {
 
 type SttCb = { onmessage: (m: any) => void; onerror: (e: unknown) => void; onclose: () => void };
 
-function makeFakeAi(opts: { reply?: string; failStt?: boolean; hangStt?: boolean; ttsBytes?: number; holdTts?: boolean } = {}) {
+function makeFakeAi(
+  opts: {
+    reply?: string;
+    finishReason?: string;
+    /** Pause the text stream before chunk index `at` until `wait` resolves. */
+    textGate?: { at: number; wait: Promise<void> };
+    /** Text chunk size in chars (default 7). */
+    chunkSize?: number;
+    failStt?: boolean;
+    hangStt?: boolean;
+    ttsBytes?: number;
+    ttsChunks?: number;
+    ttsUsage?: { inputTokens?: number; outputTokens?: number } | null;
+    holdTts?: boolean;
+  } = {},
+) {
   const stt: { cb: SttCb; sent: any[]; closed: boolean }[] = [];
   const textCalls: any[] = [];
-  const ttsCalls: { text: string; signal: AbortSignal }[] = [];
+  const ttsCalls: { text: string; voiceName: string; signal: AbortSignal }[] = [];
   const ttsRelease: (() => void)[] = [];
   const ai: CascadeAi = {
     connectStt(cb) {
@@ -67,44 +88,58 @@ function makeFakeAi(opts: { reply?: string; failStt?: boolean; hangStt?: boolean
     async streamText(req) {
       textCalls.push(req);
       const reply = opts.reply ?? 'Hello there. How are you today?';
-      const parts = reply.match(/.{1,7}/gs) || [];
+      const parts = reply.match(new RegExp(`.{1,${opts.chunkSize ?? 7}}`, 'gs')) || [];
       return {
         async *[Symbol.asyncIterator]() {
           for (let i = 0; i < parts.length; i++) {
+            if (opts.textGate && i === opts.textGate.at) await opts.textGate.wait;
             if (req.signal.aborted) return;
+            const isLast = i === parts.length - 1;
             yield {
               text: parts[i],
-              usageMetadata: i === parts.length - 1 ? { promptTokenCount: 100, candidatesTokenCount: 10, thoughtsTokenCount: 2 } : undefined,
+              usageMetadata: isLast ? { promptTokenCount: 100, candidatesTokenCount: 10, thoughtsTokenCount: 2 } : undefined,
+              finishReason: isLast ? opts.finishReason : undefined,
             };
           }
         },
       };
     },
-    async synthesize(req) {
-      ttsCalls.push({ text: req.text, signal: req.signal });
-      if (opts.holdTts) await new Promise<void>((r) => ttsRelease.push(r));
-      if (req.signal.aborted) {
-        const e: any = new Error('aborted');
-        e.name = 'AbortError';
-        throw e;
-      }
+    async streamSpeech(req) {
+      ttsCalls.push({ text: req.text, voiceName: req.voiceName, signal: req.signal });
+      const chunkCount = opts.ttsChunks ?? 2;
+      const chunkBytes = opts.ttsBytes ?? 24000; // 0.5 s of 24 kHz 16-bit PCM per chunk
+      const usage = opts.ttsUsage === undefined ? { inputTokens: 5 } : opts.ttsUsage;
       return {
-        audio: new Uint8Array(opts.ttsBytes ?? 48000), // 1 s of 24 kHz 16-bit raw PCM
-        mimeType: 'audio/L16;codec=pcm;rate=24000',
-        usageMetadata: { promptTokenCount: 5 },
+        async *[Symbol.asyncIterator]() {
+          for (let i = 0; i < chunkCount; i++) {
+            if (opts.holdTts) await new Promise<void>((r) => ttsRelease.push(r));
+            if (req.signal.aborted) {
+              const e: any = new Error('aborted');
+              e.name = 'AbortError';
+              throw e;
+            }
+            const audio = new Uint8Array(chunkBytes);
+            audio[0] = i + 1;
+            yield {
+              audio,
+              sampleRate: 24000,
+              usage: i === chunkCount - 1 && usage ? usage : undefined,
+            };
+          }
+        },
       };
     },
   };
   return { ai, stt, textCalls, ttsCalls, ttsRelease };
 }
 
-function makeSession(fake: ReturnType<typeof makeFakeAi>, history: unknown = []) {
+function makeSession(fake: ReturnType<typeof makeFakeAi>, history: unknown = [], textVariant?: string) {
   const clock = new FakeClock();
   const sent: any[] = [];
   const logs: string[] = [];
   const session = new CascadeSession(
     { ai: fake.ai, send: (m) => sent.push(m), clock, log: (l) => logs.push(l) },
-    { systemInstruction: 'You are a tutor.', voiceName: 'Kore', history }
+    { systemInstruction: 'You are a tutor.', voiceName: 'Kore', history, textVariant }
   );
   return { session, clock, sent, logs };
 }
@@ -116,7 +151,7 @@ const interim = (text: string) => ({ serverContent: { interimInputTranscription:
 test('start: ready after STT connects; fallback_required when STT fails or times out', async () => {
   const ok = makeSession(makeFakeAi());
   await ok.session.start();
-  assert.deepEqual(ok.sent[0], { type: 'ready', model: 'cascade-poc', models: { stt: 'gemini-3.5-transcribe-live', text: 'gemini-3.1-flash-lite', tts: 'gemini-3.8-flash-lite-tts' } });
+  assert.deepEqual(ok.sent[0], { type: 'ready', model: 'cascade-poc', textVariant: 'a', models: { stt: 'gemini-3.5-transcribe-live', text: 'gemini-3.8-flash', tts: 'gemini-3.8-flash-tts' } });
 
   const bad = makeSession(makeFakeAi({ failStt: true }));
   await bad.session.start();
@@ -130,7 +165,7 @@ test('start: ready after STT connects; fallback_required when STT fails or times
   assert.deepEqual(types(slow.sent), ['fallback_required']);
 });
 
-test('voice turn: waits 0.4 s after the final segment, then text → per-sentence audio in order', async () => {
+test('voice turn: waits 0.4 s after the final segment, then text → streamed audio in order', async () => {
   const fake = makeFakeAi();
   const { session, clock, sent, logs } = makeSession(fake);
   await session.start();
@@ -149,8 +184,9 @@ test('voice turn: waits 0.4 s after the final segment, then text → per-sentenc
   assert.equal(fake.textCalls.length, 1);
   const contents = fake.textCalls[0].contents;
   assert.equal(contents[contents.length - 1].parts[0].text, 'I went hiking. With my dad.');
+  assert.equal(fake.textCalls[0].maxOutputTokens, POC_REPLY_TOKEN_CAP + POC_THINKING_HEADROOM_TOKENS);
   assert.match(fake.textCalls[0].systemInstruction, /^You are a tutor\.\n\nVoice call output rules/);
-  assert.deepEqual(fake.ttsCalls.map((c) => c.text), ['Hello there.', 'How are you today?']);
+  assert.deepEqual(fake.ttsCalls.map((c) => c.text), ['Hello there. How are you today?']);
   assert.deepEqual(types(sent), [
     'ready',
     'input_transcript',
@@ -158,29 +194,29 @@ test('voice turn: waits 0.4 s after the final segment, then text → per-sentenc
     'audio',
     'output_transcript',
     'audio',
-    'output_transcript',
     'turnComplete',
     'poc_usage',
     'poc_turn',
   ]);
   assert.equal(sent[3].mimeType, 'audio/pcm;rate=24000');
-  assert.equal(sent[4].text, 'Hello there.');
-  const usage = sent[8].usage;
+  assert.equal(sent[4].text, 'Hello there. How are you today?');
+  const usage = sent[7].usage;
   assert.equal(usage.turns, 1);
   assert.equal(usage.textInTokens, 100);
   assert.equal(usage.textOutTokens, 12);
-  assert.equal(usage.ttsInTokens, 10);
-  assert.equal(usage.ttsAudioSec, 2);
-  assert.ok(logs.some((l) => /^\[poc-turn\] n=1 interimToFinal=\d+ms finalToToken=\d+ms tokenToAudio=\d+ms finalToAudio=\d+ms$/.test(l)));
+  assert.equal(usage.ttsInTokens, 5);
+  assert.equal(usage.ttsAudioSec, 1);
+  assert.ok(logs.some((l) => /^\[poc-tts\] n=1 seg=1 chars=31 firstChunkMs=\d+ chunks=2 audioSec=1\.00 totalMs=\d+$/.test(l)));
+  assert.ok(logs.some((l) => /^\[poc-turn\] n=1 variant=a interimToFinal=\d+ms finalToToken=\d+ms tokenToAudio=\d+ms ttsFirstChunk=\d+ms finalToAudio=\d+ms$/.test(l)));
 });
 
 test('barge-in: 2 non-echo words while the tutor speaks stop it and truncate history', async () => {
-  const fake = makeFakeAi({ holdTts: true, reply: 'First sentence here. Second one is long.' });
+  const fake = makeFakeAi({ holdTts: true, ttsChunks: 2, reply: 'First sentence here. Second one is long.' });
   const { session, clock, sent, logs } = makeSession(fake);
   await session.start();
   session.handleClientMessage({ type: 'text_prompt', text: 'start' });
   await flush();
-  fake.ttsRelease.shift()!(); // first sentence spoken
+  fake.ttsRelease.shift()!(); // first chunk of stream #1 sent
   await flush();
   assert.equal(sent.filter((m) => m.type === 'audio').length, 1);
   // One word: ignored. Echo of the tutor: ignored.
@@ -190,7 +226,7 @@ test('barge-in: 2 non-echo words while the tutor speaks stop it and truncate his
   fake.stt[0].cb.onmessage(interim('sorry wait'));
   assert.ok(types(sent).includes('interrupted'));
   assert.ok(logs.includes('[poc] barge_in reason=voice'));
-  assert.ok(fake.ttsCalls[1].signal.aborted, 'pending speech is aborted');
+  assert.ok(fake.ttsCalls[0].signal.aborted, 'pending speech is aborted');
   fake.ttsRelease.forEach((r) => r());
   await flush();
   assert.equal(sent.filter((m) => m.type === 'audio').length, 1, 'no audio after barge-in');
@@ -200,7 +236,7 @@ test('barge-in: 2 non-echo words while the tutor speaks stop it and truncate his
   clock.advance(CASCADE_SETTLE_MS);
   await flush();
   const contents = fake.textCalls[1].contents.map((c: any) => `${c.role}:${c.parts[0].text}`);
-  assert.deepEqual(contents.slice(-3), ['user:start', 'model:First sentence here. [interrupted]', 'user:Can you repeat?']);
+  assert.deepEqual(contents.slice(-3), ['user:start', 'model:First sentence here. Second one is long. [interrupted]', 'user:Can you repeat?']);
 });
 
 test('no barge-in when the tutor is silent; a client interrupt stops a speaking tutor', async () => {
@@ -280,7 +316,7 @@ test('turn errors keep the session alive and summary is logged once on close', a
   session.close();
   session.close();
   assert.equal(logs.filter((l) => l.startsWith('[poc-summary]')).length, 1);
-  assert.match(logs.find((l) => l.startsWith('[poc-summary]'))!, /turns=0 medianFinalToAudio=0ms p90FinalToAudio=0ms bargeIns=0 sttAudioSec=0\.00 ttsAudioSec=0\.00 usd=/);
+  assert.match(logs.find((l) => l.startsWith('[poc-summary]'))!, /^\[poc-summary\] variant=a textModel=gemini-3\.8-flash turns=0 medianFinalToToken=0ms p90FinalToToken=0ms medianTtsFirstChunk=0ms medianFinalToAudio=0ms p90FinalToAudio=0ms bargeIns=0 echoDrops=0 ttsStreams=0 sttAudioSec=0\.00 ttsAudioSec=0\.00 usd=/);
 });
 
 test('reconnect history is sanitized and used as context', async () => {
@@ -293,7 +329,7 @@ test('reconnect history is sanitized and used as context', async () => {
   assert.deepEqual(roles, ['user', 'model', 'user']);
 });
 
-test('Gemini adapter: TEXT-only STT config, minimal thinking with one retry if rejected', async () => {
+test('Gemini adapter: TEXT-only STT, text cap/temp/finishReason with thinking retry, and streaming TTS via interactions', async () => {
   const calls: any[] = [];
   const genai = {
     live: { connect: async (req: any) => (calls.push(['live', req]), { sendRealtimeInput() {}, close() {} }) },
@@ -302,31 +338,83 @@ test('Gemini adapter: TEXT-only STT config, minimal thinking with one retry if r
         calls.push(['text', req]);
         if (req.config.thinkingConfig) throw new Error('thinking_level is not supported');
         return (async function* () {
-          yield { text: 'Hi.', usageMetadata: { promptTokenCount: 1 } };
+          yield {
+            text: 'Hi.',
+            usageMetadata: { promptTokenCount: 1 },
+            candidates: [{ finishReason: 'STOP' }],
+          };
         })();
       },
       generateContent: async (req: any) => {
-        calls.push(['tts', req]);
+        calls.push(['tts-legacy', req]);
         return { candidates: [{ content: { parts: [{ inlineData: { data: Buffer.alloc(4).toString('base64'), mimeType: 'audio/L16;codec=pcm;rate=24000' } }] } }], usageMetadata: { promptTokenCount: 3 } };
       },
     },
   };
-  const ai = createGeminiCascadeAi(genai, { stt: 's', text: 't', tts: 'v' });
+  const ttsGenai = {
+    interactions: {
+      create: async (req: any, opts: any) => {
+        calls.push(['tts-stream', req, opts]);
+        return (async function* () {
+          yield {
+            event_type: 'step.delta',
+            delta: { type: 'audio', data: Buffer.from([1, 2, 3, 4]).toString('base64'), sample_rate: 24000 },
+            metadata: { total_usage: { total_input_tokens: 7, total_output_tokens: 10 } },
+          };
+          yield {
+            event_type: 'interaction.completed',
+            interaction: { usage: { total_input_tokens: 9, total_output_tokens: 20 } },
+          };
+        })();
+      },
+    },
+  };
+  const ai = createGeminiCascadeAi(genai, { stt: 's', text: 't', tts: 'v' }, ttsGenai);
   await ai.connectStt({ onmessage() {}, onerror() {}, onclose() {} });
   assert.deepEqual(calls[0][1].config, { responseModalities: ['TEXT'], inputAudioTranscription: { languageCodes: [] } });
   const origWarn = console.warn;
   console.warn = () => {};
-  const out: string[] = [];
+  const out: { text?: string; finishReason?: string }[] = [];
   try {
-    for await (const ch of await ai.streamText({ systemInstruction: 'x', contents: [], signal: new AbortController().signal })) out.push(ch.text || '');
+    for await (const ch of await ai.streamText({
+      systemInstruction: 'x',
+      contents: [],
+      maxOutputTokens: 1174,
+      signal: new AbortController().signal,
+    })) {
+      out.push({ text: ch.text, finishReason: ch.finishReason });
+    }
   } finally {
     console.warn = origWarn;
   }
-  assert.deepEqual(out, ['Hi.']);
-  assert.equal(calls.filter((c) => c[0] === 'text').length, 2);
-  const tts = await ai.synthesize({ text: 'Hi.', voiceName: 'Kore', signal: new AbortController().signal });
-  assert.equal(tts.audio.byteLength, 4);
-  assert.equal(calls[3][1].config.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName, 'Kore');
+  assert.deepEqual(out, [{ text: 'Hi.', finishReason: 'STOP' }]);
+  const textCalls = calls.filter((c) => c[0] === 'text');
+  assert.equal(textCalls.length, 2);
+  assert.equal(textCalls[0][1].config.maxOutputTokens, 1174);
+  // gemini-3.8-flash: "low" thinking (minimal errors), no temperature (deprecated since 3.6).
+  assert.deepEqual(textCalls[0][1].config.thinkingConfig, { thinkingLevel: 'low' });
+  assert.equal('temperature' in textCalls[0][1].config, false);
+  assert.equal('thinkingConfig' in textCalls[1][1].config, false, 'retry drops the rejected thinking setting');
+
+  const ac = new AbortController();
+  const ttsOut: any[] = [];
+  for await (const item of await ai.streamSpeech({ text: 'Hi.', voiceName: 'Kore', signal: ac.signal })) {
+    ttsOut.push(item);
+  }
+  const ttsCall = calls.find((c) => c[0] === 'tts-stream');
+  assert.deepEqual(ttsCall[1], {
+    model: 'v',
+    input: [{ type: 'user_input', content: [{ type: 'text', text: 'Hi.' }] }],
+    response_format: { type: 'audio', mime_type: 'audio/l16', sample_rate: 24000 },
+    generation_config: { speech_config: [{ voice: 'Kore' }] },
+    stream: true,
+  });
+  assert.equal(ttsCall[2].fetchOptions.signal, ac.signal);
+  assert.equal(ttsOut.length, 2);
+  assert.equal(ttsOut[0].audio.byteLength, 4);
+  assert.equal(ttsOut[0].sampleRate, 24000);
+  assert.deepEqual(ttsOut[0].usage, { inputTokens: 7, outputTokens: 10 });
+  assert.deepEqual(ttsOut[1].usage, { inputTokens: 9, outputTokens: 20 });
 });
 
 test('cascade socket: no server key → fallback_required, never a session', () => {
@@ -423,7 +511,7 @@ test('STT drop mid-call: one reconnect, then stt_closed if that fails too', asyn
 
 test('TTS failure mid-turn reports cascade_turn_failed without turnComplete', async () => {
   const fake = makeFakeAi();
-  fake.ai.synthesize = async () => {
+  fake.ai.streamSpeech = async () => {
     throw new Error('tts 500');
   };
   const { session, sent, logs } = makeSession(fake);
@@ -460,7 +548,7 @@ test('echo rule boundary: 70% overlap is echo, 2 of 3 words (67%) is not', () =>
 });
 
 test('echo grace: an echo final 1.5 s after the tutor finishes is dropped, after that it is a user turn', async () => {
-  const fake = makeFakeAi({ ttsBytes: 48000, reply: 'Nice to meet you.' }); // 1 s of audio
+  const fake = makeFakeAi({ ttsBytes: 24000, ttsChunks: 2, reply: 'Nice to meet you.' }); // 1 s of audio
   const { session, clock } = makeSession(fake);
   await session.start();
   session.handleClientMessage({ type: 'text_prompt', text: 'start' });
@@ -524,4 +612,609 @@ test('old STT dying during a failed rotation goes through the one-reconnect path
   assert.equal(calls, 2, 'reconnected after the failed rotation');
   assert.equal(fake.stt.length, 2);
   assert.ok(!sent.some((m) => m.error === 'stt_closed'));
+});
+
+test('length: reply caps short vs Done/Model answer, API cap adds thinking headroom, MAX_TOKENS tail dropped', async () => {
+  assert.equal(replyTokenCapFor('Hello there'), POC_REPLY_TOKEN_CAP);
+  assert.equal(replyTokenCapFor('Done'), POC_REPLY_TOKEN_CAP);
+  assert.equal(
+    replyTokenCapFor('Feedback. (Please provide quick feedback on what I just said.)'),
+    POC_REPLY_TOKEN_CAP,
+  );
+  assert.equal(
+    replyTokenCapFor(
+      'Done. (I have finished my answer. Please provide concise feedback, estimated level, and AL upgrade expression under 40 seconds.)',
+    ),
+    POC_LONG_REPLY_TOKEN_CAP,
+  );
+  assert.equal(
+    replyTokenCapFor(
+      'Model answer. (Please give a 60-second AL model answer to this question using my details.)',
+    ),
+    POC_LONG_REPLY_TOKEN_CAP,
+  );
+  // maxOutputTokens counts thinking tokens, so the API cap is reply cap + headroom.
+  assert.equal(maxOutputTokensFor('Hello there'), 150 + POC_THINKING_HEADROOM_TOKENS);
+
+  const fake = makeFakeAi({
+    reply: 'That sounds great! What did you enjoy most? And then I was about to',
+    finishReason: 'MAX_TOKENS',
+  });
+  const { session, clock, sent, logs } = makeSession(fake);
+  await session.start();
+  fake.stt[0].cb.onmessage(finalSeg('I went to the park.'));
+  clock.advance(CASCADE_SETTLE_MS);
+  await flush();
+  assert.equal(fake.textCalls[0].maxOutputTokens, 150 + POC_THINKING_HEADROOM_TOKENS);
+  assert.deepEqual(fake.ttsCalls.map((c) => c.text), ['That sounds great! What did you enjoy most?']);
+  assert.ok(logs.includes('[poc] stage=reply_capped'));
+  const transcripts = sent.filter((m) => m.type === 'output_transcript').map((m) => m.text);
+  assert.deepEqual(transcripts, ['That sounds great! What did you enjoy most?']);
+
+  // Done button gets the long cap.
+  session.handleClientMessage({ type: 'control_command', command: 'Done' });
+  await flush();
+  assert.equal(fake.textCalls[1].maxOutputTokens, 600 + POC_THINKING_HEADROOM_TOKENS);
+});
+
+test('length: visible reply past the cap is cut at the last full sentence and spoken; usage still counted', async () => {
+  // 20 sentences of 40 chars = 800 chars (~200 tokens) > 150-token cap.
+  const sentence = 'This is a sentence of about forty chars.';
+  const reply = Array.from({ length: 20 }, () => sentence).join(' ');
+  const fake = makeFakeAi({ reply, finishReason: 'STOP' });
+  const { session, sent, logs } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'tell me a story' });
+  await flush();
+  assert.ok(logs.includes('[poc] stage=reply_capped'));
+  const spoken = fake.ttsCalls.map((c) => c.text).join(' ');
+  assert.ok(spoken.length > 0 && spoken.length < reply.length, 'spoken text is shorter than the reply');
+  assert.ok(estimateTextTokens(spoken) <= POC_REPLY_TOKEN_CAP, 'never past the cap');
+  assert.ok(estimateTextTokens(spoken) > POC_REPLY_TOKEN_CAP - 15, 'cut at the last sentence that fits');
+  assert.ok(spoken.endsWith('.'), 'cut at a sentence end');
+  assert.ok(fake.ttsCalls.length <= 2, 'still at most 2 speech streams');
+  const transcripts = sent.filter((m) => m.type === 'output_transcript').map((m) => m.text).join(' ');
+  assert.equal(transcripts, spoken);
+  const usage = [...sent].reverse().find((m) => m.type === 'poc_usage').usage;
+  assert.equal(usage.textInTokens, 100, 'stream drained after the cap so billed usage is recorded');
+  assert.equal(usage.textOutTokens, 12);
+});
+
+test('length: after the cap the turn ends with speech while the stream drains; user speech then is not a barge-in', async () => {
+  const sentence = 'This is a sentence of about forty chars.';
+  const reply = Array.from({ length: 20 }, () => sentence).join(' ');
+  let release!: () => void;
+  const wait = new Promise<void>((r) => (release = r));
+  // Pause near the end (after the cap is reached) so the drain is still running.
+  const fake = makeFakeAi({ reply, finishReason: 'STOP', textGate: { at: 110, wait } });
+  const { session, clock, sent, logs } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'tell me a story' });
+  await flush();
+  assert.ok(logs.includes('[poc] stage=reply_capped'));
+  assert.ok(types(sent).includes('turnComplete'), 'turn completes without waiting for the drain');
+  clock.advance(60_000); // tutor audio long finished
+  fake.stt[0].cb.onmessage(finalSeg('Okay I see what you mean.'));
+  await flush();
+  assert.ok(!types(sent).includes('interrupted'), 'not treated as a barge-in');
+  const before = [...sent].reverse().find((m) => m.type === 'poc_usage').usage.textInTokens;
+  release();
+  await flush();
+  const after = [...sent].reverse().find((m) => m.type === 'poc_usage').usage.textInTokens;
+  assert.equal(after - before, 100, 'drained usage is added and re-sent');
+});
+
+test('length: cap reached in one chunk before stream 1 started -> all fitting sentences spoken over 2 streams', async () => {
+  const sentence = 'This is a sentence of about forty chars.';
+  const reply = Array.from({ length: 20 }, () => sentence).join(' ');
+  const fake = makeFakeAi({ reply, finishReason: 'STOP', chunkSize: 100_000 });
+  const { session, sent, logs } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'tell me a story' });
+  await flush();
+  assert.ok(logs.includes('[poc] stage=reply_capped'));
+  assert.equal(fake.ttsCalls.length, 2);
+  const spoken = fake.ttsCalls.map((c) => c.text).join(' ');
+  assert.ok(estimateTextTokens(spoken) <= POC_REPLY_TOKEN_CAP && estimateTextTokens(spoken) > POC_REPLY_TOKEN_CAP - 15);
+  const transcripts = sent.filter((m) => m.type === 'output_transcript').map((m) => m.text).join(' ');
+  assert.equal(transcripts, spoken);
+});
+
+test('length: one short sentence then a long unpunctuated run -> only the finished sentence is spoken', async () => {
+  const reply = `Nice. ${'and then '.repeat(80)}`; // ~720 chars without a sentence end
+  const fake = makeFakeAi({ reply, finishReason: 'STOP' });
+  const { session, logs } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'go' });
+  await flush();
+  assert.ok(logs.includes('[poc] stage=reply_capped'));
+  assert.deepEqual(fake.ttsCalls.map((c) => c.text), ['Nice.']);
+});
+
+test('length: barge-in during capped speech and the next turn do not cut the drain; usage counted once', async () => {
+  const sentence = 'This is a sentence of about forty chars.';
+  const reply = Array.from({ length: 20 }, () => sentence).join(' ');
+  let release!: () => void;
+  const wait = new Promise<void>((r) => (release = r));
+  const fake = makeFakeAi({ reply, finishReason: 'STOP', textGate: { at: 110, wait }, ttsBytes: 240000 });
+  const { session, clock, sent } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'tell me a story' });
+  await flush();
+  clock.advance(1000); // tutor audio still playing
+  session.handleClientMessage({ type: 'interrupt' });
+  assert.ok(types(sent).includes('interrupted'));
+  assert.ok(!fake.textCalls[0].signal.aborted, 'capped text stream keeps draining after barge-in');
+  session.handleClientMessage({ type: 'text_prompt', text: 'next' }); // next turn starts
+  await flush();
+  assert.ok(!fake.textCalls[0].signal.aborted, 'and after the next turn starts');
+  release();
+  await flush();
+  const usage = [...sent].reverse().find((m) => m.type === 'poc_usage').usage;
+  assert.equal(usage.textInTokens, 200, 'two turns x 100, the capped one counted once');
+  session.close();
+});
+
+test('length: closing the session aborts a draining text stream', async () => {
+  const sentence = 'This is a sentence of about forty chars.';
+  const reply = Array.from({ length: 20 }, () => sentence).join(' ');
+  const fake = makeFakeAi({ reply, finishReason: 'STOP', textGate: { at: 110, wait: new Promise(() => {}) } });
+  const { session } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'tell me a story' });
+  await flush();
+  assert.ok(!fake.textCalls[0].signal.aborted);
+  session.close();
+  assert.ok(fake.textCalls[0].signal.aborted);
+});
+
+test('length: reply with no sentence end is still capped', async () => {
+  const reply = 'word '.repeat(200).trim(); // 999 chars, no punctuation
+  const fake = makeFakeAi({ reply, finishReason: 'STOP' });
+  const { session, logs } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'go' });
+  await flush();
+  assert.ok(logs.includes('[poc] stage=reply_capped'));
+  const spoken = fake.ttsCalls.map((c) => c.text).join(' ');
+  assert.ok(spoken.length > 0 && estimateTextTokens(spoken) <= POC_REPLY_TOKEN_CAP + 2);
+});
+
+test('length: thinking ate the whole budget (MAX_TOKENS, no text) -> no speech, reply_empty logged, turn completes', async () => {
+  const fake = makeFakeAi({ reply: '', finishReason: 'MAX_TOKENS' });
+  const { session, sent, logs } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'hi' });
+  await flush();
+  assert.equal(fake.ttsCalls.length, 0);
+  assert.ok(logs.some((l) => l.startsWith('[poc] stage=reply_empty')));
+  assert.ok(types(sent).includes('turnComplete'));
+});
+
+test('endWithUserTurn: appends a request-only user turn after a trailing model turn (prefill is 400)', () => {
+  const tail = [{ role: 'user' as const, parts: [{ text: 'hi' }] as [{ text: string }] }, { role: 'model' as const, parts: [{ text: 'Hello!' }] as [{ text: string }] }];
+  const out = endWithUserTurn(tail);
+  assert.equal(out.length, 3);
+  assert.deepEqual(out[2], { role: 'user', parts: [{ text: '(continue)' }] });
+  assert.equal(tail.length, 2, 'input not mutated');
+  const ok = [{ role: 'user' as const, parts: [{ text: 'hi' }] as [{ text: string }] }];
+  assert.equal(endWithUserTurn(ok), ok);
+  assert.deepEqual(endWithUserTurn([]), []);
+});
+
+test('Gemini adapter: a non-thinking error or an aborted request is not retried', async () => {
+  const calls: any[] = [];
+  const mk = (msg: string) => ({
+    live: { connect: async () => ({ sendRealtimeInput() {}, close() {} }) },
+    models: {
+      generateContentStream: async (req: any) => {
+        calls.push(req);
+        throw new Error(msg);
+      },
+    },
+  });
+  const ai1 = createGeminiCascadeAi(mk('quota exceeded') as any, { stt: 's', text: 't', tts: 'v' }, {} as any);
+  await assert.rejects(ai1.streamText({ systemInstruction: 'x', contents: [], maxOutputTokens: 1, signal: new AbortController().signal }), /quota/);
+  assert.equal(calls.length, 1);
+  calls.length = 0;
+  const ac = new AbortController();
+  ac.abort();
+  const ai2 = createGeminiCascadeAi(mk('thinking_level is not supported') as any, { stt: 's', text: 't', tts: 'v' }, {} as any);
+  await assert.rejects(ai2.streamText({ systemInstruction: 'x', contents: [], maxOutputTokens: 1, signal: ac.signal }));
+  assert.equal(calls.length, 1);
+});
+
+test('chunking: 2-sentence reply uses 1 stream; long 3+ sentence reply (first >= 80 chars) uses 2 streams in order', async () => {
+  // 2-sentence reply -> 1 stream, 3 chunks forwarded in order
+  const shortFake = makeFakeAi({ reply: 'Nice work! What happened next?', ttsChunks: 3, ttsBytes: 12000 });
+  const s1 = makeSession(shortFake);
+  await s1.session.start();
+  s1.session.handleClientMessage({ type: 'text_prompt', text: 'hi' });
+  await flush();
+  assert.equal(shortFake.ttsCalls.length, 1);
+  assert.equal(shortFake.ttsCalls[0].text, 'Nice work! What happened next?');
+  const audioMsgs1 = s1.sent.filter((m) => m.type === 'audio');
+  assert.equal(audioMsgs1.length, 3);
+  assert.deepEqual(
+    audioMsgs1.map((m) => Buffer.from(m.audio, 'base64')[0]),
+    [1, 2, 3],
+  );
+
+  // Long 3+ sentence reply where sentence 1 >= 80 chars -> 2 streams.
+  // Hold stream #1 while stream #2 finishes early; verify #2 audio is buffered until all #1 audio is sent.
+  const firstLong =
+    'I really enjoyed hearing about your weekend trip to the mountains with your whole family.';
+  assert.ok(firstLong.length >= 80);
+  const reply = `${firstLong} The weather sounded lovely. Did you take many photos?`;
+  const longFake = makeFakeAi({ reply });
+  let releaseSeg1Chunk2!: () => void;
+  const seg1Chunk2Gate = new Promise<void>((r) => (releaseSeg1Chunk2 = r));
+  const streamCalls: string[] = [];
+  longFake.ai.streamSpeech = async (req) => {
+    streamCalls.push(req.text);
+    const segIdx = streamCalls.length;
+    return {
+      async *[Symbol.asyncIterator]() {
+        if (segIdx === 1) {
+          const c1 = new Uint8Array(24000);
+          c1[0] = 11;
+          yield { audio: c1, sampleRate: 24000 };
+          await seg1Chunk2Gate;
+          const c2 = new Uint8Array(24000);
+          c2[0] = 12;
+          yield { audio: c2, sampleRate: 24000, usage: { inputTokens: 15 } };
+        } else {
+          // Stream #2 yields both chunks immediately while stream #1 is still paused!
+          const c1 = new Uint8Array(24000);
+          c1[0] = 21;
+          yield { audio: c1, sampleRate: 24000 };
+          const c2 = new Uint8Array(24000);
+          c2[0] = 22;
+          yield { audio: c2, sampleRate: 24000, usage: { inputTokens: 10 } };
+        }
+      },
+    };
+  };
+  const s2 = makeSession(longFake);
+  await s2.session.start();
+  s2.session.handleClientMessage({ type: 'text_prompt', text: 'tell me' });
+  await flush();
+  assert.equal(streamCalls.length, 2, 'both streams started while #1 is in flight');
+  assert.equal(streamCalls[0], firstLong);
+  assert.equal(streamCalls[1], 'The weather sounded lovely. Did you take many photos?');
+  // Only stream #1 chunk 1 should have been sent so far (stream #2 is buffered).
+  assert.deepEqual(
+    s2.sent.filter((m) => m.type === 'audio').map((m) => Buffer.from(m.audio, 'base64')[0]),
+    [11],
+  );
+  assert.deepEqual(
+    s2.sent.filter((m) => m.type === 'output_transcript').map((m) => m.text),
+    [firstLong],
+  );
+
+  releaseSeg1Chunk2();
+  await flush();
+  assert.deepEqual(
+    s2.sent.filter((m) => m.type === 'audio').map((m) => Buffer.from(m.audio, 'base64')[0]),
+    [11, 12, 21, 22],
+  );
+  assert.deepEqual(
+    s2.sent.filter((m) => m.type === 'output_transcript').map((m) => m.text),
+    [firstLong, 'The weather sounded lovely. Did you take many photos?'],
+  );
+  assert.ok(s2.logs.some((l) => l.startsWith('[poc-tts] n=1 seg=1 ')));
+  assert.ok(s2.logs.some((l) => l.startsWith('[poc-tts] n=1 seg=2 ')));
+});
+
+test('cancel: barge-in mid-stream aborts signal, stops sending audio, and still counts received chunks', async () => {
+  const fake = makeFakeAi({ reply: 'Hello there. How are you today?' });
+  let releaseChunk2!: () => void;
+  const chunk2Gate = new Promise<void>((r) => (releaseChunk2 = r));
+  let recordedSignal!: AbortSignal;
+  fake.ai.streamSpeech = async (req) => {
+    recordedSignal = req.signal;
+    return {
+      async *[Symbol.asyncIterator]() {
+        yield { audio: new Uint8Array(24000), sampleRate: 24000 }; // 0.5 s sent before barge-in
+        await chunk2Gate;
+        // Suppose one more chunk arrived from the network right as abort fired:
+        yield { audio: new Uint8Array(24000), sampleRate: 24000 }; // 0.5 s received, must NOT be sent
+      },
+    };
+  };
+  const { session, sent } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'start' });
+  await flush();
+  assert.equal(sent.filter((m) => m.type === 'audio').length, 1);
+
+  session.handleClientMessage({ type: 'interrupt' });
+  assert.equal(recordedSignal.aborted, true);
+  releaseChunk2();
+  await flush();
+
+  assert.equal(sent.filter((m) => m.type === 'audio').length, 1, 'no audio sent after barge-in');
+  assert.ok(!types(sent).includes('turnComplete'));
+  assert.equal(session.usage().ttsAudioSec, 1, 'usage still counts every received chunk');
+  const lastUsage = sent.filter((m) => m.type === 'poc_usage').at(-1);
+  assert.equal(lastUsage.usage.ttsAudioSec, 1, 'the client gets the late chunk in poc_usage too');
+  assert.equal(lastUsage.usage.ttsInTokens, session.usage().ttsInTokens);
+});
+
+test('cancel with two speech streams: barge-in during stream 1 aborts both and sends nothing from stream 2', async () => {
+  const long =
+    'This first sentence is deliberately long so that it reaches eighty characters alone. Then a second one. And a third?';
+  const fake = makeFakeAi({ reply: long, holdTts: true, ttsChunks: 2 });
+  const { session, sent } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'start' });
+  await flush();
+  assert.equal(fake.ttsCalls.length, 2, 'stream 2 started once the text ended');
+  fake.ttsRelease.shift()!(); // stream 1 chunk 1
+  await flush();
+  assert.equal(sent.filter((m) => m.type === 'audio').length, 1);
+  session.handleClientMessage({ type: 'interrupt' });
+  assert.ok(fake.ttsCalls.every((c) => c.signal.aborted), 'both streams aborted');
+  while (fake.ttsRelease.length) fake.ttsRelease.shift()!();
+  await flush();
+  assert.equal(sent.filter((m) => m.type === 'audio').length, 1, 'nothing more after barge-in');
+  assert.ok(!sent.some((m) => m.type === 'output_transcript' && /second/.test(m.text)), 'stream 2 text never shown');
+  assert.ok(!types(sent).includes('turnComplete'));
+});
+
+test('usage: ttsInTokens uses reported usage (latest seen) or estimates when omitted, and ttsAudioSec sums chunks', async () => {
+  // Reported usage (multiple deltas, keep latest)
+  const f1 = makeFakeAi({ reply: 'Hello there.' });
+  f1.ai.streamSpeech = async () => ({
+    async *[Symbol.asyncIterator]() {
+      yield { audio: new Uint8Array(24000), sampleRate: 24000, usage: { inputTokens: 4 } };
+      yield { audio: new Uint8Array(48000), sampleRate: 24000, usage: { inputTokens: 11 } };
+    },
+  });
+  const s1 = makeSession(f1);
+  await s1.session.start();
+  s1.session.handleClientMessage({ type: 'text_prompt', text: 'hi' });
+  await flush();
+  assert.equal(s1.session.usage().ttsInTokens, 11);
+  assert.equal(s1.session.usage().ttsAudioSec, 1.5);
+
+  // Omitted usage -> falls back to estimateTextTokens(segment)
+  const segText = 'Hello there. How are you today?';
+  const f2 = makeFakeAi({ reply: segText, ttsUsage: null, ttsChunks: 3, ttsBytes: 16000 });
+  const s2 = makeSession(f2);
+  await s2.session.start();
+  s2.session.handleClientMessage({ type: 'text_prompt', text: 'hi' });
+  await flush();
+  assert.equal(s2.session.usage().ttsInTokens, estimateTextTokens(segText));
+  assert.equal(s2.session.usage().ttsAudioSec, 1);
+});
+
+test('summary includes echoDrops and ttsStreams counts', async () => {
+  const fake = makeFakeAi({ ttsBytes: 120000, ttsChunks: 2, reply: 'How are you today?' });
+  const { session, logs } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'start' });
+  await flush();
+  fake.stt[0].cb.onmessage(finalSeg('how are you today'));
+  session.close();
+  const summary = logs.find((l) => l.startsWith('[poc-summary]'))!;
+  assert.ok(summary.includes('echoDrops=1'), `expected echoDrops=1 in ${summary}`);
+  assert.ok(summary.includes('ttsStreams=1'), `expected ttsStreams=1 in ${summary}`);
+});
+
+test('speech stream failing while the text still streams is reported, not swallowed as an abort', async () => {
+  const fake = makeFakeAi();
+  fake.ai.streamText = async (req) => ({
+    async *[Symbol.asyncIterator]() {
+      yield { text: 'First sentence here. Second one now. ' };
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      if (req.signal.aborted) {
+        const e: any = new Error('aborted');
+        e.name = 'AbortError';
+        throw e;
+      }
+      yield { text: 'Third.' };
+    },
+  });
+  fake.ai.streamSpeech = async () => {
+    throw new Error('tts 503');
+  };
+  const { session, sent, logs } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'hi' });
+  await flush();
+  assert.ok(!types(sent).includes('turnComplete'));
+  assert.deepEqual(sent[sent.length - 1], { type: 'error', error: 'cascade_turn_failed' });
+  assert.ok(logs.includes('[poc] stage=turn_error msg=tts 503'));
+});
+
+test('cascade socket: speech goes through the separate v1beta client, text and STT through the default one', async () => {
+  const handlers: Record<string, (x?: any) => void> = {};
+  const out: any[] = [];
+  const ws = { readyState: 1, send: (d: string) => out.push(JSON.parse(d)), close() {}, on: (ev: string, fn: any) => (handlers[ev] = fn) };
+  const used: string[] = [];
+  const main = {
+    live: { connect: async () => (used.push('main.live'), { sendRealtimeInput() {}, close() {} }) },
+    models: {
+      generateContentStream: async () => {
+        used.push('main.text');
+        return (async function* () {
+          yield { text: 'Hello. How are you?' };
+        })();
+      },
+    },
+    interactions: { create: async () => { throw new Error('speech must not use the default client'); } },
+  };
+  const v1beta = {
+    interactions: {
+      create: async () => {
+        used.push('v1beta.speech');
+        return (async function* () {
+          yield { event_type: 'step.delta', delta: { type: 'audio', data: Buffer.alloc(480).toString('base64') } };
+        })();
+      },
+    },
+  };
+  handleCascadeConnection(ws as any, { getGenAI: () => main, getTtsGenAI: () => v1beta, log: () => {} });
+  handlers.message(JSON.stringify({ type: 'init', systemInstruction: 'x', voiceName: 'Kore' }));
+  await flush();
+  handlers.message(JSON.stringify({ type: 'text_prompt', text: 'hi' }));
+  await flush(60);
+  assert.deepEqual(used, ['main.live', 'main.text', 'v1beta.speech']);
+  assert.ok(out.some((m) => m.type === 'audio'));
+  assert.ok(out.some((m) => m.type === 'turnComplete'));
+  handlers.close();
+});
+
+test('Gemini adapter: an Interactions error event or failed status ends the speech stream with an error', async () => {
+  for (const bad of [
+    { event_type: 'error', error: { message: 'quota' } },
+    { event_type: 'interaction.status_update', status: 'failed' },
+  ]) {
+    const ttsGenai = {
+      interactions: {
+        create: async () =>
+          (async function* () {
+            yield { event_type: 'step.delta', delta: { type: 'audio', data: Buffer.alloc(4).toString('base64') } };
+            yield bad;
+          })(),
+      },
+    };
+    const ai = createGeminiCascadeAi({}, { stt: 's', text: 't', tts: 'v' }, ttsGenai);
+    const got: any[] = [];
+    await assert.rejects(async () => {
+      for await (const item of await ai.streamSpeech({ text: 'Hi.', voiceName: 'Kore', signal: new AbortController().signal })) {
+        got.push(item);
+      }
+    }, /tts_stream_(error quota|failed)/);
+    assert.equal(got.length, 1, 'audio before the error was still delivered');
+  }
+});
+
+test('cascade socket: textVariant "b" maps to gemini-3.5-flash-lite (minimal); anything else, incl. a raw model ID, to A', async () => {
+  for (const [sent, wantModel, wantThinking, wantVariant] of [
+    ['b', 'gemini-3.5-flash-lite', 'minimal', 'b'],
+    ['a', 'gemini-3.8-flash', 'low', 'a'],
+    [undefined, 'gemini-3.8-flash', 'low', 'a'],
+    ['gemini-3.5-flash-lite', 'gemini-3.8-flash', 'low', 'a'],
+    ['gemini-2.0-pro', 'gemini-3.8-flash', 'low', 'a'],
+  ] as const) {
+    const handlers: Record<string, (x?: any) => void> = {};
+    const out: any[] = [];
+    const logs: string[] = [];
+    const ws = { readyState: 1, send: (d: string) => out.push(JSON.parse(d)), close() {}, on: (ev: string, fn: any) => (handlers[ev] = fn) };
+    const fake = makeFakeAi();
+    let models: any = null;
+    handleCascadeConnection(ws as any, {
+      getGenAI: () => ({}),
+      makeAi: (_g, m) => ((models = m), fake.ai),
+      log: (l) => logs.push(l),
+    });
+    handlers.message(JSON.stringify({ type: 'init', systemInstruction: 'x', voiceName: 'Kore', textVariant: sent, textModel: 'gemini-evil' }));
+    await flush();
+    assert.equal(models.text, wantModel, String(sent));
+    assert.equal(models.thinkingLevel, wantThinking);
+    assert.equal(out[0].textVariant, wantVariant);
+    assert.equal(out[0].models.text, wantModel);
+    assert.ok(logs.includes(`[poc] stage=init_received variant=${wantVariant} textModel=${wantModel}`));
+    handlers.close();
+  }
+});
+
+test('Gemini adapter: thinking level comes from the variant models', async () => {
+  const calls: any[] = [];
+  const genai = {
+    live: { connect: async () => ({ sendRealtimeInput() {}, close() {} }) },
+    models: {
+      generateContentStream: async (req: any) => {
+        calls.push(req);
+        return (async function* () {
+          yield { text: 'Hi.' };
+        })();
+      },
+    },
+  };
+  const ai = createGeminiCascadeAi(genai as any, { stt: 's', text: 'gemini-3.5-flash-lite', tts: 'v', thinkingLevel: 'minimal' }, {} as any);
+  for await (const _ of await ai.streamText({ systemInstruction: 'x', contents: [], maxOutputTokens: 10, signal: new AbortController().signal })) {
+    // drain
+  }
+  assert.equal(calls[0].model, 'gemini-3.5-flash-lite');
+  assert.deepEqual(calls[0].config.thinkingConfig, { thinkingLevel: 'minimal' });
+  assert.equal('temperature' in calls[0].config, false);
+});
+
+test('[poc-summary] has variant, textModel, finalToToken median/p90 and TTS first-chunk median; poc_turn carries the counters', async () => {
+  const fake = makeFakeAi();
+  const { session, sent, logs, clock } = makeSession(fake, [], 'b');
+  await session.start();
+  for (const text of ['one', 'two', 'three']) {
+    session.handleClientMessage({ type: 'text_prompt', text });
+    await flush();
+    clock.advance(60_000); // tutor finished speaking: the next prompt is not a barge-in
+  }
+  const turns = sent.filter((m) => m.type === 'poc_turn');
+  assert.equal(turns.length, 3);
+  for (const t of turns) {
+    assert.equal(typeof t.ttsFirstChunkMs, 'number');
+    assert.equal(typeof t.echoDrops, 'number');
+    assert.equal(t.ttsStreams > 0, true);
+  }
+  assert.ok(logs.some((l) => /^\[poc-turn\] n=1 variant=b .*ttsFirstChunk=\d+ms/.test(l)));
+  session.close();
+  const summary = logs.find((l) => l.startsWith('[poc-summary]'))!;
+  assert.match(summary, /^\[poc-summary\] variant=b textModel=gemini-3\.5-flash-lite turns=3 medianFinalToToken=\d+ms p90FinalToToken=\d+ms medianTtsFirstChunk=\d+ms medianFinalToAudio=\d+ms p90FinalToAudio=\d+ms bargeIns=0 echoDrops=0 ttsStreams=3 /);
+});
+
+test('[poc-summary] numbers: finalToToken median/p90 and TTS first-chunk median from per-turn delays', async () => {
+  const fake = makeFakeAi();
+  const { session, logs, clock, sent } = makeSession(fake, [], 'b');
+  const textDelays = [300, 900, 600];
+  const ttsDelays = [100, 500, 300];
+  const origText = fake.ai.streamText.bind(fake.ai);
+  const origTts = fake.ai.streamSpeech.bind(fake.ai);
+  let t = 0;
+  let s = 0;
+  fake.ai.streamText = async (req) => {
+    const d = textDelays[t++];
+    const inner = await origText(req);
+    return {
+      async *[Symbol.asyncIterator]() {
+        clock.advance(d); // time to the first reply token
+        yield* inner as any;
+      },
+    } as any;
+  };
+  fake.ai.streamSpeech = async (req) => {
+    const inner = await origTts(req);
+    const d = ttsDelays[s];
+    let first = true;
+    return {
+      async *[Symbol.asyncIterator]() {
+        for await (const ch of inner as any) {
+          if (first) {
+            first = false;
+            if (d !== undefined) clock.advance(d);
+          }
+          yield ch;
+        }
+      },
+    } as any;
+  };
+  await session.start();
+  for (const text of ['one', 'two', 'three']) {
+    s = t; // TTS delay index follows the turn
+    session.handleClientMessage({ type: 'text_prompt', text });
+    await flush();
+    clock.advance(60_000);
+  }
+  const turns = sent.filter((m) => m.type === 'poc_turn');
+  assert.deepEqual(turns.map((m) => m.finalToTokenMs), [300, 900, 600]);
+  session.close();
+  const summary = logs.find((l) => l.startsWith('[poc-summary]'))!;
+  assert.match(summary, / medianFinalToToken=600ms p90FinalToToken=900ms /);
+  assert.deepEqual(turns.map((m) => m.ttsFirstChunkMs), [100, 500, 300]);
+  assert.match(summary, / medianTtsFirstChunk=300ms /);
+  const lastUsage = sent.filter((m) => m.type === 'poc_usage').at(-1);
+  assert.deepEqual(lastUsage.counters, { echoDrops: 0, ttsStreams: 3, bargeIns: 0 }, 'poc_usage carries the running counters');
 });

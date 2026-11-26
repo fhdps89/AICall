@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  POC_VOICE_ADDENDUM,
+  TTS_FIRST_SEGMENT_MIN_CHARS,
+  takeFirstSpeechSegment,
   splitSentences,
   flushSentences,
   stripMarkdownForSpeech,
@@ -19,6 +22,8 @@ import {
 import {
   pocCostUsd,
   pocTtsRates,
+  pocTextRates,
+  POC_TEXT_THINKING_LEVEL,
   sanitizePocUsage,
   emptyPocUsage,
   POC_STT_MODEL,
@@ -53,8 +58,9 @@ function wav(pcmBytes: number, rate: number, extraChunk = false): Uint8Array {
 
 test('models and socket path are the plan values', () => {
   assert.equal(POC_STT_MODEL, 'gemini-3.5-transcribe-live');
-  assert.equal(POC_TEXT_MODEL, 'gemini-3.1-flash-lite');
-  assert.equal(POC_TTS_MODEL, 'gemini-3.8-flash-lite-tts');
+  assert.equal(POC_TEXT_MODEL, 'gemini-3.8-flash');
+  assert.equal(POC_TEXT_THINKING_LEVEL, 'low');
+  assert.equal(POC_TTS_MODEL, 'gemini-3.8-flash-tts');
   assert.equal(POC_WS_PATH, '/api/gemini/cascade');
 });
 
@@ -134,16 +140,17 @@ test('stats helpers', () => {
   assert.equal(estimateTextTokens('abcdefgh'), 2);
 });
 
-test('PoC cost: 2026 vs 2027 TTS rates switch at 2027-01-01 00:00 KST', () => {
-  assert.deepEqual(pocTtsRates(Date.parse('2026-12-31T14:59:59Z')), { inPer1M: 0.5, outAudioPer1M: 6 });
-  assert.deepEqual(pocTtsRates(Date.parse('2026-12-31T15:00:00Z')), { inPer1M: 1, outAudioPer1M: 12 });
-  // 10-minute call from the plan: 600 s mic, 240 s tutor audio, ~$0.19 (2026), ~$0.23 (2027)
-  const u = { ...emptyPocUsage(), sttAudioSec: 600, sttOutTokens: 1500, textInTokens: 300_000, textOutTokens: 6000, ttsInTokens: 3000, ttsAudioSec: 240 };
+test('PoC cost: 3.8-flash text and 3.8-flash-tts rates, 2026 vs 2027 switch at 2027-01-01 00:00 KST', () => {
+  assert.deepEqual(pocTtsRates(Date.parse('2026-12-31T14:59:59Z')), { inPer1M: 0.5, outAudioPer1M: 9 });
+  assert.deepEqual(pocTtsRates(Date.parse('2026-12-31T15:00:00Z')), { inPer1M: 1, outAudioPer1M: 18 });
+  assert.deepEqual(pocTextRates(Date.parse('2026-12-31T14:59:59Z')), { inPer1M: 0.75, outPer1M: 3.75 });
+  assert.deepEqual(pocTextRates(Date.parse('2026-12-31T15:00:00Z')), { inPer1M: 1.5, outPer1M: 7.5 });
+  // Plan's 10-minute call: 600 s mic, 300 s tutor audio, 40 turns x ~4,500 input tokens.
+  const u = { ...emptyPocUsage(), sttAudioSec: 600, sttOutTokens: 1750, textInTokens: 180_000, textOutTokens: 12_000, ttsInTokens: 4000, ttsAudioSec: 300 };
   const c2026 = pocCostUsd(u, Date.parse('2026-11-26T12:00:00Z'));
   const c2027 = pocCostUsd(u, Date.parse('2027-01-02T00:00:00Z'));
-  assert.ok(Math.abs(c2026 - (600 * 25 * 3.5 + 1500 * 21 + 300_000 * 0.25 + 6000 * 1.5 + 3000 * 0.5 + 240 * 25 * 6) / 1e6) < 1e-12);
-  assert.ok(c2027 > c2026);
-  assert.ok(c2026 < 0.3, `10-min PoC call should stay under $0.30, got ${c2026}`);
+  assert.ok(Math.abs(c2026 - (600 * 25 * 3.5 + 1750 * 21 + 180_000 * 0.75 + 12_000 * 3.75 + 4000 * 0.5 + 300 * 25 * 9) / 1e6) < 1e-12);
+  assert.ok(Math.abs(c2027 - (600 * 25 * 3.5 + 1750 * 21 + 180_000 * 1.5 + 12_000 * 7.5 + 4000 * 1 + 300 * 25 * 18) / 1e6) < 1e-12);
   assert.equal(pocCostUsd(null), 0);
   assert.equal(pocCostUsd({ sttAudioSec: -5, ttsAudioSec: Number.NaN }), 0);
 });
@@ -155,4 +162,49 @@ test('sanitizePocUsage coerces untrusted client data', () => {
   assert.equal(s.turns, 2);
   assert.equal(s.sttOutEstimated, true);
   assert.deepEqual(sanitizePocUsage('nope'), emptyPocUsage());
+});
+
+test('POC_VOICE_ADDENDUM states 1-2 short sentences (~25 words) and one open question', () => {
+  assert.match(POC_VOICE_ADDENDUM, /^Voice call output rules:/);
+  assert.match(POC_VOICE_ADDENDUM, /1 to 2 short/i);
+  assert.match(POC_VOICE_ADDENDUM, /25 words/i);
+  assert.match(POC_VOICE_ADDENDUM, /one open question/i);
+  assert.match(POC_VOICE_ADDENDUM, /markdown/i);
+});
+
+test('takeFirstSpeechSegment covers all branches (empty, 1 short, 2+ sentences, >=80 chars, streamDone)', () => {
+  assert.equal(TTS_FIRST_SEGMENT_MIN_CHARS, 80);
+  // Empty input
+  assert.equal(takeFirstSpeechSegment([], false), null);
+  assert.equal(takeFirstSpeechSegment([], true), null);
+  // Single short sentence before streamDone waits
+  assert.equal(takeFirstSpeechSegment(['Short sentence.'], false), null);
+  // Single short sentence when streamDone takes all
+  assert.deepEqual(takeFirstSpeechSegment(['Short sentence.'], true), {
+    segment: 'Short sentence.',
+    used: 1,
+  });
+  // Branch (a): 2+ sentences available -> takes first 2
+  assert.deepEqual(takeFirstSpeechSegment(['First one.', 'Second one.', 'Third one.'], false), {
+    segment: 'First one. Second one.',
+    used: 2,
+  });
+  // Branch (b): single sentence >= 80 chars -> takes just that 1 sentence
+  const long1 = 'A'.repeat(80) + '.';
+  assert.deepEqual(takeFirstSpeechSegment([long1], false), {
+    segment: long1,
+    used: 1,
+  });
+  // Branch (b) with multiple sentences where first already reaches 80 chars -> takes as few leading sentences as reach 80 (1)
+  assert.deepEqual(takeFirstSpeechSegment([long1, 'Second.', 'Third.'], false), {
+    segment: long1,
+    used: 1,
+  });
+  // Branch (b) where first 2 sentences together reach >= 80 chars -> takes 2
+  const med1 = 'B'.repeat(45) + '.';
+  const med2 = 'C'.repeat(45) + '.';
+  assert.deepEqual(takeFirstSpeechSegment([med1, med2, 'Third.'], false), {
+    segment: `${med1} ${med2}`,
+    used: 2,
+  });
 });

@@ -4,6 +4,31 @@
 
 ---
 
+### [2026-11-27 KST] 시험 통화 엔진 답변 모델 A/B 비교 (EL-18 후속, PR #64)
+- **배경**: 찬식님 결정(05:30 KST, 영어학습봇 전달). QA봇이 두 구성을 비교해 최종안을 고른다. A(기본) = `gemini-3.8-flash` thinking `low`, B = `gemini-3.5-flash-lite`. 받아쓰기·음성은 같음.
+- **B 모델 확인(공식 문서 2026-11-27)**: thinking `minimal`·`low`·`medium`·`high` 지원, 기본값 `minimal`(「near-off thinking, lowest latency」) → `minimal` 사용. temperature 무시(3.6/3.5-Lite부터 폐지), prefill 400, `maxOutputTokens`는 사고 포함. v1·v1beta 모두 지원(v1beta 전용 아님, 텍스트 생성·thinking은 v1에도 있음) → 기본 클라이언트 그대로. 단가 입력 $0.30·출력 $2.50(사고 포함, 2027 변경 표기 없음). 지원 중단 일정 없음.
+- **선택**: 「개발자: 모델·보안」 탭 시험 엔진 스위치 아래 「시험 엔진 답변 모델 (A/B 비교)」(localStorage `onecall_poc_text_variant`, 기본 A), 주소 `?pocText=a|b`가 그 페이지만 덮어씀(잘못된 값 A). 브라우저는 `a`/`b`만 보내고 서버가 `POC_TEXT_VARIANTS`로 모델을 고름(모델 문자열은 받지 않음).
+- **로그**: 브라우저 `[poc] variant= textModel= source=`, `[poc-turn]`에 `variant=`·`ttsFirstChunk=`, 끊을 때 브라우저 `[poc-summary] variant= textModel= turns= medianFinalToToken= p90FinalToToken= medianTtsFirstChunk= medianFinalToAudio= p90FinalToAudio= echoDrops= ttsStreams= bargeIns=`. 서버 `[poc-summary]`도 같은 키(+ sttAudioSec·ttsAudioSec·usd). 서버 `poc_usage`에 누적 카운터를 실어 마지막 턴 뒤 에코 드롭·끼어들기도 브라우저 요약에 반영, 재연결 때 합산, 샘플 없으면 0ms. 테스트 742개 통과, Neon 1차 8→10.
+- **사용량**: 답변 모델별 `pocA…`/`pocB…` 필드, 행 「시험 통화 비용 A」·「시험 통화 비용 B」. 표시 없는 옛 `poc…` 필드는 「시험 통화 비용(A/B 이전 기록)」으로 3.1-flash-lite + 3.8-flash-lite-tts 단가. QA 통화도 같은 A/B 행(토큰만, 분·횟수 없음). `firestore.rules` 변경 불필요(`users/{uid}/**` 허용).
+- **비용(기획안 가정, 10분)**: B $0.223(2027 $0.292) → 합격선 $0.30 안. A $0.339(2027 $0.588). `docs/qc/poc-3.8-flash-cost-2026-11-27.md`.
+- **그대로 둔 것**: `models.ts`, `geminiLiveProvider.ts`, `server/liveConfig.ts`, `audioPlaybackScheduler.ts`, `firestore.rules` diff 0줄, 시험 엔진 기본 꺼짐.
+
+### [2026-11-27 KST] 시험 통화 엔진 모델 교체: 답변 `gemini-3.8-flash`, 음성 `gemini-3.8-flash-tts` (EL-18 후속, PR #64)
+- **배경**: 찬식님 지시(00:51 KST, 영어학습봇 전달). `gemini-3.1-flash-lite`는 공식 지원 중단 일정 2027-05-07(대체 `gemini-3.5-flash-lite`, ai.google.dev deprecations 2026-11-27 확인). 받아쓰기 `gemini-3.5-transcribe-live`는 그대로.
+- **바꾼 것**: `src/config/cascadePoc.ts` 모델 상수와 `POC_TEXT_THINKING_LEVEL = "low"`, 단가(답변 $0.75/$3.75, 2027-01-01부터 $1.50/$7.50; 음성 $0.50/$9.00, 2027년 $1.00/$18.00; ai.google.dev/gemini-api/docs/pricing 2026-11-27 확인)와 연도별 `pocTextRates`. `server/cascadeSession.ts`: thinking `low`(3.8 Flash는 `minimal`을 보내면 오류), temperature 제거(3.6부터 무시·이후 세대 오류), 말하는 답 상한을 서버 쪽 글자 수 추정으로(150·버튼 600토큰, 마지막 완성 문장까지, `[poc] stage=reply_capped`), API `maxOutputTokens`는 상한+1,024(사고 토큰 포함이라 150이면 빈 답 위험), 마지막 턴이 모델이면 요청에만 사용자 턴 덧붙임(`endWithUserTurn`, prefill 400 방지). 상한에 닿으면 그 턴은 바로 말하기로 넘어가고 남은 스트림은 뒤에서 받아 청구 토큰(사고 포함)만 더한다(턴이 끝난 뒤 사용자 말을 끼어들기로 오인하지 않음). 문장부호 없는 긴 답도 상한에서 자름. 글 없이 끝난 답은 `[poc] stage=reply_empty`.
+- **음성 모델 확인**: `gemini-3.8-flash-tts`도 v1beta 전용(모델 문서 주석), flash-lite TTS와 API 스키마 동일, 공식 스트리밍 예제가 바로 이 모델로 Interactions `stream:true`·`audio/l16` 24kHz. 코드 경로 변경 없음.
+- **비용 추정(기획안 가정: 10분, 40턴, 평균 입력 4,500토큰, 답 100토큰, 튜터 300초)**: 기존 시험 엔진 10분 $0.19(2027년 $0.23) → 새 구성 $0.34(2027년 $0.59, 사고 200토큰/턴 가정). 합격선 $0.30 초과. 3.8 Flash 암시적 캐시(입력 4,096토큰 이상, 적중분 $0.075)가 입력의 약 32% 넘게 맞으면 2026년 단가로는 통과. 상세는 `docs/qc/poc-3.8-flash-cost-2026-11-27.md`. 앱 비용식은 캐시 적중을 빼지 않아 실측값은 상한.
+- **그대로 둔 것**: `models.ts`(`PRICING_RATES` 포함), `geminiLiveProvider.ts`, `server/liveConfig.ts`, `audioPlaybackScheduler.ts`, `firestore.rules` diff 0줄, 스위치 기본 꺼짐.
+
+### [2026-11-27 KST] 시험 통화 엔진 음질·길이 개선 (EL-18 후속, 브랜치 `englead/poc-quality-20261127`)
+- **배경**: 찬식님 11/26 23:50 시험(안드로이드 크롬, `?qa=1`, 시험 엔진 켬): 튜터 말이 끊기고 특히 시작을 못 알아들음, 답이 김, 한 문장 안에서도 목소리가 Live보다 자주 바뀜. 영어학습봇 원인 분석(`/workspace/collab/oncall_poc_quality_20261127/analysis.md`)을 코드로 대조해 반영.
+- **마이크(1단계)**: `cascadePocProvider.ts`가 기본 엔진과 같은 순서로 연결 시작 때 마이크를 연다. 서버 `ready` 전 소리는 보내지 않고(처리기 `ready` 검사), 녹음기 연결은 첫 튜터 음성 뒤 한 번. 8초 대체 연결 때는 PoC 마이크를 닫은 뒤(진행 중인 권한 요청은 최대 2초 기다림) 기본 엔진이 연다.
+- **길이(1단계)**: 덧붙임 지시를 「1–2문장, 약 25단어, 열린 질문 하나로 끝」(앱 통화 규칙과 같음)으로, `maxOutputTokens` 150(Done·Model answer 버튼만 600), temperature 0.7. 상한(`MAX_TOKENS`)에 걸리면 끝나지 않은 꼬리 문장은 말하지 않고 `[poc] stage=reply_capped`.
+- **진단 로그(1단계)**: `[poc-play]`(브라우저, 턴마다 underrun·1초 이상 빈틈·선행 버퍼 ms), `[poc-tts]`(서버, 요청마다 첫 조각 지연·조각 수·오디오 길이), `[poc-summary]`에 `echoDrops=`·`ttsStreams=` 추가.
+- **스트리밍 TTS(2단계)**: 문장마다 unary 호출하던 것을 Interactions API `stream:true`(L16 24kHz)로 교체. 첫 1~2문장 또는 80자가 모이면 시작, 나머지는 두 번째 요청 하나(첫 요청 소리가 다 나간 뒤 이어 보냄). 끼어들기 때 두 요청 모두 취소(취소 뒤 늦게 받은 조각·토큰도 `poc_usage`로 다시 보냄). Interactions 스트림의 `error` 이벤트·`failed` 상태는 오류로 처리. 쓰지 않게 된 unary `synthesize`는 제거. TTS 오디오 초는 받은 조각 모두, 입력 토큰은 응답 usage가 있으면 그 값, 없으면 글자 수 추정. 공식 문서상 3.8 TTS는 v1beta 전용이라 `server.ts` `createGenAI(apiVersion?)`에 선택 인자를 추가하고 시험 엔진 음성 클라이언트에만 `'v1beta'`를 넘긴다.
+- **그대로 둔 것**: `models.ts`, `geminiLiveProvider.ts`, `server/liveConfig.ts`, `audioPlaybackScheduler.ts`, `firestore.rules`(diff 0줄), 시험 엔진 스위치 기본 꺼짐, 다른 `createGenAI()` 호출.
+- **테스트**: 마이크 넘김(연결 시작에 열림·ready 전 미전송·대체 연결 때 기본 엔진 연결 전에 닫힘·녹음기 1회), 길이 상한·버튼 상한·꼬리 버림, 스트림 나눔(2문장=요청 1개, 긴 답=요청 2개 순서), 끼어들기 취소·사용량, 텍스트 도중 TTS 실패 보고, v1beta 클라이언트 경로, 요약 카운터.
+
 ### [2026-11-26 KST] 구글 스트리밍 시험 모드 PoC (EL-18, 브랜치 `englead/google-streaming-poc-20261126`)
 - **배경**: 기획안 `docs/plan/google-streaming-poc-plan.md`(찬식님 승인 20:27 KST). 받아쓰기·답변·음성을 따로 부르는 구성으로 통화 1회 비용(10분 약 $0.19, 2027년 TTS 단가 기준 약 $0.23)과 지연을 실제로 재 보는 시험 모드.
 - **추가**: `src/config/cascadePoc.ts`(모델·단가·비용식), `server/cascadeText.ts`, `server/cascadeSession.ts`, `server/cascadeWs.ts`, `server.ts` `/api/gemini/cascade` 업그레이드(기존 인증·한도 재사용), `src/services/settings/callEngineSetting.ts`(기본 꺼짐), `src/services/providers/cascadePocProvider.ts`·`cascadeFallbackProvider.ts`, `createLiveProvider()` 분기, 설정 「개발자: 모델·보안」 스위치, 통화 화면 「시험 모드」 표시, 사용량 `poc*` 필드·「시험 통화 비용」 행·학습 시간 합산.

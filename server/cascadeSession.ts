@@ -1,17 +1,19 @@
 import {
   POC_STT_MODEL,
-  POC_TEXT_MODEL,
+  POC_TEXT_VARIANTS,
+  parsePocTextVariant,
+  POC_TEXT_THINKING_LEVEL,
   POC_TTS_MODEL,
   emptyPocUsage,
   pocCostUsd,
 } from "../src/config/cascadePoc.ts";
-import type { PocUsageTotals } from "../src/config/cascadePoc.ts";
+import type { PocTextVariant, PocUsageTotals } from "../src/config/cascadePoc.ts";
 import {
   POC_VOICE_ADDENDUM,
+  takeFirstSpeechSegment,
   splitSentences,
   flushSentences,
   stripMarkdownForSpeech,
-  ttsAudioToPcm,
   pcmSeconds,
   normalizeWords,
   isLikelyEcho,
@@ -22,6 +24,7 @@ import {
   median,
   percentile,
   estimateTextTokens,
+  endWithUserTurn,
 } from "./cascadeText.ts";
 import type { ChatTurn } from "./cascadeText.ts";
 
@@ -42,13 +45,22 @@ export interface CascadeAi {
   streamText(req: {
     systemInstruction: string;
     contents: Array<{ role: string; parts: Array<{ text: string }> }>;
+    maxOutputTokens: number;
     signal: AbortSignal;
-  }): Promise<AsyncIterable<{ text?: string; usageMetadata?: any }>>;
-  synthesize(req: {
+  }): Promise<
+    AsyncIterable<{ text?: string; usageMetadata?: any; finishReason?: string }>
+  >;
+  streamSpeech(req: {
     text: string;
     voiceName: string;
     signal: AbortSignal;
-  }): Promise<{ audio: Uint8Array; mimeType: string; usageMetadata?: any }>;
+  }): Promise<
+    AsyncIterable<{
+      audio?: Uint8Array;
+      sampleRate?: number;
+      usage?: { inputTokens?: number; outputTokens?: number };
+    }>
+  >;
 }
 
 export interface CascadeClock {
@@ -68,11 +80,30 @@ export interface CascadeInit {
   systemInstruction: string;
   voiceName: string;
   history?: unknown;
+  /** Reply-text A/B variant; anything else is treated as "a". */
+  textVariant?: unknown;
+}
+
+export interface CascadeModels {
+  stt: string;
+  text: string;
+  tts: string;
+  /** thinkingConfig.thinkingLevel for the text model (default POC_TEXT_THINKING_LEVEL). */
+  thinkingLevel?: string;
 }
 
 export const CASCADE_SETTLE_MS = 400;
 export const STT_ROTATE_AFTER_MS = 9 * 60 * 1000;
 export const STT_CONNECT_TIMEOUT_MS = 7000;
+/** Spoken reply cap (visible text, estimated tokens); Done / Model answer turns get the long cap. */
+export const POC_REPLY_TOKEN_CAP = 150;
+export const POC_LONG_REPLY_TOKEN_CAP = 600;
+/**
+ * maxOutputTokens counts thinking tokens too (ai.google.dev thinking#token-limits), and a model
+ * that hits it mid-thought returns empty output. So the API cap is the reply cap plus this
+ * headroom, and the reply itself is cut on our side at the reply cap.
+ */
+export const POC_THINKING_HEADROOM_TOKENS = 1024;
 
 const PCM_16K_BYTES_PER_SEC = 32000;
 /** Final segments this soon after the tutor stops are still checked for speaker echo. */
@@ -92,6 +123,18 @@ const CONTROL_COMMAND_PROMPTS: Record<string, string> = {
   Pause: "Pause. (Let's pause here. How did I sound in this scene?)",
   Slow: "Please speak a bit slower and enunciate clearly.",
 };
+
+export function replyTokenCapFor(prompt: string): number {
+  return prompt === CONTROL_COMMAND_PROMPTS.Done ||
+    prompt === CONTROL_COMMAND_PROMPTS["Model answer"]
+    ? POC_LONG_REPLY_TOKEN_CAP
+    : POC_REPLY_TOKEN_CAP;
+}
+
+/** API maxOutputTokens for a turn: reply cap + thinking headroom. */
+export function maxOutputTokensFor(prompt: string): number {
+  return replyTokenCapFor(prompt) + POC_THINKING_HEADROOM_TOKENS;
+}
 
 function nonNegNum(v: unknown): number {
   if (typeof v !== "number") return 0;
@@ -113,7 +156,8 @@ function isAbortError(err: unknown): boolean {
 
 export function createGeminiCascadeAi(
   ai: any /* GoogleGenAI */,
-  models: { stt: string; text: string; tts: string },
+  models: CascadeModels,
+  ttsAi?: any /* GoogleGenAI (v1beta) */,
 ): CascadeAi {
   return {
     connectStt(callbacks) {
@@ -127,15 +171,20 @@ export function createGeminiCascadeAi(
       });
     },
 
-    async streamText({ systemInstruction, contents, signal }) {
+    async streamText({ systemInstruction, contents, maxOutputTokens, signal }) {
       const request = (withThinking: boolean) =>
         ai.models.generateContentStream({
           model: models.text,
           contents,
           config: {
             systemInstruction,
+            maxOutputTokens,
+            // No temperature: deprecated and ignored from Gemini 3.6 Flash on, an error in later
+            // generations (ai.google.dev whats-new-gemini-3.6#sampling-parameter-deprecation).
             abortSignal: signal,
-            ...(withThinking ? { thinkingConfig: { thinkingLevel: "minimal" } } : {}),
+            ...(withThinking
+              ? { thinkingConfig: { thinkingLevel: models.thinkingLevel ?? POC_TEXT_THINKING_LEVEL } }
+              : {}),
           },
         });
       let stream: any;
@@ -151,52 +200,87 @@ export function createGeminiCascadeAi(
       return {
         async *[Symbol.asyncIterator]() {
           for await (const chunk of stream) {
+            const finishReason =
+              typeof chunk?.candidates?.[0]?.finishReason === "string"
+                ? chunk.candidates[0].finishReason
+                : undefined;
             yield {
               text: typeof chunk?.text === "string" ? chunk.text : undefined,
               usageMetadata: chunk?.usageMetadata,
+              finishReason,
             };
           }
         },
       };
     },
 
-    async synthesize({ text, voiceName, signal }) {
-      const response = await ai.models.generateContent({
-        model: models.tts,
-        contents: [{ role: "user", parts: [{ text }] }],
-        config: {
-          responseModalities: ["AUDIO"],
-          abortSignal: signal,
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName },
-            },
+    async streamSpeech({ text, voiceName, signal }) {
+      const client = ttsAi ?? ai;
+      const stream = await client.interactions.create(
+        {
+          model: models.tts,
+          input: [{ type: "user_input", content: [{ type: "text", text }] }],
+          response_format: {
+            type: "audio",
+            mime_type: "audio/l16",
+            sample_rate: 24000,
           },
+          generation_config: {
+            speech_config: [{ voice: voiceName }],
+          },
+          stream: true,
         },
-      });
-      const parts = response?.candidates?.[0]?.content?.parts;
-      const audioPart = Array.isArray(parts)
-        ? parts.find(
-            (p: any) =>
-              typeof p?.inlineData?.data === "string" &&
-              (!p.inlineData.mimeType ||
-                String(p.inlineData.mimeType).startsWith("audio/")),
-          )
-        : undefined;
-      if (!audioPart?.inlineData?.data) {
-        throw new Error("TTS returned no audio data");
-      }
-      const audio = new Uint8Array(
-        Buffer.from(audioPart.inlineData.data, "base64"),
+        { fetchOptions: { signal } },
       );
-      const mimeType =
-        typeof audioPart.inlineData.mimeType === "string"
-          ? audioPart.inlineData.mimeType
-          : "audio/wav";
       return {
-        audio,
-        mimeType,
-        usageMetadata: response?.usageMetadata,
+        async *[Symbol.asyncIterator]() {
+          for await (const event of stream) {
+            // Interactions can report a failure as an SSE event instead of throwing.
+            if (event?.event_type === "error") {
+              throw new Error(`tts_stream_error ${String(event?.error?.message || event?.error?.code || "unknown").slice(0, 120)}`);
+            }
+            if (event?.event_type === "interaction.status_update" && event?.status === "failed") {
+              throw new Error("tts_stream_failed");
+            }
+            const rawUsage =
+              event?.event_type === "interaction.completed"
+                ? event?.interaction?.usage ?? event?.metadata?.total_usage
+                : event?.metadata?.total_usage;
+            const usage =
+              rawUsage && typeof rawUsage === "object"
+                ? {
+                    inputTokens:
+                      typeof rawUsage.total_input_tokens === "number"
+                        ? rawUsage.total_input_tokens
+                        : undefined,
+                    outputTokens:
+                      typeof rawUsage.total_output_tokens === "number"
+                        ? rawUsage.total_output_tokens
+                        : undefined,
+                  }
+                : undefined;
+
+            const isAudioDelta =
+              event?.event_type === "step.delta" &&
+              event?.delta?.type === "audio" &&
+              typeof event?.delta?.data === "string" &&
+              event.delta.data.length > 0;
+
+            if (isAudioDelta) {
+              const audio = new Uint8Array(
+                Buffer.from(event.delta.data, "base64"),
+              );
+              const sr = event.delta.sample_rate;
+              const sampleRate =
+                typeof sr === "number" && Number.isFinite(sr) && sr > 0
+                  ? sr
+                  : 24000;
+              yield { audio, sampleRate, ...(usage ? { usage } : {}) };
+            } else if (usage) {
+              yield { usage };
+            }
+          }
+        },
       };
     },
   };
@@ -236,11 +320,19 @@ export class CascadeSession {
   private turnInProgress: boolean;
   private turnAborted: boolean;
   private turnAbort: AbortController | null;
+  /** Text streams still draining after a reply cap (usage only); aborted on close. */
+  private textDrains: Set<AbortController>;
   private turnSpokenSentences: string[];
   private currentTutorText: string;
   private speakingUntil: number;
   private bargeIns: number;
+  private echoDrops: number;
+  private ttsStreams: number;
   private finalToAudioSamples: number[];
+  private finalToTokenSamples: number[];
+  /** Per turn: first audio chunk latency of the turn's first speech request. */
+  private ttsFirstChunkSamples: number[];
+  private textVariant: PocTextVariant;
   private totals: PocUsageTotals;
   private sttMeasured: boolean;
 
@@ -270,11 +362,17 @@ export class CascadeSession {
     this.turnInProgress = false;
     this.turnAborted = false;
     this.turnAbort = null;
+    this.textDrains = new Set();
     this.turnSpokenSentences = [];
     this.currentTutorText = "";
     this.speakingUntil = 0;
     this.bargeIns = 0;
+    this.echoDrops = 0;
+    this.ttsStreams = 0;
     this.finalToAudioSamples = [];
+    this.finalToTokenSamples = [];
+    this.ttsFirstChunkSamples = [];
+    this.textVariant = parsePocTextVariant(init.textVariant);
     this.totals = emptyPocUsage();
     this.sttMeasured = false;
   }
@@ -306,9 +404,10 @@ export class CascadeSession {
       this.deps.send({
         type: "ready",
         model: "cascade-poc",
+        textVariant: this.textVariant,
         models: {
           stt: POC_STT_MODEL,
-          text: POC_TEXT_MODEL,
+          text: POC_TEXT_VARIANTS[this.textVariant].model,
           tts: POC_TTS_MODEL,
         },
       });
@@ -384,6 +483,8 @@ export class CascadeSession {
       this.turnAbort.abort();
       this.turnAbort = null;
     }
+    for (const drain of this.textDrains) drain.abort();
+    this.textDrains.clear();
 
     this.clearSettleTimer();
 
@@ -404,10 +505,23 @@ export class CascadeSession {
     const u = this.usage();
     const med = Math.round(median(this.finalToAudioSamples));
     const p90 = Math.round(percentile(this.finalToAudioSamples, 90));
-    const usd = pocCostUsd(u, this.clock.now()).toFixed(4);
+    const ftMed = Math.round(median(this.finalToTokenSamples));
+    const ftP90 = Math.round(percentile(this.finalToTokenSamples, 90));
+    const ttsMed = Math.round(median(this.ttsFirstChunkSamples));
+    const usd = pocCostUsd(u, this.clock.now(), this.textVariant).toFixed(4);
     this.log(
-      `[poc-summary] turns=${u.turns} medianFinalToAudio=${med}ms p90FinalToAudio=${p90}ms bargeIns=${this.bargeIns} sttAudioSec=${u.sttAudioSec.toFixed(2)} ttsAudioSec=${u.ttsAudioSec.toFixed(2)} usd=${usd}`,
+      `[poc-summary] variant=${this.textVariant} textModel=${POC_TEXT_VARIANTS[this.textVariant].model} turns=${u.turns} medianFinalToToken=${ftMed}ms p90FinalToToken=${ftP90}ms medianTtsFirstChunk=${ttsMed}ms medianFinalToAudio=${med}ms p90FinalToAudio=${p90}ms bargeIns=${this.bargeIns} echoDrops=${this.echoDrops} ttsStreams=${this.ttsStreams} sttAudioSec=${u.sttAudioSec.toFixed(2)} ttsAudioSec=${u.ttsAudioSec.toFixed(2)} usd=${usd}`,
     );
+  }
+
+  /** Usage plus the running counters, so the browser [poc-summary] also sees drops after the last finished turn. */
+  private sendPocUsage(): void {
+    if (this.closed) return;
+    this.deps.send({
+      type: "poc_usage",
+      usage: this.usage(),
+      counters: { echoDrops: this.echoDrops, ttsStreams: this.ttsStreams, bargeIns: this.bargeIns },
+    });
   }
 
   usage(): PocUsageTotals {
@@ -506,7 +620,9 @@ export class CascadeSession {
         (this.isTutorSpeaking() || this.clock.now() < this.speakingUntil + ECHO_GRACE_MS) &&
         isLikelyEcho(trimmed, this.currentTutorText)
       ) {
+        this.echoDrops++;
         this.log("[poc] echo_dropped");
+        this.sendPocUsage();
         return;
       }
       if (trimmed) {
@@ -702,7 +818,7 @@ export class CascadeSession {
     this.lastFinalAt = 0;
     this.lastInterimToFinalMs = -1;
 
-    void this.runTutorTurn({ finalAt, interimToFinalMs });
+    void this.runTutorTurn({ finalAt, interimToFinalMs, prompt: text });
   }
 
   private handleUserTextTurn(text: string): void {
@@ -717,7 +833,11 @@ export class CascadeSession {
     }
     if (pendingVoice) this.history.push({ role: "user", text: pendingVoice });
     this.history.push({ role: "user", text });
-    void this.runTutorTurn({ finalAt: this.clock.now(), interimToFinalMs: 0 });
+    void this.runTutorTurn({
+      finalAt: this.clock.now(),
+      interimToFinalMs: 0,
+      prompt: text,
+    });
   }
 
   private isTutorSpeaking(): boolean {
@@ -744,13 +864,14 @@ export class CascadeSession {
     this.speakingUntil = this.clock.now();
     this.bargeIns++;
     this.deps.send({ type: "interrupted" });
-    this.deps.send({ type: "poc_usage", usage: this.usage() });
+    this.sendPocUsage();
     this.log(`[poc] barge_in reason=${reason}`);
   }
 
   private async runTutorTurn(timing: {
     finalAt: number;
     interimToFinalMs: number;
+    prompt: string;
   }): Promise<void> {
     if (this.closed) return;
 
@@ -761,6 +882,7 @@ export class CascadeSession {
     }
 
     const seq = ++this.turnSeq;
+    const turnNum = this.totals.turns + 1;
     const abortController = new AbortController();
     this.turnAbort = abortController;
     this.turnInProgress = true;
@@ -768,82 +890,231 @@ export class CascadeSession {
     this.turnSpokenSentences = [];
     this.currentTutorText = "";
 
-    const isAborted = () =>
-      this.closed ||
-      this.turnAborted ||
-      abortController.signal.aborted ||
-      seq !== this.turnSeq;
+    const isCancelled = () =>
+      this.closed || this.turnAborted || seq !== this.turnSeq;
+    const isAborted = () => isCancelled() || abortController.signal.aborted;
 
     let firstTokenAt = -1;
     let firstAudioAt = -1;
+    /** First-chunk latency of this turn's first speech request (-1 = none). */
+    let ttsFirstChunkMs = -1;
     let lastTextUsage: any = null;
+    let finishReason: string | undefined = undefined;
     let ttsError: unknown = null;
-    let ttsChain: Promise<void> = Promise.resolve();
 
-    const enqueueTts = (rawSentence: string) => {
-      const sentence = stripMarkdownForSpeech(rawSentence);
-      if (!sentence || isAborted()) return;
-      // Synthesis starts right away (overlaps the previous sentence); audio is still sent in order.
-      const pending = this.deps.ai
-        .synthesize({
-          text: sentence,
-          voiceName: this.init.voiceName,
-          signal: abortController.signal,
-        })
-        .then((res) => {
-          // Billed even when a barge-in drops it, so count it before the abort check.
-          const decoded = ttsAudioToPcm(res.audio, res.mimeType);
-          const sec = pcmSeconds(decoded.pcm.byteLength, decoded.sampleRate);
-          this.totals.ttsAudioSec += sec;
-          const promptTok = res.usageMetadata?.promptTokenCount;
-          this.totals.ttsInTokens +=
-            typeof promptTok === "number" && Number.isFinite(promptTok) && promptTok >= 0
-              ? promptTok
-              : estimateTextTokens(sentence);
-          return { ...decoded, audioSec: sec };
+    interface BufferedPcmChunk {
+      audio: Uint8Array;
+      sampleRate: number;
+      sec: number;
+    }
+    interface SegmentState {
+      text: string;
+      sentences: string[];
+      transcriptSent: boolean;
+    }
+
+    const seg1State: SegmentState = { text: "", sentences: [], transcriptSent: false };
+    const seg2State: SegmentState = { text: "", sentences: [], transcriptSent: false };
+    let seg1Started = false;
+    let seg1Used = 0;
+    let seg1Finished = false;
+    let seg1Promise: Promise<void> | null = null;
+    let seg2Promise: Promise<void> | null = null;
+    let seg2Buffer: BufferedPcmChunk[] = [];
+
+    const sendAudioChunk = (chunk: BufferedPcmChunk, segState: SegmentState) => {
+      if (isAborted() || ttsError) return;
+      const now = this.clock.now();
+      if (firstAudioAt < 0) firstAudioAt = now;
+      this.deps.send({
+        type: "audio",
+        audio: Buffer.from(
+          chunk.audio.buffer,
+          chunk.audio.byteOffset,
+          chunk.audio.byteLength,
+        ).toString("base64"),
+        mimeType: `audio/pcm;rate=${chunk.sampleRate}`,
+      });
+      if (!segState.transcriptSent) {
+        segState.transcriptSent = true;
+        this.deps.send({
+          type: "output_transcript",
+          text: segState.text,
         });
-      pending.catch(() => {}); // surfaced through the chain below
-      ttsChain = ttsChain
-        .then(async () => {
-          if (isAborted() || ttsError) return;
-          const { pcm, sampleRate, audioSec } = await pending;
-          if (isAborted()) return;
-          const now = this.clock.now();
-          if (firstAudioAt < 0) firstAudioAt = now;
-          this.deps.send({
-            type: "audio",
-            audio: Buffer.from(
-              pcm.buffer,
-              pcm.byteOffset,
-              pcm.byteLength,
-            ).toString("base64"),
-            mimeType: `audio/pcm;rate=${sampleRate}`,
+        this.turnSpokenSentences.push(...segState.sentences);
+      }
+      this.speakingUntil = Math.max(now, this.speakingUntil) + chunk.sec * 1000;
+    };
+
+    const startSpeechStream = (
+      seg: 1 | 2,
+      segmentText: string,
+      segmentSentences: string[],
+    ): Promise<void> => {
+      const segState = seg === 1 ? seg1State : seg2State;
+      segState.text = segmentText;
+      segState.sentences = segmentSentences;
+      segState.transcriptSent = false;
+      this.ttsStreams++;
+
+      const startedAt = this.clock.now();
+      let firstChunkAt = -1;
+      let chunks = 0;
+      let streamAudioSec = 0;
+      let reportedInTokens: number | null = null;
+      let failed = false;
+
+      const run = async () => {
+        try {
+          const speechStream = await this.deps.ai.streamSpeech({
+            text: segmentText,
+            voiceName: this.init.voiceName,
+            signal: abortController.signal,
           });
-          this.deps.send({
-            type: "output_transcript",
-            text: sentence,
-          });
-          this.turnSpokenSentences.push(sentence);
-          this.speakingUntil = Math.max(now, this.speakingUntil) + audioSec * 1000;
-        })
-        .catch((err) => {
-          if (!ttsError) ttsError = err;
-        });
+          for await (const item of speechStream) {
+            if (
+              item?.usage &&
+              typeof item.usage.inputTokens === "number" &&
+              Number.isFinite(item.usage.inputTokens) &&
+              item.usage.inputTokens >= 0
+            ) {
+              reportedInTokens = item.usage.inputTokens;
+            }
+            if (item?.audio && item.audio.byteLength > 0) {
+              const sampleRate =
+                typeof item.sampleRate === "number" &&
+                Number.isFinite(item.sampleRate) &&
+                item.sampleRate > 0
+                  ? item.sampleRate
+                  : 24000;
+              const sec = pcmSeconds(item.audio.byteLength, sampleRate);
+              // Billed even when a barge-in drops it, so count every received chunk.
+              this.totals.ttsAudioSec += sec;
+              if (firstChunkAt < 0) firstChunkAt = this.clock.now();
+              chunks++;
+              streamAudioSec += sec;
+
+              if (!isAborted() && !ttsError) {
+                if (seg === 1 || seg1Finished) {
+                  sendAudioChunk({ audio: item.audio, sampleRate, sec }, segState);
+                } else {
+                  seg2Buffer.push({ audio: item.audio, sampleRate, sec });
+                }
+              }
+            }
+          }
+        } catch (err) {
+          failed = true;
+          if (!isCancelled() && !isAbortError(err) && !ttsError) {
+            ttsError = err;
+            abortController.abort();
+          }
+        } finally {
+          if (reportedInTokens !== null) {
+            this.totals.ttsInTokens += reportedInTokens;
+          } else if (!failed || chunks > 0) {
+            this.totals.ttsInTokens += estimateTextTokens(segmentText);
+          }
+          const firstChunkMs =
+            firstChunkAt >= 0 ? Math.max(0, Math.round(firstChunkAt - startedAt)) : -1;
+          if (seg === 1) ttsFirstChunkMs = firstChunkMs;
+          const totalMs = Math.max(0, Math.round(this.clock.now() - startedAt));
+          this.log(
+            `[poc-tts] n=${turnNum} seg=${seg} chars=${segmentText.length} firstChunkMs=${firstChunkMs} chunks=${chunks} audioSec=${streamAudioSec.toFixed(2)} totalMs=${totalMs}`,
+          );
+          // A cancelled turn already reported usage at barge-in time; chunks and tokens counted
+          // after that would otherwise only reach the client with the next completed turn.
+          if (isCancelled() && !this.closed) {
+            this.sendPocUsage();
+          }
+          if (seg === 1) {
+            seg1Finished = true;
+            if (!isAborted() && !ttsError && seg2Buffer.length > 0) {
+              const queued = seg2Buffer;
+              seg2Buffer = [];
+              for (const c of queued) {
+                if (isAborted() || ttsError) break;
+                sendAudioChunk(c, seg2State);
+              }
+            } else {
+              seg2Buffer = [];
+            }
+          }
+        }
+      };
+
+      const p = run();
+      p.catch(() => {});
+      return p;
     };
 
     try {
-      const contents = buildContents(this.history);
+      const contents = endWithUserTurn(buildContents(this.history));
+      const replyCap = replyTokenCapFor(timing.prompt);
+      let replyCapped = false;
+      // The text stream follows the turn's abort until the reply cap; after that it keeps
+      // draining (billed usage) even if the turn is interrupted or the next turn starts.
+      const textAbort = new AbortController();
+      abortController.signal.addEventListener("abort", () => {
+        if (!replyCapped) textAbort.abort();
+      });
+      if (abortController.signal.aborted) textAbort.abort();
       const stream = await this.deps.ai.streamText({
         systemInstruction: this.systemInstruction,
         contents,
-        signal: abortController.signal,
+        maxOutputTokens: maxOutputTokensFor(timing.prompt),
+        signal: textAbort.signal,
       });
 
+      const collected: string[] = [];
       let textBuf = "";
-      for await (const chunk of stream) {
+      // Starts speech for whatever of the reply is not spoken yet (end of text or reply cap).
+      const startRemainingSpeech = (): void => {
+        if (!seg1Started && !isAborted()) {
+          const first = takeFirstSpeechSegment(collected, true);
+          if (first) {
+            seg1Started = true;
+            seg1Used = first.used;
+            seg1Promise = startSpeechStream(1, first.segment, collected.slice(0, first.used));
+          }
+        }
+        // Independent of the branch above: a cap can arrive with 3+ sentences before stream 1
+        // started, and stream 2 buffers its audio until stream 1 is done.
+        if (seg1Started && !seg2Promise && collected.length > seg1Used && !isAborted() && !ttsError) {
+          const restSentences = collected.slice(seg1Used);
+          const restText = restSentences.join(" ");
+          if (restText) {
+            seg2Promise = startSpeechStream(2, restText, restSentences);
+          }
+        }
+      };
+      const addTextUsage = (usage: any): void => {
+        if (!usage || typeof usage !== "object") return;
+        this.totals.textInTokens += nonNegNum(usage.promptTokenCount);
+        this.totals.textOutTokens +=
+          nonNegNum(usage.candidatesTokenCount) + nonNegNum(usage.thoughtsTokenCount);
+      };
+      const capReply = (): void => {
+        // Cut at the last complete sentence; later text is never spoken or echo-checked.
+        replyCapped = true;
+        textBuf = "";
+        this.currentTutorText = collected.join(" ");
+        this.log("[poc] stage=reply_capped");
+        startRemainingSpeech();
+      };
+      // Manual iteration: after the cap the turn goes on with speech while the rest of the
+      // stream is drained in the background, only for its billed usage (thinking included).
+      const iter = stream[Symbol.asyncIterator]();
+      for (;;) {
+        const step = await iter.next();
+        if (step.done) break;
+        const chunk = step.value;
         if (isAborted()) break;
         if (chunk?.usageMetadata) {
           lastTextUsage = chunk.usageMetadata;
+        }
+        if (typeof chunk?.finishReason === "string" && chunk.finishReason) {
+          finishReason = chunk.finishReason;
         }
         if (typeof chunk?.text === "string" && chunk.text) {
           if (firstTokenAt < 0) firstTokenAt = this.clock.now();
@@ -851,26 +1122,105 @@ export class CascadeSession {
           textBuf += chunk.text;
           const { sentences, rest } = splitSentences(textBuf);
           textBuf = rest;
-          for (const s of sentences) {
-            enqueueTts(s);
+          for (const raw of sentences) {
+            const s = stripMarkdownForSpeech(raw);
+            if (!s) continue;
+            if (collected.length > 0 && estimateTextTokens([...collected, s].join(" ")) > replyCap) {
+              capReply();
+              break;
+            }
+            collected.push(s);
           }
+          if (
+            !replyCapped &&
+            textBuf &&
+            estimateTextTokens([...collected, textBuf].join(" ")) > replyCap
+          ) {
+            // The unfinished sentence would pass the cap: drop it. With nothing complete yet
+            // (no sentence end at all), speak what came, cut mid-sentence.
+            if (collected.length === 0) {
+              const forced = stripMarkdownForSpeech(textBuf);
+              if (forced) collected.push(forced);
+            }
+            capReply();
+          }
+          if (!replyCapped && !seg1Started && !isAborted()) {
+            const first = takeFirstSpeechSegment(collected, false);
+            if (first) {
+              seg1Started = true;
+              seg1Used = first.used;
+              seg1Promise = startSpeechStream(
+                1,
+                first.segment,
+                collected.slice(0, first.used),
+              );
+            }
+          }
+          if (!replyCapped && estimateTextTokens(collected.join(" ")) >= replyCap) {
+            capReply();
+          }
+          if (replyCapped) break;
         }
       }
 
-      if (lastTextUsage && typeof lastTextUsage === "object") {
-        this.totals.textInTokens += nonNegNum(lastTextUsage.promptTokenCount);
-        this.totals.textOutTokens +=
-          nonNegNum(lastTextUsage.candidatesTokenCount) +
-          nonNegNum(lastTextUsage.thoughtsTokenCount);
+      if (replyCapped && !this.closed) {
+        this.textDrains.add(textAbort);
+        void (async () => {
+          let usage: any = lastTextUsage;
+          try {
+            for (;;) {
+              const step = await iter.next();
+              if (step.done) break;
+              if (step.value?.usageMetadata) usage = step.value.usageMetadata;
+            }
+          } catch {
+            // Aborted (barge-in / close) or failed after the cap: keep what was seen.
+          }
+          this.textDrains.delete(textAbort);
+          addTextUsage(usage);
+          this.sendPocUsage();
+        })();
+      } else {
+        addTextUsage(lastTextUsage);
       }
-      if (isAborted()) return;
-
-      for (const s of flushSentences(textBuf)) {
-        enqueueTts(s);
+      if (isCancelled()) {
+        // bargeIn already sent poc_usage before this turn's text usage was added.
+        this.sendPocUsage();
+        return;
       }
 
-      await ttsChain;
-      if (isAborted()) return;
+      const tail = flushSentences(textBuf)
+        .map(stripMarkdownForSpeech)
+        .filter(Boolean);
+      if (replyCapped) {
+        // Speech for the capped reply already started inside the loop.
+      } else if (finishReason === "MAX_TOKENS" && collected.length > 0) {
+        this.log("[poc] stage=reply_capped");
+        startRemainingSpeech();
+      } else {
+        for (const s of tail) {
+          if (collected.length > 0 && estimateTextTokens([...collected, s].join(" ")) > replyCap) {
+            this.log("[poc] stage=reply_capped");
+            break;
+          }
+          collected.push(s);
+        }
+        startRemainingSpeech();
+      }
+
+      if (collected.length === 0) {
+        // e.g. thinking used the whole maxOutputTokens: visible in logs, turn ends quietly.
+        this.log(`[poc] stage=reply_empty finish=${finishReason ?? "none"}`);
+      }
+
+      const pendingStreams: Promise<void>[] = [];
+      if (seg1Promise) pendingStreams.push(seg1Promise);
+      if (seg2Promise) pendingStreams.push(seg2Promise);
+      if (pendingStreams.length > 0) {
+        await Promise.all(pendingStreams);
+      }
+
+      if (isCancelled()) return;
       if (ttsError) throw ttsError;
 
       this.turnInProgress = false;
@@ -880,7 +1230,7 @@ export class CascadeSession {
       }
       this.deps.send({ type: "turnComplete" });
       this.totals.turns += 1;
-      this.deps.send({ type: "poc_usage", usage: this.usage() });
+      this.sendPocUsage();
 
       const i2f =
         Number.isFinite(timing.interimToFinalMs) && timing.interimToFinalMs >= 0
@@ -902,6 +1252,8 @@ export class CascadeSession {
       if (f2a >= 0) {
         this.finalToAudioSamples.push(f2a);
       }
+      if (f2t >= 0) this.finalToTokenSamples.push(f2t);
+      if (ttsFirstChunkMs >= 0) this.ttsFirstChunkSamples.push(ttsFirstChunkMs);
 
       this.deps.send({
         type: "poc_turn",
@@ -910,18 +1262,25 @@ export class CascadeSession {
         finalToTokenMs: f2t,
         tokenToAudioMs: t2a,
         finalToAudioMs: f2a,
+        ttsFirstChunkMs,
+        // Running session counters so the browser can print its own [poc-summary].
+        echoDrops: this.echoDrops,
+        ttsStreams: this.ttsStreams,
+        bargeIns: this.bargeIns,
       });
       this.log(
-        `[poc-turn] n=${this.totals.turns} interimToFinal=${i2f}ms finalToToken=${f2t}ms tokenToAudio=${t2a}ms finalToAudio=${f2a}ms`,
+        `[poc-turn] n=${this.totals.turns} variant=${this.textVariant} interimToFinal=${i2f}ms finalToToken=${f2t}ms tokenToAudio=${t2a}ms ttsFirstChunk=${ttsFirstChunkMs}ms finalToAudio=${f2a}ms`,
       );
     } catch (err) {
+      abortController.abort();
       if (seq === this.turnSeq) {
         this.turnInProgress = false;
       }
-      if (isAborted() || isAbortError(err)) {
-        return;
-      }
-      this.log(`[poc] stage=turn_error msg=${errorMessage(err)}`);
+      if (isCancelled()) return;
+      // A speech-stream failure aborts the shared controller, so the text stream may surface as
+      // an AbortError: report the speech error instead of ending the turn silently.
+      if (isAbortError(err) && !ttsError) return;
+      this.log(`[poc] stage=turn_error msg=${errorMessage(ttsError ?? err)}`);
       if (!this.closed) {
         this.deps.send({ type: "error", error: "cascade_turn_failed" });
       }

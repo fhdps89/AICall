@@ -5,7 +5,7 @@
  */
 import type { LiveCommand, LiveProvider, LiveSessionOptions, LiveTranscriptItem } from "./types";
 import type { LiveUsageTotals } from "./liveUsage";
-import type { PocUsageTotals } from "../../config/cascadePoc";
+import type { PocTextVariant, PocUsageTotals } from "../../config/cascadePoc";
 
 export const POC_FALLBACK_NOTICE = "시험 모드 연결 실패, 기본 엔진으로 연결합니다";
 
@@ -14,6 +14,8 @@ export type ActiveEngine = "cascade_poc" | "live";
 /** A cascade provider: connect() must REJECT on any failure before the server is ready. */
 export interface PocCapableProvider extends LiveProvider {
   getPocUsage(): PocUsageTotals;
+  /** Reply-text A/B variant of this call (missing = "a"). */
+  getPocTextVariant?(): PocTextVariant;
   disconnect(notifyClosed?: boolean): Promise<void>;
 }
 
@@ -42,6 +44,10 @@ export class PocFallbackProvider implements LiveProvider {
   }
 
   /** Cascade usage for this call, or null when the call ran on the normal engine. */
+  public getPocTextVariant(): PocTextVariant {
+    return this.poc?.getPocTextVariant?.() ?? "a";
+  }
+
   public getPocUsage(): PocUsageTotals | null {
     return this.engine === "cascade_poc" && this.poc ? this.poc.getPocUsage() : null;
   }
@@ -121,6 +127,11 @@ export class PocFallbackProvider implements LiveProvider {
 /** Engine that actually carried this call ("live" for the normal provider or after a fallback). */
 export function activeEngineOf(provider: LiveProvider | null | undefined): ActiveEngine {
   return provider instanceof PocFallbackProvider ? provider.getEngine() : "live";
+}
+
+/** Reply-text variant of a test-mode call ("a" when unknown). */
+export function pocTextVariantOf(provider: LiveProvider | null | undefined): PocTextVariant {
+  return provider instanceof PocFallbackProvider ? provider.getPocTextVariant() : "a";
 }
 
 /** Test-mode usage for this call, or null when the call ran on the normal engine. */
