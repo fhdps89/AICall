@@ -100,6 +100,11 @@ interface HomeScreenProps {
   /** Number of unfinished calls; when > 0 a flow banner is shown at the top of the page. */
   unfinishedCount?: number;
   onOpenUnfinished?: () => void;
+  /** True until latest goals are confirmed from server (syncing or failed): start/change buttons are disabled. */
+  goalsSyncing?: boolean;
+  /** True when the server check for latest goals failed; shows a notice and a retry button. */
+  goalsSyncFailed?: boolean;
+  onRetryGoalsSync?: () => void;
 }
 
 const EMPTY_MISTAKES: MistakeData[] = [];
@@ -117,6 +122,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   onLogout,
   unfinishedCount = 0,
   onOpenUnfinished,
+  goalsSyncing = false,
+  goalsSyncFailed = false,
+  onRetryGoalsSync,
 }) => {
   const devMode = useDevMode();
   const [selectedPromptGoal, setSelectedPromptGoal] = useState<GoalData | null>(null);
@@ -360,6 +368,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   });
 
   const handleLessonChange = async (goalId: string, newLessonIndex: number) => {
+    if (goalsSyncing) return;
     await onUpdateGoalProgress(goalId, newLessonIndex);
   };
 
@@ -428,7 +437,7 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
     const action = resolveTrackPick({ mode: trackPickerMode ?? "switchTrack", pickedGoalId: goalId, goals });
     if (action.type === "none") return;
     chooseOverrideGoal(action.goalId);
-    if (action.type === "startCall") {
+    if (action.type === "startCall" && !goalsSyncing) {
       const g = goals.find((x) => x.id === action.goalId);
       if (g) onStartCall(g, action.lessonIndex);
     }
@@ -515,20 +524,59 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
             </div>
             {todayGoal && currentLesson && (
               <button
+                type="button"
+                disabled={goalsSyncing}
                 onClick={() => onStartCall(todayGoal, currentLesson.index)}
-                className="px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 shadow-md shadow-amber-500/20 cursor-pointer active:scale-95 shrink-0"
+                className="px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-60 disabled:cursor-not-allowed text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 shadow-md shadow-amber-500/20 cursor-pointer active:scale-95 shrink-0"
               >
-                <PhoneCall className="w-4 h-4" />
-                <span>오늘 수업 시작</span>
+                {goalsSyncing ? (
+                  <>
+                    <Loader2 className={goalsSyncFailed ? "w-4 h-4" : "w-4 h-4 animate-spin"} />
+                    <span>{goalsSyncFailed ? "진도 확인 필요" : "진도 확인 중…"}</span>
+                  </>
+                ) : (
+                  <>
+                    <PhoneCall className="w-4 h-4" />
+                    <span>오늘 수업 시작</span>
+                  </>
+                )}
               </button>
             )}
           </div>
         )}
         {/* 오늘 할 것: ① 오늘 수업 통화 → ② 오늘 아침 강의 → ③ 복습 퀴즈 */}
         <div className="flex items-center justify-between gap-2">
-          <h2 className="text-sm font-bold text-white">오늘 할 것</h2>
+          <div className="flex items-center gap-2 min-w-0">
+            <h2 className="text-sm font-bold text-white shrink-0">오늘 할 것</h2>
+            {goalsSyncing && !goalsSyncFailed && (
+              <span
+                data-testid="goals-syncing"
+                className="text-xs text-slate-400 truncate"
+              >
+                최신 진도를 확인하고 있어요…
+              </span>
+            )}
+            {goalsSyncFailed && (
+              <span className="flex items-center gap-2 min-w-0">
+                <span
+                  data-testid="goals-sync-failed"
+                  className="text-xs text-rose-300 truncate"
+                >
+                  최신 진도를 확인하지 못했어요
+                </span>
+                <button
+                  type="button"
+                  data-testid="goals-sync-retry"
+                  onClick={() => onRetryGoalsSync?.()}
+                  className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-200 font-semibold cursor-pointer shrink-0"
+                >
+                  다시 확인
+                </button>
+              </span>
+            )}
+          </div>
           {streakDays !== null && (
-            <span className="text-xs text-amber-300/90 font-semibold flex items-center gap-1">
+            <span className="text-xs text-amber-300/90 font-semibold flex items-center gap-1 shrink-0">
               <Flame className="w-3.5 h-3.5 text-amber-400" />
               <span>연속 학습 {streakDays}일</span>
             </span>
@@ -577,8 +625,9 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
                 </button>
                 <button
                   type="button"
+                  disabled={goalsSyncing}
                   onClick={() => setTrackPickerMode("startCall")}
-                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white border border-slate-700 text-xs font-semibold transition-colors cursor-pointer"
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 hover:text-white border border-slate-700 text-xs font-semibold transition-colors cursor-pointer"
                 >
                   트랙 골라 통화
                 </button>
@@ -637,8 +686,9 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
                   </div>
                   <button
                     type="button"
+                    disabled={goalsSyncing}
                     onClick={() => setLessonChangeGoal(todayGoal)}
-                    className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-xs font-semibold transition-colors cursor-pointer border border-slate-700/60 shrink-0"
+                    className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 hover:text-white text-xs font-semibold transition-colors cursor-pointer border border-slate-700/60 shrink-0"
                   >
                     진도 바꾸기
                   </button>
@@ -646,11 +696,13 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
 
                 {devMode && (
                 <button
+                  type="button"
+                  disabled={goalsSyncing}
                   onClick={() => {
                     setSelectedPromptGoal(todayGoal);
                     setShowPromptModal(true);
                   }}
-                  className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer border border-slate-700/50"
+                  className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-300 hover:text-white text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer border border-slate-700/50"
                 >
                   <FileText className="w-3.5 h-3.5 text-amber-400" />
                   <span>원문 튜터 프롬프트 확인</span>
@@ -660,11 +712,22 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
 
               {/* Start Call CTA (B-2 requirement) */}
               <button
+                type="button"
+                disabled={goalsSyncing}
                 onClick={() => onStartCall(todayGoal, currentLesson.index)}
-                className="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-slate-950 font-black text-sm tracking-tight flex items-center justify-center gap-2.5 shadow-xl shadow-amber-500/20 transition-all cursor-pointer active:scale-98"
+                className="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 disabled:opacity-60 disabled:cursor-not-allowed text-slate-950 font-black text-sm tracking-tight flex items-center justify-center gap-2.5 shadow-xl shadow-amber-500/20 transition-all cursor-pointer active:scale-98"
               >
-                <PhoneCall className="w-5 h-5" />
-                <span>오늘 수업 통화 시작하기 ({currentLesson.index}과: {currentLesson.title})</span>
+                {goalsSyncing ? (
+                  <>
+                    <Loader2 className={goalsSyncFailed ? "w-5 h-5" : "w-5 h-5 animate-spin"} />
+                    <span>{goalsSyncFailed ? "최신 진도를 확인한 뒤 시작할 수 있어요" : "진도 확인 중…"}</span>
+                  </>
+                ) : (
+                  <>
+                    <PhoneCall className="w-5 h-5" />
+                    <span>오늘 수업 통화 시작하기 ({currentLesson.index}과: {currentLesson.title})</span>
+                  </>
+                )}
               </button>
               <button
                 type="button"
@@ -1056,19 +1119,22 @@ async function checkOpicDeadlineMockProposal(userId: string, currentGoals: GoalD
                     <div className="flex items-center justify-between text-xs gap-2">
                       <button
                         type="button"
+                        disabled={goalsSyncing}
                         onClick={() => setLessonChangeGoal(goal)}
-                        className="px-3 py-1.5 rounded-lg bg-[#121824] hover:bg-slate-800 border border-slate-700 text-xs text-slate-200 hover:text-white font-semibold transition-colors cursor-pointer"
+                        className="px-3 py-1.5 rounded-lg bg-[#121824] hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed border border-slate-700 text-xs text-slate-200 hover:text-white font-semibold transition-colors cursor-pointer"
                       >
                         진도 바꾸기
                       </button>
 
                       {devMode && (
                       <button
+                        type="button"
+                        disabled={goalsSyncing}
                         onClick={() => {
                           setSelectedPromptGoal(goal);
                           setShowPromptModal(true);
                         }}
-                        className="text-amber-400 hover:text-amber-300 font-semibold text-[11px] flex items-center gap-1 cursor-pointer transition-colors"
+                        className="text-amber-400 hover:text-amber-300 disabled:opacity-40 disabled:cursor-not-allowed font-semibold text-[11px] flex items-center gap-1 cursor-pointer transition-colors"
                       >
                         <span>프롬프트 원문</span>
                         <ChevronRight className="w-3 h-3" />

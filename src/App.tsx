@@ -48,6 +48,18 @@ import { ReviewFlowScreen } from "./ui/review/ReviewFlowScreen";
 import { LiveTranscriptItem } from "./services/providers/types";
 import { syncFeedNow } from "./services/feed/feedService";
 import { loadProfileAndGoals } from "./services/session/bootLoad";
+import {
+  clearBootCache,
+  commitBootGoals,
+  defaultBootStore,
+  readBootCache,
+} from "./services/session/bootCache";
+import {
+  canStartCall,
+  createGoalsCommitGate,
+  GoalsSyncState,
+  nextGoalsSyncState,
+} from "./services/session/bootGate";
 import { markBoot } from "./services/perf/bootTiming";
 import { HistoryDepthSync } from "./services/navigation/historySync";
 import {
@@ -102,6 +114,21 @@ export const App: React.FC = () => {
   const [userProfile, setUserProfile] = useState<UserProfileData | null>(null);
   const [goals, setGoals] = useState<GoalData[]>([]);
   const [dataLoading, setDataLoading] = useState<boolean>(false);
+  const [goalsSync, setGoalsSync] = useState<GoalsSyncState>("syncing");
+  // 최신 goals 목록(await 뒤 stale 클로저 대신 사용)
+  const goalsRef = useRef<GoalData[]>(goals);
+  goalsRef.current = goals;
+  // 지금 로그인된 uid. 로그아웃·계정 전환 뒤 늦게 온 응답이 상태·캐시를 덮어쓰지 않게 비교한다.
+  const activeUidRef = useRef<string | null>(null);
+  // 인증 해제·uid 변경 시 이전 uid 캐시를 지우기 위한 직전 uid
+  const prevUidRef = useRef<string | null>(null);
+  // 「다시 확인」 버튼이 다시 부를 진도 불러오기 함수
+  const loadUserDataRef = useRef<(() => Promise<void>) | null>(null);
+  // 더 늦게 시작한 목표 조회·진도 저장만 상태와 캐시에 반영한다.
+  const goalsCommitGateRef = useRef(createGoalsCommitGate());
+  const goalsGateUidRef = useRef<string | null>(null);
+  // 프로필도 더 늦게 시작한 부트 조회만 반영한다.
+  const profileAppliedAtRef = useRef(Number.NEGATIVE_INFINITY);
 
   // Modals
   const [showInitialProgressModal, setShowInitialProgressModal] = useState<boolean>(false);
@@ -154,19 +181,60 @@ export const App: React.FC = () => {
     return () => unsubscribe();
   }, []);
 
+  // 1-1. 인증이 풀리거나(세션 만료·다른 탭 로그아웃·오류) uid가 바뀌면 이전 부트 캐시를 지운다.
+  // 인증 확인 중(authLoading)에는 지우지 않아 정상 부트 캐시를 보존한다.
+  useEffect(() => {
+    if (authLoading) return;
+    const uid = user ? user.uid : null;
+    const prevUid = prevUidRef.current;
+    if (!uid) {
+      if (prevUid) clearBootCache(defaultBootStore(), prevUid);
+      clearBootCache(defaultBootStore());
+    } else if (prevUid && prevUid !== uid) {
+      clearBootCache(defaultBootStore(), prevUid);
+    }
+    prevUidRef.current = uid;
+  }, [authLoading, user]);
+
   // 2. Load Firestore Data when authenticated + B-4 requirement 0 retry/watchdog
   useEffect(() => {
     if (!user) {
+      activeUidRef.current = null;
+      loadUserDataRef.current = null;
+      if (goalsGateUidRef.current !== null) {
+        goalsCommitGateRef.current = createGoalsCommitGate();
+        goalsGateUidRef.current = null;
+        profileAppliedAtRef.current = Number.NEGATIVE_INFINITY;
+      }
       setUserProfile(null);
       setGoals([]);
+      setGoalsSync(nextGoalsSyncState("signedOut"));
       return;
     }
 
+    const uid = user.uid;
+    activeUidRef.current = uid;
+    let cancelled = false;
+    const isActive = () => !cancelled && activeUidRef.current === uid;
+    if (goalsGateUidRef.current !== uid) {
+      goalsCommitGateRef.current = createGoalsCommitGate();
+      goalsGateUidRef.current = uid;
+      profileAppliedAtRef.current = Number.NEGATIVE_INFINITY;
+      const cachedGoals = readBootCache(defaultBootStore(), uid, Date.now());
+      if (cachedGoals) {
+        setGoals(cachedGoals);
+      } else {
+        setGoals([]);
+      }
+      setGoalsSync(nextGoalsSyncState("cache"));
+    }
+
     const loadUserData = async () => {
+      const readStartedAt = Date.now();
       setDataLoading(true);
       try {
         // Fetch or initialize profile and goals in parallel
-        const { profile, goals: userGoals } = await loadProfileAndGoals(user.uid, {
+        const { profile, goals: userGoals } = await loadProfileAndGoals(uid, {
           getUserProfile,
           saveUserProfile,
           getUserGoals,
@@ -185,36 +253,43 @@ export const App: React.FC = () => {
           }),
           defaultGoals: DEFAULT_GOALS,
         });
-        setUserProfile(profile);
+        if (!isActive()) return;
+        if (readStartedAt >= profileAppliedAtRef.current) {
+          profileAppliedAtRef.current = readStartedAt;
+          setUserProfile(profile);
 
-        // Populate placeholders from profile
-        setPlaceholders({
-          job: profile.job || DEFAULT_PROMPT_PLACEHOLDERS.job,
-          surveyTopics: profile.surveyTopics || DEFAULT_PROMPT_PLACEHOLDERS.surveyTopics,
-          phillyRole: profile.phillyRole || DEFAULT_PROMPT_PLACEHOLDERS.phillyRole,
-          opicWeakPoints: profile.opicWeakPoints || DEFAULT_PROMPT_PLACEHOLDERS.opicWeakPoints,
-          phillyWeakPoints: profile.phillyWeakPoints || DEFAULT_PROMPT_PLACEHOLDERS.phillyWeakPoints,
-          travelWeakPoints: profile.travelWeakPoints || DEFAULT_PROMPT_PLACEHOLDERS.travelWeakPoints,
-        });
+          // Populate placeholders from profile
+          setPlaceholders({
+            job: profile.job || DEFAULT_PROMPT_PLACEHOLDERS.job,
+            surveyTopics: profile.surveyTopics || DEFAULT_PROMPT_PLACEHOLDERS.surveyTopics,
+            phillyRole: profile.phillyRole || DEFAULT_PROMPT_PLACEHOLDERS.phillyRole,
+            opicWeakPoints: profile.opicWeakPoints || DEFAULT_PROMPT_PLACEHOLDERS.opicWeakPoints,
+            phillyWeakPoints: profile.phillyWeakPoints || DEFAULT_PROMPT_PLACEHOLDERS.phillyWeakPoints,
+            travelWeakPoints: profile.travelWeakPoints || DEFAULT_PROMPT_PLACEHOLDERS.travelWeakPoints,
+          });
 
-        setGoals(userGoals);
-        markBoot("data");
-
-        // Check if first-run progress setup is needed
-        if (!profile.initialProgressConfigured) {
-          setShowInitialProgressModal(true);
+          // 더 새로운 프로필이 이미 설정을 끝냈으면 일찍 연 창을 닫는다.
+          setShowInitialProgressModal(!profile.initialProgressConfigured);
         }
 
+        if (goalsCommitGateRef.current.claim(readStartedAt)) {
+          goalsRef.current = userGoals;
+          setGoals(userGoals);
+          setGoalsSync(nextGoalsSyncState("fresh"));
+          commitBootGoals(defaultBootStore(), uid, userGoals, Date.now(), readStartedAt);
+        }
+        markBoot("data");
+
         // B-4 Requirement 0: Auto retry uploading pending/failed chunks from IndexedDB
-        retryPendingUploads(user.uid).catch((retryErr) => {
+        retryPendingUploads(uid).catch((retryErr) => {
           console.warn("[App] Auto retry failed chunks error:", retryErr);
         });
 
         // Only mark sessions that have gone stale (default 2 min). A 0ms threshold would also
         // close a live call that is still running in another tab of the same account.
         try {
-          const interrupted = await checkAndMarkInterruptedSessions(user.uid);
-          if (interrupted.length > 0) {
+          const interrupted = await checkAndMarkInterruptedSessions(uid);
+          if (isActive() && interrupted.length > 0) {
             setUnfinishedSessions(interrupted);
             setShowUnfinishedModal(true);
           }
@@ -223,11 +298,19 @@ export const App: React.FC = () => {
         }
       } catch (err) {
         console.error("Failed to load user data from Firestore:", err);
+        if (isActive() && goalsCommitGateRef.current.claim(readStartedAt)) {
+          // 캐시가 있든 없든 실패로 표시하고 「다시 확인」을 보여 준다.
+          // 더 새로운 조회가 이미 반영됐으면 그 결과를 실패로 되돌리지 않는다.
+          setGoalsSync(nextGoalsSyncState("failed"));
+        }
       } finally {
-        setDataLoading(false);
+        if (isActive()) {
+          setDataLoading(false);
+        }
       }
     };
 
+    loadUserDataRef.current = loadUserData;
     loadUserData();
 
     // 로그인 상태에서 60초마다 미업로드 조각 재시도(대기 조각이 없으면 즉시 반환)
@@ -238,24 +321,43 @@ export const App: React.FC = () => {
     }, 60_000);
 
     return () => {
+      cancelled = true;
+      if (loadUserDataRef.current === loadUserData) loadUserDataRef.current = null;
       clearInterval(retryInterval);
     };
   }, [user]);
 
+  // 「다시 확인」: 최신 진도를 서버에서 다시 불러온다.
+  const handleRetryGoalsSync = () => {
+    const load = loadUserDataRef.current;
+    if (!load) return;
+    setGoalsSync(nextGoalsSyncState("retry"));
+    load();
+  };
+
   // Handle Initial Progress Save
   const handleSaveInitialProgress = async (updatedProgress: Record<string, number>) => {
     if (!user) return;
+    const uid = user.uid;
 
     for (const [goalId, lessonIndex] of Object.entries(updatedProgress)) {
-      await updateGoalProgress(user.uid, goalId, lessonIndex);
+      await updateGoalProgress(uid, goalId, lessonIndex);
     }
 
     // Refresh goals
-    const updatedGoals = await getUserGoals(user.uid);
-    setGoals(updatedGoals);
+    const readStartedAt = Date.now();
+    const updatedGoals = await getUserGoals(uid);
+    if (activeUidRef.current !== uid) return;
+    if (goalsCommitGateRef.current.claim(readStartedAt)) {
+      goalsRef.current = updatedGoals;
+      setGoals(updatedGoals);
+      setGoalsSync(nextGoalsSyncState("fresh"));
+      commitBootGoals(defaultBootStore(), uid, updatedGoals, Date.now(), readStartedAt);
+    }
 
     // Mark as configured in userProfile
-    await saveUserProfile(user.uid, { initialProgressConfigured: true });
+    await saveUserProfile(uid, { initialProgressConfigured: true });
+    if (activeUidRef.current !== uid) return;
     setUserProfile((prev) => (prev ? { ...prev, initialProgressConfigured: true } : null));
     setShowInitialProgressModal(false);
   };
@@ -264,8 +366,16 @@ export const App: React.FC = () => {
   // coach plan change approved/reverted), so 「오늘 수업」 shows the current lesson.
   const refreshGoals = async () => {
     if (!user) return;
+    const uid = user.uid;
+    const readStartedAt = Date.now();
     try {
-      setGoals(await getUserGoals(user.uid));
+      const latestGoals = await getUserGoals(uid);
+      if (activeUidRef.current !== uid) return;
+      if (!goalsCommitGateRef.current.claim(readStartedAt)) return;
+      goalsRef.current = latestGoals;
+      setGoals(latestGoals);
+      setGoalsSync(nextGoalsSyncState("fresh"));
+      commitBootGoals(defaultBootStore(), uid, latestGoals, Date.now(), readStartedAt);
     } catch (err) {
       console.warn("[App] Could not refresh goals:", err);
     }
@@ -348,10 +458,18 @@ export const App: React.FC = () => {
   // Handle Goal Lesson Change
   const handleUpdateGoalProgress = async (goalId: string, nextLessonIndex: number) => {
     if (!user) return;
-    await updateGoalProgress(user.uid, goalId, nextLessonIndex);
-    setGoals((prev) =>
-      prev.map((g) => (g.id === goalId ? { ...g, nextLessonIndex } : g))
+    const uid = user.uid;
+    await updateGoalProgress(uid, goalId, nextLessonIndex);
+    if (activeUidRef.current !== uid) return;
+    const readStartedAt = Date.now();
+    if (!goalsCommitGateRef.current.claim(readStartedAt)) return;
+    // await 동안 바뀌었을 수 있는 최신 목록(goalsRef)에서 다음 목록을 계산한다.
+    const updatedGoals = goalsRef.current.map((g) =>
+      g.id === goalId ? { ...g, nextLessonIndex } : g
     );
+    goalsRef.current = updatedGoals;
+    setGoals(updatedGoals);
+    commitBootGoals(defaultBootStore(), uid, updatedGoals, readStartedAt, readStartedAt);
   };
 
   // Handle Placeholders Save
@@ -370,11 +488,19 @@ export const App: React.FC = () => {
 
   // Handle Logout
   const handleLogout = async () => {
-    await logOut();
+    activeUidRef.current = null;
+    clearBootCache(defaultBootStore());
+    try {
+      await logOut();
+    } finally {
+      // 로그아웃 도중 늦게 끝난 쓰기가 남았을 수 있어 한 번 더 지운다.
+      clearBootCache(defaultBootStore());
+    }
   };
 
   // Handle Call Start & End (B-2, B-3, B-4)
   const handleStartCall = (goal: GoalData, lessonIndex: number) => {
+    if (!canStartCall(goalsSync)) return;
     setPrepCall({ goal, lessonIndex });
   };
 
@@ -597,6 +723,9 @@ export const App: React.FC = () => {
         key={homeRefreshKey}
         user={user}
         goals={goals}
+        goalsSyncing={!canStartCall(goalsSync)}
+        goalsSyncFailed={goalsSync === "failed"}
+        onRetryGoalsSync={handleRetryGoalsSync}
         placeholders={placeholders}
         focus={pendingHomeFocus}
         onFocusHandled={() => setPendingHomeFocus(null)}
