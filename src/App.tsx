@@ -60,7 +60,7 @@ import {
   GoalsSyncState,
   nextGoalsSyncState,
 } from "./services/session/bootGate";
-import { markBoot } from "./services/perf/bootTiming";
+import { markBoot, settleBootPhase } from "./services/perf/bootTiming";
 import { HistoryDepthSync } from "./services/navigation/historySync";
 import {
   BackTargetState,
@@ -233,26 +233,29 @@ export const App: React.FC = () => {
       const readStartedAt = Date.now();
       setDataLoading(true);
       try {
-        // Fetch or initialize profile and goals in parallel
-        const { profile, goals: userGoals } = await loadProfileAndGoals(uid, {
-          getUserProfile,
-          saveUserProfile,
-          getUserGoals,
-          batchInitGoals,
-          defaultProfile: () => ({
-            email: user.email || ALLOWED_USER_EMAIL,
-            job: DEFAULT_PROMPT_PLACEHOLDERS.job,
-            surveyTopics: DEFAULT_PROMPT_PLACEHOLDERS.surveyTopics,
-            phillyRole: DEFAULT_PROMPT_PLACEHOLDERS.phillyRole,
-            sttEngine: "gemini",
-            ttsEngine: "gemini",
-            lectureTime: "07:00",
-            feedSecret: "secret-" + Math.random().toString(36).substring(2, 9),
-            initialProgressConfigured: false,
-            updatedAt: new Date().toISOString(),
-          }),
-          defaultGoals: DEFAULT_GOALS,
-        });
+        // Mark when the read settles — success, throw, or a superseded effect —
+        // before isActive() drops a stale result. Same seam as home mistakes.
+        const { profile, goals: userGoals } = await settleBootPhase("data", () =>
+          loadProfileAndGoals(uid, {
+            getUserProfile,
+            saveUserProfile,
+            getUserGoals,
+            batchInitGoals,
+            defaultProfile: () => ({
+              email: user.email || ALLOWED_USER_EMAIL,
+              job: DEFAULT_PROMPT_PLACEHOLDERS.job,
+              surveyTopics: DEFAULT_PROMPT_PLACEHOLDERS.surveyTopics,
+              phillyRole: DEFAULT_PROMPT_PLACEHOLDERS.phillyRole,
+              sttEngine: "gemini",
+              ttsEngine: "gemini",
+              lectureTime: "07:00",
+              feedSecret: "secret-" + Math.random().toString(36).substring(2, 9),
+              initialProgressConfigured: false,
+              updatedAt: new Date().toISOString(),
+            }),
+            defaultGoals: DEFAULT_GOALS,
+          })
+        );
         if (!isActive()) return;
         if (readStartedAt >= profileAppliedAtRef.current) {
           profileAppliedAtRef.current = readStartedAt;
@@ -278,7 +281,6 @@ export const App: React.FC = () => {
           setGoalsSync(nextGoalsSyncState("fresh"));
           commitBootGoals(defaultBootStore(), uid, userGoals, Date.now(), readStartedAt);
         }
-        markBoot("data");
 
         // B-4 Requirement 0: Auto retry uploading pending/failed chunks from IndexedDB
         retryPendingUploads(uid).catch((retryErr) => {

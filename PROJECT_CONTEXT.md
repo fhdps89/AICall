@@ -196,6 +196,11 @@
 - 배포 서버는 `node server.ts`(Node 타입 스트리핑, tsx 없음)로 실행된다. 서버가 불러오는 `src/` 모듈과 그 모듈이 다시 불러오는 상대 경로는 반드시 `.ts` 확장자를 붙인다(`tsconfig.json` `allowImportingTsExtensions: true`). 테스트는 tsx로 돌아 확장자 누락을 못 잡으므로 `tests/serverNodeImports.test.ts`가 순수 node로 서버 import 대상을 불러 확인한다.
 
 ## 5. 버전 히스토리
+- **v2.10.0 이후 수정(미배포) — `[boot]`의 `data`가 비던 문제 (2026-11-26 KST, 브랜치 `englead/boot-data-phase-20261126`)**:
+  - **증상**: `data-boot-timing`이 `[boot] auth=1162ms data=- home=1166ms mistakes=1804ms lectureLocal=1802ms lectureServer=1802ms`처럼 나왔다. 첫 방문과 재방문 모두 `data`만 `-`.
+  - **원인 (a)**: 요약은 `mistakes`와 `lectureServer`가 모이면 바로 `flush`됐다(수정 전 `bootTiming.ts` 91–93행, 아니면 60초). 한 번 닫힌 줄은 이후 표시로 다시 쓰지 않는다. 홈은 프로필·목표 조회를 기다리지 않는다. `dataLoading`은 거짓으로 시작해(116행) 인증 직후 첫 그리기(677행 관문)가 홈을 올리고, 재방문은 부트 캐시가 goals를 채워 그 스피너를 건너뛴다. 예시의 `home`은 `auth`보다 4ms 늦고, mistakes·강의 표시는 약 1.8초에 모인다. `markBoot("data")`는 `loadProfileAndGoals`가 끝난 뒤, `isActive()`가 참일 때만이었다(수정 전 256·281행). Firestore 읽기가 그 1.8초보다 늦으면 이미 닫힌 요약의 `data`는 `-`로 남는다.
+  - **(b)는 이 줄의 원인이 아니다**: StrictMode(`main.tsx`)가 effect를 정리하면 첫 조회의 `cancelled`가 참이 되어 `if (!isActive()) return`이 표시를 건너뛰고, catch(수정 전 299행)에도 표시가 없었다. 재실행된 effect는 `cancelled`가 거짓이라 성공한 조회는 표시에 닿는다. 그 표시가 빈 칸으로 보이는 이유는 요약이 먼저 닫히기 때문이다. 취소·오류로 표시가 아예 없는 구멍은 같은 수정으로 막는다.
+  - **수정**: `settleBootPhase("data")`가 성공·오류·취소된 결과 모두에서 `isActive()`(259행)보다 먼저 `data`를 찍는다(`App.tsx` 238행, `bootTiming.ts` 150–156행). `flush`는 `data`·`mistakes`·`lectureServer`가 모두 찍히거나 기존 60초 폴백일 때 돈다(`bootTiming.ts` 91–97행). 그 외 동작은 그대로다.
 - **v2.10.0 이후 수정(미배포) — `[boot]` 한 줄을 콘솔 밖에서도 읽기 (2026-11-26 KST, 브랜치 `englead/boot-timing-readable-20261126`)**:
   - **원인**: 게시본 https://aicall.ai.studio/ 에서 QA 브라우저 자동화는 error·warning만 남기고 info·log는 비운다. `[boot]` 요약은 `console.info`라 `bootTiming.ts`가 번들에 있어도 기록에 안 남는다. 같은 이유로 페이지의 "Service Worker registered successfully" `console.log`도 안 보인다.
   - **수정**: `flush`가 그 요약 문자열을 `document.documentElement.dataset.bootTiming`(`<html data-boot-timing>`)과 `window.__AICALL_BOOT__`에 쓴다. `document`와 `window`가 없으면(Node 테스트) 그 쓰기만 건너뛴다. `console.info`는 유지하고, 주소에 `?qa=1`이 있을 때만 같은 문자열을 `console.warn`으로 한 번 더 낸다. 저장된 QA 플래그는 보지 않는다.

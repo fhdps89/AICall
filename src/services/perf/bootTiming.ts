@@ -47,8 +47,8 @@ function publishBootSummary(summary: string): void {
 }
 
 /**
- * Create a per-page boot timing recorder that logs once when both `mistakes` and
- * `lectureServer` have settled, or after 60s if any phase lags.
+ * Create a per-page boot timing recorder that logs once when `data`, `mistakes`,
+ * and `lectureServer` have settled, or after 60s if any phase lags.
  * The same line is copied to `<html data-boot-timing>` and `window.__AICALL_BOOT__`.
  */
 export function createBootTimer(
@@ -88,7 +88,11 @@ export function createBootTimer(
       timeoutHandle = setTimer(flush, BOOT_LOG_TIMEOUT_MS);
     }
 
-    if (marks.mistakes !== undefined && marks.lectureServer !== undefined) {
+    if (
+      marks.data !== undefined &&
+      marks.mistakes !== undefined &&
+      marks.lectureServer !== undefined
+    ) {
       flush();
     }
   };
@@ -140,7 +144,8 @@ export function markBoot(phase: BootPhase): void {
 
 /**
  * Mark `phase` when `run` settles, whether it succeeds or throws, and before the
- * caller decides the result is stale. Used for the home mistakes read.
+ * caller decides the result is stale. Used for the home mistakes read and the
+ * profile and goals boot read.
  */
 export async function settleBootPhase<T>(phase: BootPhase, run: () => Promise<T>): Promise<T> {
   try {

@@ -102,7 +102,7 @@ const persistedQa = {
   length: 0,
 } as Storage;
 
-test("records only first call per phase and logs once when mistakes and lectureServer are marked", () => {
+test("records only first call per phase and logs once when data, mistakes, and lectureServer are marked", () => {
   let tick = 10;
   const logs: string[] = [];
   let timerCb: (() => void) | undefined;
@@ -171,6 +171,54 @@ test("logs once after 60s timeout when not all phases finish and ignores later m
   assert.equal(logs.length, 1);
 });
 
+test("flush waits for data after mistakes and lectureServer, and the 60s fallback still logs", () => {
+  let tick = 0;
+  const logs: string[] = [];
+
+  const mark = createBootTimer(
+    () => (tick += 10),
+    (msg) => logs.push(msg),
+    () => 1
+  );
+
+  mark("auth"); // 10
+  mark("home"); // 20
+  mark("lectureLocal"); // 30
+  mark("mistakes"); // 40
+  assert.equal(logs.length, 0);
+
+  mark("lectureServer"); // 50 — data still open, so no flush
+  assert.equal(logs.length, 0);
+
+  mark("data"); // 60 -> triggers log
+  assert.equal(logs.length, 1);
+  assert.equal(
+    logs[0],
+    "[boot] auth=10ms data=60ms home=20ms mistakes=40ms lectureLocal=30ms lectureServer=50ms"
+  );
+
+  let lateTick = 0;
+  const lateLogs: string[] = [];
+  let lateCb: (() => void) | undefined;
+  const late = createBootTimer(
+    () => (lateTick += 25),
+    (msg) => lateLogs.push(msg),
+    (cb, ms) => {
+      lateCb = cb;
+      assert.equal(ms, 60_000);
+      return 2;
+    }
+  );
+  late("mistakes");
+  late("lectureServer");
+  assert.equal(lateLogs.length, 0);
+  lateCb?.();
+  assert.equal(lateLogs.length, 1);
+  assert.match(lateLogs[0], /data=-/);
+  assert.match(lateLogs[0], /mistakes=25ms/);
+  assert.match(lateLogs[0], /lectureServer=50ms/);
+});
+
 test("calls clearTimer with timer handle when flushed before 60s timeout", () => {
   let tick = 0;
   const logs: string[] = [];
@@ -190,6 +238,7 @@ test("calls clearTimer with timer handle when flushed before 60s timeout", () =>
     }
   );
 
+  mark("data");
   mark("mistakes");
   assert.deepEqual(cleared, []);
 

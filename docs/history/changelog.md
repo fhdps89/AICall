@@ -4,6 +4,13 @@
 
 ---
 
+### [2026-11-26 KST] `[boot]` 요약의 `data`가 비던 문제 (브랜치 `englead/boot-data-phase-20261126`)
+- **증상**: 라이브 QA의 `data-boot-timing`이 `[boot] auth=1162ms data=- home=1166ms mistakes=1804ms lectureLocal=1802ms lectureServer=1802ms`처럼 읽힌다. 첫 방문과 재방문 모두 `data`가 `-`.
+- **원인 (a)**: `flush`는 `mistakes`와 `lectureServer`가 둘 다 찍히면 바로 호출되고, 아니면 60초를 기다렸다(수정 전 `bootTiming.ts` 91–93행). 이미 찍힌 줄은 나중에 단계가 찍혀도 다시 쓰지 않는다. 홈은 프로필·목표 조회가 끝나기 전에 그려진다. `App.tsx` 116행의 `dataLoading`이 거짓으로 시작해 인증 뒤 첫 그리기(677행 관문)가 홈을 마운트하고, 재방문은 부트 캐시가 goals를 채워 `dataLoading && goals.length === 0` 스피너를 타지 않는다. 예시에서 `home`은 `auth`보다 4ms 늦고 mistakes·`lectureServer`는 약 1.8초다. `markBoot("data")`는 `loadProfileAndGoals`가 resolve되고 `isActive()`가 참인 뒤에만 있었다(수정 전 256행 return, 281행 mark). 그 Firestore 읽기가 1.8초보다 늦으면 요약의 `data`는 `-`로 닫힌다.
+- **(b) 검토**: StrictMode(`main.tsx`)가 `[user]` effect를 실행한 뒤 정리하면서 첫 조회의 `cancelled`를 참으로 만든다. 그 조회는 `if (!isActive()) return`에서 `markBoot("data")`에 닿지 않고, 조회가 던지면 catch(수정 전 299행)에도 표시가 없다. 재실행된 effect는 자신의 `cancelled`가 거짓이라, 성공하면 표시는 된다. QA가 본 빈 `data`는 그 성공 표시가 빠진 것이 아니라, mistakes·`lectureServer`가 모이는 순간 요약이 먼저 닫힌 것이다. 취소되거나 실패한 조회가 표시를 건너뛰는 구멍은 남아 있어 같이 막는다.
+- **수정**: `data`는 `settleBootPhase`가 성공·오류·이미 취소된 결과 모두에서 찍고, 그 표시는 `isActive()` 판단(259행)보다 앞이다(`App.tsx` 238행, `bootTiming.ts` 150–156행). `flush`는 `data`·`mistakes`·`lectureServer`가 모두 있거나 기존 60초가 지나면 돈다(`bootTiming.ts` 91–97행). 다른 단계의 표시 조건과 `console.info`·`data-boot-timing`·`?qa=1` 경고는 그대로다.
+- **방어 조치**: `tests/bootLogPath.test.ts`(취소된 프로필 조회가 `isActive()` 전에 `data`를 찍고, mistakes·`lectureServer`만으로는 요약이 안 나옴), `tests/bootDataPhase.test.ts`(조회가 던져도 오류 처리 전에 `data`가 찍힘), `tests/bootTiming.test.ts`(세 단계가 모이기 전에는 `flush`가 없고, `data`가 없으면 60초 폴백이 `data=-`로 남음).
+
 ### [2026-11-26 KST] `[boot]` 요약을 콘솔 없이도 읽기 (브랜치 `englead/boot-timing-readable-20261126`)
 - **증상**: 게시 사이트 https://aicall.ai.studio/ 에서 QA 브라우저 자동화가 info·log를 수집하지 않음(error·warning만). `[boot] auth=… data=… home=… mistakes=… lectureLocal=… lectureServer=…` `console.info`가 안 보이고, 페이지의 "Service Worker registered successfully" `console.log`도 안 보임. 로거는 번들에 있음.
 - **수정**: `src/services/perf/bootTiming.ts`의 `flush`가 같은 요약 문자열을 `<html data-boot-timing>`(`document.documentElement.dataset.bootTiming`)과 `window.__AICALL_BOOT__`에 둔다. `document`·`window`가 없으면 그 쓰기만 건너뛴다. `console.info`는 그대로 두고, URL에 `?qa=1`이 있을 때만 `console.warn`. 이 브라우저에 저장된 QA 플래그는 경고 조건이 아님.
