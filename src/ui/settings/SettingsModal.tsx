@@ -49,6 +49,7 @@ import {
   CALL_ENGINE_POC_DESCRIPTION,
   POC_TEXT_VARIANT_TITLE,
   POC_TEXT_VARIANT_DESCRIPTION,
+  POC_TEXT_VARIANT_OPTION_LABELS,
 } from "./settingsText";
 import {
   POC_STT_MODEL,
@@ -573,8 +574,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     }}
                     className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-slate-100 font-mono text-[11px]"
                   >
-                    <option value="a">A · {POC_TEXT_VARIANTS.a.model}</option>
-                    <option value="b">B · {POC_TEXT_VARIANTS.b.model}</option>
+                    <option value="a">{POC_TEXT_VARIANT_OPTION_LABELS.a} · {POC_TEXT_VARIANTS.a.model}</option>
+                    <option value="b">{POC_TEXT_VARIANT_OPTION_LABELS.b} · {POC_TEXT_VARIANTS.b.model}</option>
                   </select>
                 </div>
                 <p className="text-[11px] text-slate-400 leading-relaxed">

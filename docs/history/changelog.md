@@ -4,6 +4,14 @@
 
 ---
 
+### [2026-11-27 KST] 시험 통화 엔진 답변 모델 A 확정 표시
+- **결정(07:48, 찬식님, 영어학습봇 전달)**: 시험 엔진 답변 모델은 A(`gemini-3.8-flash`, thinking `low`)로 확정. 근거는 QA봇 변형당 10회 통화(글 입력, `?qa=1`): A는 의도한 교정 19/36을 하고 답의 81%가 1~2문장, B(`gemini-3.5-flash-lite`)는 교정 0/40.
+- **바꾼 것**: `POC_DEFAULT_TEXT_VARIANT`("a" 그대로) 위에 결정·근거 주석. 설정 「시험 엔진 답변 모델」(제목에서 「A/B 비교」 뺌) 선택지를 「A · 확정(기본)」·「B · 비교용」으로, 설명에 B는 직접 고르거나 `?pocText=b`일 때만 쓴다고 적음(`POC_TEXT_VARIANT_OPTION_LABELS`).
+- **그대로 둔 것**: B 변형, `?pocText=a|b`, 시험 엔진 스위치(기본 꺼짐), 서버 매핑, 사용량 A/B 행. 저장된 B는 사용자가 B를 직접 골랐을 때만 생기고(A를 고르면 키 삭제), 이상한 저장값은 A.
+- **테스트**: 라벨 문구, 빈 저장소·A 선택 뒤 기본 A, 명시적 B 선택일 때만 B, URL이 저장값보다 우선, 이상한 저장값은 A.
+
+---
+
 ### [2026-11-27 KST] 실패한 강의 잡의 대본을 백업해 재배포 뒤에도 오디오만 다시 만든다
 - **사고(11/27)**: 06:42에 시작한 생성 잡이 TTS 도중 15분 상한(06:57:00)에 걸려 `TIMED_OUT`. 06:57:03 피드 조회가 같은 서버에서 로컬 대본으로 오디오 rebuild를 시작(오늘 생성 2/3, 리스 TTL 31분 → 07:28:03)했고, 피드는 `ready`·오디오 없음·`audioRestoring`. 07:03–07:04 재배포로 그 rebuild와 로컬 대본이 함께 사라졌다. Firestore days 문서에는 `genControl`만 있고 강의 백업이 없어서, 07:15 새 서버는 처음부터 새 생성을 시도했고 죽은 서버의 rebuild 리스에 막혀 `GEN_SKIPPED`(lease)가 됐다.
 - **원인**: `server/feedStore.ts` `saveLectureFailureBackup` → `saveLectureBackup` → `sanitizeReadyLectureForBackup`가 `status !== 'ready'`면 `null`이라, 실패한 잡(`failed`)의 대본은 영구 저장되지 않았다.
