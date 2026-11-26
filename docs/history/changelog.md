@@ -4,6 +4,11 @@
 
 ---
 
+### [2026-11-26 KST] 통화 비용 절감 아키텍처 제안서 (Track 1, 브랜치 `englead/live-cost-proposal-20261126`)
+- **추가**: `docs/plan/live-cost-optimization-proposal.md`. Google·OpenAI·Cartesia·Deepgram·xAI·LiveKit 공식 가격·문서(접속일 2026-11-26)로 대안 1(명시 압축)·2(분당 정액 GPT-Live·Cartesia·Deepgram·xAI)·3(풀듀플렉스 스트리밍)과 무음 차단·롤링 요약·경량 모델·프롬프트 경량화·2027 인상 대응·하이브리드를 비교. 산식과 일·월 USD/KRW 매트릭스(2026·2027-01-01 단가).
+- **결론(제안)**: 1순위 하이브리드 H1(엔진 유지, 보수안 월 $30.25/$33.21 → 6k/3k 월 $21.73/$24.69, 추정), 차선책 구글 단일 스트리밍 PoC(월 $10.49/$15.91, 추정). 엔진 변경 전 Track 2 `usageMetadata` 실측 8개 항목을 확인.
+- **코드 변경 없음**: 문서만 추가. 엔진·모델명 상수는 그대로(Phase Gate).
+
 ### [2026-11-26 KST] `[boot]` 요약의 `data`가 비던 문제 (브랜치 `englead/boot-data-phase-20261126`)
 - **증상**: 라이브 QA의 `data-boot-timing`이 `[boot] auth=1162ms data=- home=1166ms mistakes=1804ms lectureLocal=1802ms lectureServer=1802ms`처럼 읽힌다. 첫 방문과 재방문 모두 `data`가 `-`.
 - **원인 (a)**: `flush`는 `mistakes`와 `lectureServer`가 둘 다 찍히면 바로 호출되고, 아니면 60초를 기다렸다(수정 전 `bootTiming.ts` 91–93행). 이미 찍힌 줄은 나중에 단계가 찍혀도 다시 쓰지 않는다. 홈은 프로필·목표 조회가 끝나기 전에 그려진다. `App.tsx` 116행의 `dataLoading`이 거짓으로 시작해 인증 뒤 첫 그리기(677행 관문)가 홈을 마운트하고, 재방문은 부트 캐시가 goals를 채워 `dataLoading && goals.length === 0` 스피너를 타지 않는다. 예시에서 `home`은 `auth`보다 4ms 늦고 mistakes·`lectureServer`는 약 1.8초다. `markBoot("data")`는 `loadProfileAndGoals`가 resolve되고 `isActive()`가 참인 뒤에만 있었다(수정 전 256행 return, 281행 mark). 그 Firestore 읽기가 1.8초보다 늦으면 요약의 `data`는 `-`로 닫힌다.
