@@ -3,10 +3,15 @@
  * CascadeSession. Auth and the Live session rate limit run in server.ts before the upgrade.
  * The API key stays inside the injected GoogleGenAI client; nothing here logs keys or audio.
  */
-import { POC_STT_MODEL, POC_TEXT_MODEL, POC_TTS_MODEL } from '../src/config/cascadePoc.ts';
+import {
+  POC_STT_MODEL,
+  POC_TEXT_VARIANTS,
+  POC_TTS_MODEL,
+  parsePocTextVariant,
+} from '../src/config/cascadePoc.ts';
 import { normalizeVoiceName } from '../src/config/voices.ts';
 import { CascadeSession, createGeminiCascadeAi } from './cascadeSession.ts';
-import type { CascadeAi } from './cascadeSession.ts';
+import type { CascadeAi, CascadeModels } from './cascadeSession.ts';
 
 /** Minimal socket surface used here (ws.WebSocket satisfies it). */
 export interface CascadeClientSocket {
@@ -24,7 +29,7 @@ export interface CascadeWsDeps {
   /** v1beta client for 3.8 TTS streaming (Interactions API); falls back to getGenAI's client. */
   getTtsGenAI?: () => unknown | null;
   /** Test seam: build the cascade AI from the client (defaults to the real Gemini adapter). */
-  makeAi?: (genAI: unknown) => CascadeAi;
+  makeAi?: (genAI: unknown, models: CascadeModels) => CascadeAi;
   log?: (line: string) => void;
 }
 
@@ -67,7 +72,16 @@ export function handleCascadeConnection(clientWs: CascadeClientSocket, deps: Cas
     if (msg.type === 'init') {
       if (initStarted) return;
       initStarted = true;
-      log('[poc] stage=init_received');
+      // Only "a"/"b" is read from the client; the model ID always comes from cascadePoc.ts.
+      const textVariant = parsePocTextVariant(msg.textVariant);
+      const variant = POC_TEXT_VARIANTS[textVariant];
+      const models: CascadeModels = {
+        stt: POC_STT_MODEL,
+        text: variant.model,
+        tts: POC_TTS_MODEL,
+        thinkingLevel: variant.thinkingLevel,
+      };
+      log(`[poc] stage=init_received variant=${textVariant} textModel=${models.text}`);
       const genAI = deps.getGenAI();
       if (!genAI) {
         log('[poc] stage=no_api_key -> fallback_required');
@@ -75,18 +89,15 @@ export function handleCascadeConnection(clientWs: CascadeClientSocket, deps: Cas
         return;
       }
       const ai = deps.makeAi
-        ? deps.makeAi(genAI)
-        : createGeminiCascadeAi(
-            genAI,
-            { stt: POC_STT_MODEL, text: POC_TEXT_MODEL, tts: POC_TTS_MODEL },
-            deps.getTtsGenAI?.() ?? undefined
-          );
+        ? deps.makeAi(genAI, models)
+        : createGeminiCascadeAi(genAI, models, deps.getTtsGenAI?.() ?? undefined);
       session = new CascadeSession(
         { ai, send, log },
         {
           systemInstruction: typeof msg.systemInstruction === 'string' ? msg.systemInstruction : '',
           voiceName: normalizeVoiceName(msg.voiceName),
           history: msg.history,
+          textVariant,
         }
       );
       session.start().catch((err) => {

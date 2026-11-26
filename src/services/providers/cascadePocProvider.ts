@@ -14,7 +14,15 @@
  * opens its own.
  */
 import { normalizeVoiceName } from "../../config/voices";
-import { POC_WS_PATH, emptyPocUsage, sanitizePocUsage, type PocUsageTotals } from "../../config/cascadePoc";
+import {
+  POC_TEXT_VARIANTS,
+  POC_WS_PATH,
+  emptyPocUsage,
+  sanitizePocUsage,
+  type PocTextVariant,
+  type PocUsageTotals,
+} from "../../config/cascadePoc";
+import { resolvePocTextVariant, type PocTextVariantSource } from "../settings/callEngineSetting";
 import { auth } from "../firebase/config";
 import { LIVE_STATUS_TEXT } from "./liveStatusText";
 import { CALL_KICKOFF_PROMPT } from "./geminiLiveProvider";
@@ -34,6 +42,47 @@ export const CASCADE_RECONNECT_DELAY_MS = 1000;
 export interface CascadePocTimings {
   connectBudgetMs?: number;
   reconnectDelayMs?: number;
+  /** Test seam: A/B choice (default: ?pocText= URL param, then the saved setting, then "a"). */
+  resolveTextVariant?: () => { variant: PocTextVariant; source: PocTextVariantSource };
+}
+
+/** Nearest-rank percentile, same rule as the server's [poc-summary] (no samples → 0, like the server). */
+function percentileOf(values: number[], p: number): number {
+  if (values.length === 0) return 0;
+  const s = [...values].sort((x, y) => x - y);
+  const idx = Math.min(s.length - 1, Math.max(0, Math.ceil((p / 100) * s.length) - 1));
+  return Math.round(s[idx]);
+}
+
+/** Nearest-rank median, the same rule as the server's [poc-summary]. */
+function medianOf(values: number[]): number {
+  return percentileOf(values, 50);
+}
+
+function nonNegInt(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+interface PocCallStats {
+  turns: number;
+  finalToToken: number[];
+  ttsFirstChunk: number[];
+  finalToAudio: number[];
+  /** Server counters of earlier sessions in this call (a reconnect starts a new server session). */
+  base: { echoDrops: number; ttsStreams: number; bargeIns: number };
+  last: { echoDrops: number; ttsStreams: number; bargeIns: number };
+}
+
+function emptyStats(): PocCallStats {
+  return {
+    turns: 0,
+    finalToToken: [],
+    ttsFirstChunk: [],
+    finalToAudio: [],
+    base: { echoDrops: 0, ttsStreams: 0, bargeIns: 0 },
+    last: { echoDrops: 0, ttsStreams: 0, bargeIns: 0 },
+  };
 }
 const MAX_RECONNECTS = 3;
 
@@ -94,9 +143,31 @@ export class CascadePocProvider implements PocCapableProvider {
   private pocUsageBase: PocUsageTotals = emptyPocUsage();
   private pocUsage: PocUsageTotals = emptyPocUsage();
 
+  private resolveTextVariant: () => { variant: PocTextVariant; source: PocTextVariantSource };
+  private textVariant: PocTextVariant = "a";
+  private stats: PocCallStats = emptyStats();
+  private summaryLogged = false;
+
   constructor(timings: CascadePocTimings = {}) {
     this.connectBudgetMs = timings.connectBudgetMs ?? CASCADE_CONNECT_BUDGET_MS;
     this.reconnectDelayMs = timings.reconnectDelayMs ?? CASCADE_RECONNECT_DELAY_MS;
+    this.resolveTextVariant = timings.resolveTextVariant ?? (() => resolvePocTextVariant());
+  }
+
+  /** Reply-text variant this call asked the server for ("a" or "b"). */
+  public getPocTextVariant(): PocTextVariant {
+    return this.textVariant;
+  }
+
+  /** Browser-side call summary (the server prints its own [poc-summary] to the server log). */
+  private logSummary(): void {
+    if (this.summaryLogged || this.stats.turns === 0) return;
+    this.summaryLogged = true;
+    const st = this.stats;
+    const c = (k: "echoDrops" | "ttsStreams" | "bargeIns") => st.base[k] + st.last[k];
+    console.log(
+      `[poc-summary] variant=${this.textVariant} textModel=${POC_TEXT_VARIANTS[this.textVariant].model} turns=${st.turns} medianFinalToToken=${medianOf(st.finalToToken)}ms p90FinalToToken=${percentileOf(st.finalToToken, 90)}ms medianTtsFirstChunk=${medianOf(st.ttsFirstChunk)}ms medianFinalToAudio=${medianOf(st.finalToAudio)}ms p90FinalToAudio=${percentileOf(st.finalToAudio, 90)}ms echoDrops=${c("echoDrops")} ttsStreams=${c("ttsStreams")} bargeIns=${c("bargeIns")}`
+    );
   }
 
   public async connect(options: LiveSessionOptions): Promise<void> {
@@ -108,6 +179,13 @@ export class CascadePocProvider implements PocCapableProvider {
     this.connectStartedAt = Date.now();
     options.onStatusChange("connecting", LIVE_STATUS_TEXT.preparing);
     console.log("[poc] stage=connect_start");
+    const chosen = this.resolveTextVariant();
+    this.textVariant = chosen.variant === "b" ? "b" : "a";
+    this.stats = emptyStats();
+    this.summaryLogged = false;
+    console.log(
+      `[poc] variant=${this.textVariant} textModel=${POC_TEXT_VARIANTS[this.textVariant].model} source=${chosen.source}`
+    );
 
     // Same order as the normal engine (geminiLiveProvider connect): the mic opens in parallel
     // right away, so Android's switch to call mode happens before the tutor's first word, not
@@ -228,6 +306,8 @@ export class CascadePocProvider implements PocCapableProvider {
             systemInstruction: this.options?.systemPrompt || "",
             voiceName: normalizeVoiceName(this.options?.voiceName),
             history,
+            // Only "a" or "b"; the server maps it to a model ID.
+            textVariant: this.textVariant,
           })
         );
       };
@@ -248,7 +328,16 @@ export class CascadePocProvider implements PocCapableProvider {
             // A new server session counts usage from zero: keep what earlier sessions reported.
             this.pocUsageBase = addPocUsage(this.pocUsageBase, this.pocUsage);
             this.pocUsage = emptyPocUsage();
-            console.log(`[poc] stage=ready ms=${Date.now() - this.connectStartedAt}`);
+            const st = this.stats;
+            st.base = {
+              echoDrops: st.base.echoDrops + st.last.echoDrops,
+              ttsStreams: st.base.ttsStreams + st.last.ttsStreams,
+              bargeIns: st.base.bargeIns + st.last.bargeIns,
+            };
+            st.last = { echoDrops: 0, ttsStreams: 0, bargeIns: 0 };
+            console.log(
+              `[poc] stage=ready ms=${Date.now() - this.connectStartedAt} variant=${String(msg.textVariant ?? "?")} textModel=${String(msg.models?.text ?? "?")}`
+            );
             resolve();
           } else if (msg.type === "fallback_required" || msg.type === "error") {
             fail("POC_SERVER_" + String(msg.error || msg.type), String(msg.error || msg.type));
@@ -341,12 +430,33 @@ export class CascadePocProvider implements PocCapableProvider {
         return;
       case "poc_usage":
         this.pocUsage = sanitizePocUsage(msg.usage);
+        if (msg.counters && typeof msg.counters === "object") {
+          this.stats.last = {
+            echoDrops: nonNegInt(msg.counters.echoDrops),
+            ttsStreams: nonNegInt(msg.counters.ttsStreams),
+            bargeIns: nonNegInt(msg.counters.bargeIns),
+          };
+        }
         return;
-      case "poc_turn":
+      case "poc_turn": {
+        const st = this.stats;
+        st.turns += 1;
+        const f2t = Number(msg.finalToTokenMs);
+        const tts = Number(msg.ttsFirstChunkMs);
+        const f2a = Number(msg.finalToAudioMs);
+        if (Number.isFinite(f2t) && f2t >= 0) st.finalToToken.push(f2t);
+        if (Number.isFinite(tts) && tts >= 0) st.ttsFirstChunk.push(tts);
+        if (Number.isFinite(f2a) && f2a >= 0) st.finalToAudio.push(f2a);
+        st.last = {
+          echoDrops: nonNegInt(msg.echoDrops),
+          ttsStreams: nonNegInt(msg.ttsStreams),
+          bargeIns: nonNegInt(msg.bargeIns),
+        };
         console.log(
-          `[poc-turn] n=${msg.turn} interimToFinal=${msg.interimToFinalMs}ms finalToToken=${msg.finalToTokenMs}ms tokenToAudio=${msg.tokenToAudioMs}ms finalToAudio=${msg.finalToAudioMs}ms`
+          `[poc-turn] n=${msg.turn} variant=${this.textVariant} interimToFinal=${msg.interimToFinalMs}ms finalToToken=${msg.finalToTokenMs}ms tokenToAudio=${msg.tokenToAudioMs}ms ttsFirstChunk=${msg.ttsFirstChunkMs ?? -1}ms finalToAudio=${msg.finalToAudioMs}ms`
         );
         return;
+      }
       case "error":
         console.warn(`[poc] server_error=${msg.error}`);
         this.firstAudioWaiter?.reject(cascadeError("POC_SERVER_" + String(msg.error), String(msg.error)));
@@ -563,6 +673,7 @@ export class CascadePocProvider implements PocCapableProvider {
 
   public async disconnect(notifyClosed: boolean = true): Promise<void> {
     this.closing = true;
+    this.logSummary();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

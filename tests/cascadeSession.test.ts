@@ -133,13 +133,13 @@ function makeFakeAi(
   return { ai, stt, textCalls, ttsCalls, ttsRelease };
 }
 
-function makeSession(fake: ReturnType<typeof makeFakeAi>, history: unknown = []) {
+function makeSession(fake: ReturnType<typeof makeFakeAi>, history: unknown = [], textVariant?: string) {
   const clock = new FakeClock();
   const sent: any[] = [];
   const logs: string[] = [];
   const session = new CascadeSession(
     { ai: fake.ai, send: (m) => sent.push(m), clock, log: (l) => logs.push(l) },
-    { systemInstruction: 'You are a tutor.', voiceName: 'Kore', history }
+    { systemInstruction: 'You are a tutor.', voiceName: 'Kore', history, textVariant }
   );
   return { session, clock, sent, logs };
 }
@@ -151,7 +151,7 @@ const interim = (text: string) => ({ serverContent: { interimInputTranscription:
 test('start: ready after STT connects; fallback_required when STT fails or times out', async () => {
   const ok = makeSession(makeFakeAi());
   await ok.session.start();
-  assert.deepEqual(ok.sent[0], { type: 'ready', model: 'cascade-poc', models: { stt: 'gemini-3.5-transcribe-live', text: 'gemini-3.8-flash', tts: 'gemini-3.8-flash-tts' } });
+  assert.deepEqual(ok.sent[0], { type: 'ready', model: 'cascade-poc', textVariant: 'a', models: { stt: 'gemini-3.5-transcribe-live', text: 'gemini-3.8-flash', tts: 'gemini-3.8-flash-tts' } });
 
   const bad = makeSession(makeFakeAi({ failStt: true }));
   await bad.session.start();
@@ -207,7 +207,7 @@ test('voice turn: waits 0.4 s after the final segment, then text → streamed au
   assert.equal(usage.ttsInTokens, 5);
   assert.equal(usage.ttsAudioSec, 1);
   assert.ok(logs.some((l) => /^\[poc-tts\] n=1 seg=1 chars=31 firstChunkMs=\d+ chunks=2 audioSec=1\.00 totalMs=\d+$/.test(l)));
-  assert.ok(logs.some((l) => /^\[poc-turn\] n=1 interimToFinal=\d+ms finalToToken=\d+ms tokenToAudio=\d+ms finalToAudio=\d+ms$/.test(l)));
+  assert.ok(logs.some((l) => /^\[poc-turn\] n=1 variant=a interimToFinal=\d+ms finalToToken=\d+ms tokenToAudio=\d+ms ttsFirstChunk=\d+ms finalToAudio=\d+ms$/.test(l)));
 });
 
 test('barge-in: 2 non-echo words while the tutor speaks stop it and truncate history', async () => {
@@ -316,7 +316,7 @@ test('turn errors keep the session alive and summary is logged once on close', a
   session.close();
   session.close();
   assert.equal(logs.filter((l) => l.startsWith('[poc-summary]')).length, 1);
-  assert.match(logs.find((l) => l.startsWith('[poc-summary]'))!, /turns=0 medianFinalToAudio=0ms p90FinalToAudio=0ms bargeIns=0 echoDrops=0 ttsStreams=0 sttAudioSec=0\.00 ttsAudioSec=0\.00 usd=/);
+  assert.match(logs.find((l) => l.startsWith('[poc-summary]'))!, /^\[poc-summary\] variant=a textModel=gemini-3\.8-flash turns=0 medianFinalToToken=0ms p90FinalToToken=0ms medianTtsFirstChunk=0ms medianFinalToAudio=0ms p90FinalToAudio=0ms bargeIns=0 echoDrops=0 ttsStreams=0 sttAudioSec=0\.00 ttsAudioSec=0\.00 usd=/);
 });
 
 test('reconnect history is sanitized and used as context', async () => {
@@ -1090,4 +1090,131 @@ test('Gemini adapter: an Interactions error event or failed status ends the spee
     }, /tts_stream_(error quota|failed)/);
     assert.equal(got.length, 1, 'audio before the error was still delivered');
   }
+});
+
+test('cascade socket: textVariant "b" maps to gemini-3.5-flash-lite (minimal); anything else, incl. a raw model ID, to A', async () => {
+  for (const [sent, wantModel, wantThinking, wantVariant] of [
+    ['b', 'gemini-3.5-flash-lite', 'minimal', 'b'],
+    ['a', 'gemini-3.8-flash', 'low', 'a'],
+    [undefined, 'gemini-3.8-flash', 'low', 'a'],
+    ['gemini-3.5-flash-lite', 'gemini-3.8-flash', 'low', 'a'],
+    ['gemini-2.0-pro', 'gemini-3.8-flash', 'low', 'a'],
+  ] as const) {
+    const handlers: Record<string, (x?: any) => void> = {};
+    const out: any[] = [];
+    const logs: string[] = [];
+    const ws = { readyState: 1, send: (d: string) => out.push(JSON.parse(d)), close() {}, on: (ev: string, fn: any) => (handlers[ev] = fn) };
+    const fake = makeFakeAi();
+    let models: any = null;
+    handleCascadeConnection(ws as any, {
+      getGenAI: () => ({}),
+      makeAi: (_g, m) => ((models = m), fake.ai),
+      log: (l) => logs.push(l),
+    });
+    handlers.message(JSON.stringify({ type: 'init', systemInstruction: 'x', voiceName: 'Kore', textVariant: sent, textModel: 'gemini-evil' }));
+    await flush();
+    assert.equal(models.text, wantModel, String(sent));
+    assert.equal(models.thinkingLevel, wantThinking);
+    assert.equal(out[0].textVariant, wantVariant);
+    assert.equal(out[0].models.text, wantModel);
+    assert.ok(logs.includes(`[poc] stage=init_received variant=${wantVariant} textModel=${wantModel}`));
+    handlers.close();
+  }
+});
+
+test('Gemini adapter: thinking level comes from the variant models', async () => {
+  const calls: any[] = [];
+  const genai = {
+    live: { connect: async () => ({ sendRealtimeInput() {}, close() {} }) },
+    models: {
+      generateContentStream: async (req: any) => {
+        calls.push(req);
+        return (async function* () {
+          yield { text: 'Hi.' };
+        })();
+      },
+    },
+  };
+  const ai = createGeminiCascadeAi(genai as any, { stt: 's', text: 'gemini-3.5-flash-lite', tts: 'v', thinkingLevel: 'minimal' }, {} as any);
+  for await (const _ of await ai.streamText({ systemInstruction: 'x', contents: [], maxOutputTokens: 10, signal: new AbortController().signal })) {
+    // drain
+  }
+  assert.equal(calls[0].model, 'gemini-3.5-flash-lite');
+  assert.deepEqual(calls[0].config.thinkingConfig, { thinkingLevel: 'minimal' });
+  assert.equal('temperature' in calls[0].config, false);
+});
+
+test('[poc-summary] has variant, textModel, finalToToken median/p90 and TTS first-chunk median; poc_turn carries the counters', async () => {
+  const fake = makeFakeAi();
+  const { session, sent, logs, clock } = makeSession(fake, [], 'b');
+  await session.start();
+  for (const text of ['one', 'two', 'three']) {
+    session.handleClientMessage({ type: 'text_prompt', text });
+    await flush();
+    clock.advance(60_000); // tutor finished speaking: the next prompt is not a barge-in
+  }
+  const turns = sent.filter((m) => m.type === 'poc_turn');
+  assert.equal(turns.length, 3);
+  for (const t of turns) {
+    assert.equal(typeof t.ttsFirstChunkMs, 'number');
+    assert.equal(typeof t.echoDrops, 'number');
+    assert.equal(t.ttsStreams > 0, true);
+  }
+  assert.ok(logs.some((l) => /^\[poc-turn\] n=1 variant=b .*ttsFirstChunk=\d+ms/.test(l)));
+  session.close();
+  const summary = logs.find((l) => l.startsWith('[poc-summary]'))!;
+  assert.match(summary, /^\[poc-summary\] variant=b textModel=gemini-3\.5-flash-lite turns=3 medianFinalToToken=\d+ms p90FinalToToken=\d+ms medianTtsFirstChunk=\d+ms medianFinalToAudio=\d+ms p90FinalToAudio=\d+ms bargeIns=0 echoDrops=0 ttsStreams=3 /);
+});
+
+test('[poc-summary] numbers: finalToToken median/p90 and TTS first-chunk median from per-turn delays', async () => {
+  const fake = makeFakeAi();
+  const { session, logs, clock, sent } = makeSession(fake, [], 'b');
+  const textDelays = [300, 900, 600];
+  const ttsDelays = [100, 500, 300];
+  const origText = fake.ai.streamText.bind(fake.ai);
+  const origTts = fake.ai.streamSpeech.bind(fake.ai);
+  let t = 0;
+  let s = 0;
+  fake.ai.streamText = async (req) => {
+    const d = textDelays[t++];
+    const inner = await origText(req);
+    return {
+      async *[Symbol.asyncIterator]() {
+        clock.advance(d); // time to the first reply token
+        yield* inner as any;
+      },
+    } as any;
+  };
+  fake.ai.streamSpeech = async (req) => {
+    const inner = await origTts(req);
+    const d = ttsDelays[s];
+    let first = true;
+    return {
+      async *[Symbol.asyncIterator]() {
+        for await (const ch of inner as any) {
+          if (first) {
+            first = false;
+            if (d !== undefined) clock.advance(d);
+          }
+          yield ch;
+        }
+      },
+    } as any;
+  };
+  await session.start();
+  for (const text of ['one', 'two', 'three']) {
+    s = t; // TTS delay index follows the turn
+    session.handleClientMessage({ type: 'text_prompt', text });
+    await flush();
+    clock.advance(60_000);
+  }
+  const turns = sent.filter((m) => m.type === 'poc_turn');
+  assert.deepEqual(turns.map((m) => m.finalToTokenMs), [300, 900, 600]);
+  session.close();
+  const summary = logs.find((l) => l.startsWith('[poc-summary]'))!;
+  assert.match(summary, / medianFinalToToken=600ms p90FinalToToken=900ms /);
+  assert.deepEqual(turns.map((m) => m.ttsFirstChunkMs), [100, 500, 300]);
+  assert.match(summary, / medianTtsFirstChunk=300ms /);
+  const lastUsage = sent.filter((m) => m.type === 'poc_usage').at(-1);
+  assert.deepEqual(lastUsage.counters, { echoDrops: 0, ttsStreams: 3, bargeIns: 0 }, 'poc_usage carries the running counters');
 });

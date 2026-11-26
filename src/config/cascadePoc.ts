@@ -1,18 +1,39 @@
 export const POC_STT_MODEL = "gemini-3.5-transcribe-live" as const;
-export const POC_TEXT_MODEL = "gemini-3.8-flash" as const;
 export const POC_TTS_MODEL = "gemini-3.8-flash-tts" as const;
+
+/** Reply-text A/B test (EL-18): the client sends only "a" or "b"; the server maps it here. */
+export type PocTextVariant = "a" | "b";
+export const POC_DEFAULT_TEXT_VARIANT: PocTextVariant = "a";
 /**
- * gemini-3.8-flash supports low/medium/high only ("minimal" returns an error); low is the
- * documented choice for real-time chat (ai.google.dev whats-new-gemini-3.8, thinking, 2026-11-27).
+ * Thinking level = lowest-latency level each model supports (ai.google.dev thinking, 2026-11-27):
+ * - a: gemini-3.8-flash supports low/medium/high only ("minimal" returns an error); low is
+ *   "fewest tokens, lowest latency" (whats-new-gemini-3.8).
+ * - b: gemini-3.5-flash-lite supports minimal/low/medium/high, default minimal = "near-off
+ *   thinking, lowest latency" (whats-new-gemini-3.6, migrate-to-gemini-3-5-flash-lite).
  */
-export const POC_TEXT_THINKING_LEVEL = "low" as const;
+export const POC_TEXT_VARIANTS = {
+  a: { model: "gemini-3.8-flash", thinkingLevel: "low" },
+  b: { model: "gemini-3.5-flash-lite", thinkingLevel: "minimal" },
+} as const;
+
+/** Anything other than "a"/"b" (any case, trimmed) falls back to A. */
+export function parsePocTextVariant(raw: unknown): PocTextVariant {
+  return typeof raw === "string" && raw.trim().toLowerCase() === "b" ? "b" : "a";
+}
+
+/** Default variant (A) model, kept for existing imports. */
+export const POC_TEXT_MODEL = POC_TEXT_VARIANTS.a.model;
+export const POC_TEXT_THINKING_LEVEL = POC_TEXT_VARIANTS.a.thinkingLevel;
 export const POC_WS_PATH = "/api/gemini/cascade" as const;
 
 /**
  * USD per 1M tokens (paid tier, standard), ai.google.dev/gemini-api/docs/pricing checked
  * 2026-11-27: transcribe-live $3.50 audio in / $21 text out; gemini-3.8-flash $0.75 in /
- * $3.75 out incl. thinking (2027: $1.50 / $7.50); gemini-3.8-flash-tts $0.50 text in /
- * $9.00 audio out (2027: $1.00 / $18.00).
+ * $3.75 out incl. thinking (2027: $1.50 / $7.50); gemini-3.5-flash-lite $0.30 in / $2.50 out
+ * incl. thinking (no 2027 change listed); gemini-3.8-flash-tts $0.50 text in / $9.00 audio out
+ * (2027: $1.00 / $18.00).
+ * legacy* = models of test-mode records written before the A/B split (PR #63 on main:
+ * gemini-3.1-flash-lite $0.25 / $1.50, gemini-3.8-flash-lite-tts $0.50 / $6.00, 2027 $1.00 / $12.00).
  */
 export const POC_RATES = {
   sttInAudioPer1M: 3.5,
@@ -21,6 +42,14 @@ export const POC_RATES = {
   textOutPer1M_2026: 3.75,
   textInPer1M_2027: 1.5,
   textOutPer1M_2027: 7.5,
+  textBInPer1M: 0.3,
+  textBOutPer1M: 2.5,
+  legacyTextInPer1M: 0.25,
+  legacyTextOutPer1M: 1.5,
+  legacyTtsInPer1M_2026: 0.5,
+  legacyTtsOutAudioPer1M_2026: 6,
+  legacyTtsInPer1M_2027: 1,
+  legacyTtsOutAudioPer1M_2027: 12,
   ttsInPer1M_2026: 0.5,
   ttsOutAudioPer1M_2026: 9,
   ttsInPer1M_2027: 1,
@@ -66,15 +95,36 @@ function is2027(nowMs: number): boolean {
   return Number.isFinite(nowMs) && nowMs >= POC_2027_START_MS;
 }
 
+/**
+ * Which rate set prices a record: "a"/"b" = that text variant (+ current TTS), "legacy" = a
+ * record without a variant tag (written before the A/B split: 3.1-flash-lite + flash-lite-tts).
+ */
+export type PocPricing = PocTextVariant | "legacy";
+
 /** 2027 text rates apply from 2027-01-01 00:00 KST (= 2026-12-31T15:00:00Z) */
-export function pocTextRates(nowMs: number): { inPer1M: number; outPer1M: number } {
+export function pocTextRates(
+  nowMs: number,
+  pricing: PocPricing = "a",
+): { inPer1M: number; outPer1M: number } {
+  if (pricing === "b") return { inPer1M: POC_RATES.textBInPer1M, outPer1M: POC_RATES.textBOutPer1M };
+  if (pricing === "legacy") {
+    return { inPer1M: POC_RATES.legacyTextInPer1M, outPer1M: POC_RATES.legacyTextOutPer1M };
+  }
   return is2027(nowMs)
     ? { inPer1M: POC_RATES.textInPer1M_2027, outPer1M: POC_RATES.textOutPer1M_2027 }
     : { inPer1M: POC_RATES.textInPer1M_2026, outPer1M: POC_RATES.textOutPer1M_2026 };
 }
 
 /** 2027 TTS rates apply from 2027-01-01 00:00 KST (= 2026-12-31T15:00:00Z) */
-export function pocTtsRates(nowMs: number): { inPer1M: number; outAudioPer1M: number } {
+export function pocTtsRates(
+  nowMs: number,
+  pricing: PocPricing = "a",
+): { inPer1M: number; outAudioPer1M: number } {
+  if (pricing === "legacy") {
+    return is2027(nowMs)
+      ? { inPer1M: POC_RATES.legacyTtsInPer1M_2027, outAudioPer1M: POC_RATES.legacyTtsOutAudioPer1M_2027 }
+      : { inPer1M: POC_RATES.legacyTtsInPer1M_2026, outAudioPer1M: POC_RATES.legacyTtsOutAudioPer1M_2026 };
+  }
   if (is2027(nowMs)) {
     return {
       inPer1M: POC_RATES.ttsInPer1M_2027,
@@ -95,11 +145,12 @@ export function pocTtsRates(nowMs: number): { inPer1M: number; outAudioPer1M: nu
 export function pocCostUsd(
   u: Partial<PocUsageTotals> | null | undefined,
   nowMs: number = Date.now(),
+  pricing: PocPricing = "a",
 ): number {
   if (!u || typeof u !== "object") return 0;
   const ts = Number.isFinite(nowMs) ? nowMs : Date.now();
-  const text = pocTextRates(ts);
-  const tts = pocTtsRates(ts);
+  const text = pocTextRates(ts, pricing);
+  const tts = pocTtsRates(ts, pricing);
 
   const sttAudioSec = nonNeg(u.sttAudioSec);
   const sttOutTokens = nonNeg(u.sttOutTokens);

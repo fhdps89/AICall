@@ -4,7 +4,7 @@ import {
   recordUsage,
 } from "../../services/usage/usageService";
 import { callUsageDelta, liveContextMinutesSq, pocCallUsageDelta } from "../../services/usage/learningLog";
-import { activeEngineOf, pocUsageOf } from "../../services/providers/cascadeFallbackProvider";
+import { activeEngineOf, pocTextVariantOf, pocUsageOf } from "../../services/providers/cascadeFallbackProvider";
 import { pocCostUsd } from "../../config/cascadePoc";
 import { formatLiveUsageLog } from "../../services/providers/liveUsage";
 import React, { useState, useEffect, useRef } from "react";
@@ -396,12 +396,13 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
     const stats = providerRef.current.getConnectionStats();
     const liveUsage = providerRef.current.finalizeLiveUsage?.();
     const pocUsage = activeEngineOf(providerRef.current) === "cascade_poc" ? pocUsageOf(providerRef.current) : null;
+    const pocVariant = pocTextVariantOf(providerRef.current);
 
     const durationMin = callDuration > 0 ? callDuration / 60 : 0;
     const estUsd = liveCostEstimateUsd(durationMin, liveContextMinutesSq(durationMin));
     if (pocUsage) {
       console.info(
-        `[poc-usage] durationSec=${callDuration} turns=${pocUsage.turns} sttAudioSec=${pocUsage.sttAudioSec.toFixed(1)} ttsAudioSec=${pocUsage.ttsAudioSec.toFixed(1)} sttOutEstimated=${pocUsage.sttOutEstimated ? 1 : 0} usd=${pocCostUsd(pocUsage).toFixed(4)} qa=${qaCallRef.current ? 1 : 0}`
+        `[poc-usage] durationSec=${callDuration} turns=${pocUsage.turns} sttAudioSec=${pocUsage.sttAudioSec.toFixed(1)} ttsAudioSec=${pocUsage.ttsAudioSec.toFixed(1)} sttOutEstimated=${pocUsage.sttOutEstimated ? 1 : 0} variant=${pocVariant} usd=${pocCostUsd(pocUsage, Date.now(), pocVariant).toFixed(4)} qa=${qaCallRef.current ? 1 : 0}`
       );
     } else if (liveUsage && liveUsage.turns > 0) {
       const actualUsd = liveMeasuredCostUsd(liveUsage);
@@ -428,7 +429,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
       recordUsage(
         userId,
         pocUsage
-          ? pocCallUsageDelta(callDuration, qaCallRef.current, pocUsage)
+          ? pocCallUsageDelta(callDuration, qaCallRef.current, pocUsage, pocVariant)
           : callUsageDelta(callDuration, qaCallRef.current, liveUsage)
       );
     }

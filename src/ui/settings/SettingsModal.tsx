@@ -32,6 +32,8 @@ import {
 import {
   isCascadePocEnabled,
   setCascadePocEnabled,
+  getStoredPocTextVariant,
+  setStoredPocTextVariant,
 } from "../../services/settings/callEngineSetting";
 import { ALLOWED_USER_EMAIL } from "../../services/firebase/auth";
 import { friendlyError } from "../common/friendlyError";
@@ -45,8 +47,16 @@ import {
   PARTIAL_TRANSCRIBE_DESCRIPTION,
   CALL_ENGINE_POC_TITLE,
   CALL_ENGINE_POC_DESCRIPTION,
+  POC_TEXT_VARIANT_TITLE,
+  POC_TEXT_VARIANT_DESCRIPTION,
 } from "./settingsText";
-import { POC_STT_MODEL, POC_TEXT_MODEL, POC_TTS_MODEL } from "../../config/cascadePoc";
+import {
+  POC_STT_MODEL,
+  POC_TEXT_VARIANTS,
+  POC_TTS_MODEL,
+  parsePocTextVariant,
+  type PocTextVariant,
+} from "../../config/cascadePoc";
 import { Sparkles, Bell } from "lucide-react";
 
 interface SettingsModalProps {
@@ -89,6 +99,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     isPartialTranscribeEnabled()
   );
   const [enableCascadePoc, setEnableCascadePoc] = useState<boolean>(() => isCascadePocEnabled());
+  const [pocTextVariant, setPocTextVariant] = useState<PocTextVariant>(() => getStoredPocTextVariant());
   const [sessionsList, setSessionsList] = useState<SessionData[]>([]);
   const [pendingLocalChunks, setPendingLocalChunks] = useState<LocalRecordingChunk[]>([]);
   const [loadingRecordings, setLoadingRecordings] = useState(false);
@@ -526,7 +537,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <div>
                     <span className="font-bold text-slate-200 block">{CALL_ENGINE_POC_TITLE}</span>
                     <span className="text-[11px] text-slate-400 font-mono text-purple-300">
-                      {POC_STT_MODEL} → {POC_TEXT_MODEL} → {POC_TTS_MODEL}
+                      {POC_STT_MODEL} → {POC_TEXT_VARIANTS[pocTextVariant].model} → {POC_TTS_MODEL}
                     </span>
                   </div>
                   <label className="relative inline-flex items-center cursor-pointer">
@@ -546,6 +557,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
                 <p className="text-[11px] text-slate-400 leading-relaxed">
                   {CALL_ENGINE_POC_DESCRIPTION}
+                </p>
+                <div className="flex items-center justify-between gap-2 pt-1">
+                  <label htmlFor="poc-text-variant" className="font-bold text-slate-200">
+                    {POC_TEXT_VARIANT_TITLE}
+                  </label>
+                  <select
+                    id="poc-text-variant"
+                    aria-label={POC_TEXT_VARIANT_TITLE}
+                    value={pocTextVariant}
+                    onChange={(e) => {
+                      const v = parsePocTextVariant(e.target.value);
+                      setPocTextVariant(v);
+                      setStoredPocTextVariant(v);
+                    }}
+                    className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-slate-100 font-mono text-[11px]"
+                  >
+                    <option value="a">A · {POC_TEXT_VARIANTS.a.model}</option>
+                    <option value="b">B · {POC_TEXT_VARIANTS.b.model}</option>
+                  </select>
+                </div>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  {POC_TEXT_VARIANT_DESCRIPTION}
                 </p>
               </div>
 

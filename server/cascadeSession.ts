@@ -1,12 +1,13 @@
 import {
   POC_STT_MODEL,
-  POC_TEXT_MODEL,
+  POC_TEXT_VARIANTS,
+  parsePocTextVariant,
   POC_TEXT_THINKING_LEVEL,
   POC_TTS_MODEL,
   emptyPocUsage,
   pocCostUsd,
 } from "../src/config/cascadePoc.ts";
-import type { PocUsageTotals } from "../src/config/cascadePoc.ts";
+import type { PocTextVariant, PocUsageTotals } from "../src/config/cascadePoc.ts";
 import {
   POC_VOICE_ADDENDUM,
   takeFirstSpeechSegment,
@@ -79,6 +80,16 @@ export interface CascadeInit {
   systemInstruction: string;
   voiceName: string;
   history?: unknown;
+  /** Reply-text A/B variant; anything else is treated as "a". */
+  textVariant?: unknown;
+}
+
+export interface CascadeModels {
+  stt: string;
+  text: string;
+  tts: string;
+  /** thinkingConfig.thinkingLevel for the text model (default POC_TEXT_THINKING_LEVEL). */
+  thinkingLevel?: string;
 }
 
 export const CASCADE_SETTLE_MS = 400;
@@ -145,7 +156,7 @@ function isAbortError(err: unknown): boolean {
 
 export function createGeminiCascadeAi(
   ai: any /* GoogleGenAI */,
-  models: { stt: string; text: string; tts: string },
+  models: CascadeModels,
   ttsAi?: any /* GoogleGenAI (v1beta) */,
 ): CascadeAi {
   return {
@@ -172,7 +183,7 @@ export function createGeminiCascadeAi(
             // generations (ai.google.dev whats-new-gemini-3.6#sampling-parameter-deprecation).
             abortSignal: signal,
             ...(withThinking
-              ? { thinkingConfig: { thinkingLevel: POC_TEXT_THINKING_LEVEL } }
+              ? { thinkingConfig: { thinkingLevel: models.thinkingLevel ?? POC_TEXT_THINKING_LEVEL } }
               : {}),
           },
         });
@@ -318,6 +329,10 @@ export class CascadeSession {
   private echoDrops: number;
   private ttsStreams: number;
   private finalToAudioSamples: number[];
+  private finalToTokenSamples: number[];
+  /** Per turn: first audio chunk latency of the turn's first speech request. */
+  private ttsFirstChunkSamples: number[];
+  private textVariant: PocTextVariant;
   private totals: PocUsageTotals;
   private sttMeasured: boolean;
 
@@ -355,6 +370,9 @@ export class CascadeSession {
     this.echoDrops = 0;
     this.ttsStreams = 0;
     this.finalToAudioSamples = [];
+    this.finalToTokenSamples = [];
+    this.ttsFirstChunkSamples = [];
+    this.textVariant = parsePocTextVariant(init.textVariant);
     this.totals = emptyPocUsage();
     this.sttMeasured = false;
   }
@@ -386,9 +404,10 @@ export class CascadeSession {
       this.deps.send({
         type: "ready",
         model: "cascade-poc",
+        textVariant: this.textVariant,
         models: {
           stt: POC_STT_MODEL,
-          text: POC_TEXT_MODEL,
+          text: POC_TEXT_VARIANTS[this.textVariant].model,
           tts: POC_TTS_MODEL,
         },
       });
@@ -486,10 +505,23 @@ export class CascadeSession {
     const u = this.usage();
     const med = Math.round(median(this.finalToAudioSamples));
     const p90 = Math.round(percentile(this.finalToAudioSamples, 90));
-    const usd = pocCostUsd(u, this.clock.now()).toFixed(4);
+    const ftMed = Math.round(median(this.finalToTokenSamples));
+    const ftP90 = Math.round(percentile(this.finalToTokenSamples, 90));
+    const ttsMed = Math.round(median(this.ttsFirstChunkSamples));
+    const usd = pocCostUsd(u, this.clock.now(), this.textVariant).toFixed(4);
     this.log(
-      `[poc-summary] turns=${u.turns} medianFinalToAudio=${med}ms p90FinalToAudio=${p90}ms bargeIns=${this.bargeIns} echoDrops=${this.echoDrops} ttsStreams=${this.ttsStreams} sttAudioSec=${u.sttAudioSec.toFixed(2)} ttsAudioSec=${u.ttsAudioSec.toFixed(2)} usd=${usd}`,
+      `[poc-summary] variant=${this.textVariant} textModel=${POC_TEXT_VARIANTS[this.textVariant].model} turns=${u.turns} medianFinalToToken=${ftMed}ms p90FinalToToken=${ftP90}ms medianTtsFirstChunk=${ttsMed}ms medianFinalToAudio=${med}ms p90FinalToAudio=${p90}ms bargeIns=${this.bargeIns} echoDrops=${this.echoDrops} ttsStreams=${this.ttsStreams} sttAudioSec=${u.sttAudioSec.toFixed(2)} ttsAudioSec=${u.ttsAudioSec.toFixed(2)} usd=${usd}`,
     );
+  }
+
+  /** Usage plus the running counters, so the browser [poc-summary] also sees drops after the last finished turn. */
+  private sendPocUsage(): void {
+    if (this.closed) return;
+    this.deps.send({
+      type: "poc_usage",
+      usage: this.usage(),
+      counters: { echoDrops: this.echoDrops, ttsStreams: this.ttsStreams, bargeIns: this.bargeIns },
+    });
   }
 
   usage(): PocUsageTotals {
@@ -590,6 +622,7 @@ export class CascadeSession {
       ) {
         this.echoDrops++;
         this.log("[poc] echo_dropped");
+        this.sendPocUsage();
         return;
       }
       if (trimmed) {
@@ -831,7 +864,7 @@ export class CascadeSession {
     this.speakingUntil = this.clock.now();
     this.bargeIns++;
     this.deps.send({ type: "interrupted" });
-    this.deps.send({ type: "poc_usage", usage: this.usage() });
+    this.sendPocUsage();
     this.log(`[poc] barge_in reason=${reason}`);
   }
 
@@ -863,6 +896,8 @@ export class CascadeSession {
 
     let firstTokenAt = -1;
     let firstAudioAt = -1;
+    /** First-chunk latency of this turn's first speech request (-1 = none). */
+    let ttsFirstChunkMs = -1;
     let lastTextUsage: any = null;
     let finishReason: string | undefined = undefined;
     let ttsError: unknown = null;
@@ -982,6 +1017,7 @@ export class CascadeSession {
           }
           const firstChunkMs =
             firstChunkAt >= 0 ? Math.max(0, Math.round(firstChunkAt - startedAt)) : -1;
+          if (seg === 1) ttsFirstChunkMs = firstChunkMs;
           const totalMs = Math.max(0, Math.round(this.clock.now() - startedAt));
           this.log(
             `[poc-tts] n=${turnNum} seg=${seg} chars=${segmentText.length} firstChunkMs=${firstChunkMs} chunks=${chunks} audioSec=${streamAudioSec.toFixed(2)} totalMs=${totalMs}`,
@@ -989,7 +1025,7 @@ export class CascadeSession {
           // A cancelled turn already reported usage at barge-in time; chunks and tokens counted
           // after that would otherwise only reach the client with the next completed turn.
           if (isCancelled() && !this.closed) {
-            this.deps.send({ type: "poc_usage", usage: this.usage() });
+            this.sendPocUsage();
           }
           if (seg === 1) {
             seg1Finished = true;
@@ -1142,14 +1178,14 @@ export class CascadeSession {
           }
           this.textDrains.delete(textAbort);
           addTextUsage(usage);
-          if (!this.closed) this.deps.send({ type: "poc_usage", usage: this.usage() });
+          this.sendPocUsage();
         })();
       } else {
         addTextUsage(lastTextUsage);
       }
       if (isCancelled()) {
         // bargeIn already sent poc_usage before this turn's text usage was added.
-        if (!this.closed) this.deps.send({ type: "poc_usage", usage: this.usage() });
+        this.sendPocUsage();
         return;
       }
 
@@ -1194,7 +1230,7 @@ export class CascadeSession {
       }
       this.deps.send({ type: "turnComplete" });
       this.totals.turns += 1;
-      this.deps.send({ type: "poc_usage", usage: this.usage() });
+      this.sendPocUsage();
 
       const i2f =
         Number.isFinite(timing.interimToFinalMs) && timing.interimToFinalMs >= 0
@@ -1216,6 +1252,8 @@ export class CascadeSession {
       if (f2a >= 0) {
         this.finalToAudioSamples.push(f2a);
       }
+      if (f2t >= 0) this.finalToTokenSamples.push(f2t);
+      if (ttsFirstChunkMs >= 0) this.ttsFirstChunkSamples.push(ttsFirstChunkMs);
 
       this.deps.send({
         type: "poc_turn",
@@ -1224,9 +1262,14 @@ export class CascadeSession {
         finalToTokenMs: f2t,
         tokenToAudioMs: t2a,
         finalToAudioMs: f2a,
+        ttsFirstChunkMs,
+        // Running session counters so the browser can print its own [poc-summary].
+        echoDrops: this.echoDrops,
+        ttsStreams: this.ttsStreams,
+        bargeIns: this.bargeIns,
       });
       this.log(
-        `[poc-turn] n=${this.totals.turns} interimToFinal=${i2f}ms finalToToken=${f2t}ms tokenToAudio=${t2a}ms finalToAudio=${f2a}ms`,
+        `[poc-turn] n=${this.totals.turns} variant=${this.textVariant} interimToFinal=${i2f}ms finalToToken=${f2t}ms tokenToAudio=${t2a}ms ttsFirstChunk=${ttsFirstChunkMs}ms finalToAudio=${f2a}ms`,
       );
     } catch (err) {
       abortController.abort();

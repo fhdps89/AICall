@@ -10,8 +10,12 @@
  *   textTokens, textInputTokens, textOutputTokens,
  *   ttsChars, ttsAudioSec, ttsAudioChars,
  *   sieEmbeddingTokens, estCostUsd, calls,
- *   pocMinutes, pocCalls, pocSttAudioSec, pocSttOutTokens, pocTextInTokens, pocTextOutTokens,
- *   pocTtsInTokens, pocTtsAudioSec   (Google-streaming test mode only; written only when present),
+ *   pocMinutes, pocCalls   (Google-streaming test mode only, all variants; written only when present),
+ *   pocA… / pocB… SttAudioSec, SttOutTokens, TextInTokens, TextOutTokens, TtsInTokens, TtsAudioSec
+ *     (per reply-text variant A/B, priced with that variant's rates),
+ *   pocSttAudioSec, pocSttOutTokens, pocTextInTokens, pocTextOutTokens, pocTtsInTokens, pocTtsAudioSec
+ *     (legacy, no variant tag: written only before the A/B split, priced as 3.1-flash-lite +
+ *      3.8-flash-lite-tts, the models live on main then),
  *   days: { "DD": { ... } }
  * }
  * Unit prices and assumptions come only from src/config/models.ts (single source).
@@ -22,8 +26,13 @@ import { PRICING_RATES, USAGE_ASSUMPTIONS } from "../../config/models";
 import { getKSTToday } from "../firebase/db";
 import { liveContextMinutesSq } from "./learningLog";
 import { pocCostUsd } from "../../config/cascadePoc";
+import type { PocPricing, PocUsageTotals } from "../../config/cascadePoc";
+import { POC_COUNTERS, POC_USAGE_FIELDS } from "./pocUsageFields";
+import type { PocVariantFieldName, PocVariantUsage } from "./pocUsageFields";
+export { POC_USAGE_FIELDS, pocVariantUsageDelta } from "./pocUsageFields";
+export type { PocVariantUsage } from "./pocUsageFields";
 
-export interface UsageDelta {
+export interface UsageDelta extends PocVariantUsage {
   liveMinutes?: number;
   qaLiveMinutes?: number;
   liveMinutesSq?: number;
@@ -69,7 +78,7 @@ export interface UsageDelta {
   pocTtsAudioSec?: number;
 }
 
-export interface UsageDay {
+export interface UsageDay extends PocVariantUsage {
   liveMinutes?: number;
   qaLiveMinutes?: number;
   liveMinutesSq?: number;
@@ -111,7 +120,7 @@ export interface UsageDay {
   pocTtsAudioSec?: number;
 }
 
-export interface UsageMonth {
+export interface UsageMonth extends PocVariantUsage {
   liveMinutes: number;
   qaLiveMinutes?: number;
   liveMinutesSq?: number;
@@ -167,8 +176,12 @@ export interface UsageCostBreakdown {
   text: number;
   tts: number;
   sie: number;
-  /** Google-streaming test mode (PoC) calls: STT + text + TTS tokens */
+  /** Google-streaming test mode (PoC) calls without a variant tag (before the A/B split) */
   poc: number;
+  /** Test mode, reply text variant A (gemini-3.8-flash) */
+  pocA: number;
+  /** Test mode, reply text variant B (gemini-3.5-flash-lite) */
+  pocB: number;
   total: number;
 }
 
@@ -181,7 +194,9 @@ const USAGE_COST_COMPONENT_LABELS = {
   text: "텍스트 비용",
   tts: "강의 음성 TTS 비용",
   sie: "실수 묶기 임베딩 비용",
-  poc: "시험 통화 비용",
+  poc: "시험 통화 비용(A/B 이전 기록)",
+  pocA: "시험 통화 비용 A",
+  pocB: "시험 통화 비용 B",
 } as const satisfies Record<UsageCostComponentKey, string>;
 
 /** Ordered breakdown components (excluding total) shown in dev-mode usage cost tables. */
@@ -331,23 +346,32 @@ export function liveUsageBasis(u: UsageDay | UsageMonth | null | undefined): Liv
   };
 }
 
+/** One pricing set's counters from a stored usage record. */
+function pocCountersOf(
+  u: Partial<Record<string, unknown>>,
+  pricing: PocPricing
+): Partial<PocUsageTotals> {
+  const names = POC_USAGE_FIELDS[pricing];
+  const out: Partial<PocUsageTotals> = {};
+  for (const c of POC_COUNTERS) out[c] = nonNeg(u[names[c]] as number | undefined);
+  return out;
+}
+
 /**
- * Test-mode (PoC) cost from the stored poc* counters. Re-pricing uses today's text and TTS rates
- * (both double from 2027-01-01 KST), so a 2026 PoC call viewed in 2027 shows the 2027 rates.
+ * Test-mode (PoC) cost from the stored poc* counters: variant A and B counters are priced with
+ * their own text rates; untagged legacy counters (written before the A/B split) with the legacy
+ * rates (3.1-flash-lite + 3.8-flash-lite-tts). Re-pricing uses today's date for the 2027 switch,
+ * so a 2026 PoC call viewed in 2027 shows the 2027 rates. With `pricing`, only that set is priced.
  */
-export function pocUsageCostUsd(u: UsageDelta | UsageDay | UsageMonth | null | undefined, nowMs?: number): number {
+export function pocUsageCostUsd(
+  u: UsageDelta | UsageDay | UsageMonth | null | undefined,
+  nowMs?: number,
+  pricing?: PocPricing
+): number {
   if (!u) return 0;
-  return pocCostUsd(
-    {
-      sttAudioSec: nonNeg(u.pocSttAudioSec),
-      sttOutTokens: nonNeg(u.pocSttOutTokens),
-      textInTokens: nonNeg(u.pocTextInTokens),
-      textOutTokens: nonNeg(u.pocTextOutTokens),
-      ttsInTokens: nonNeg(u.pocTtsInTokens),
-      ttsAudioSec: nonNeg(u.pocTtsAudioSec),
-    },
-    nowMs
-  );
+  const rec = u as unknown as Partial<Record<string, unknown>>;
+  const sets: PocPricing[] = pricing ? [pricing] : ["legacy", "a", "b"];
+  return sets.reduce((acc, p) => acc + pocCostUsd(pocCountersOf(rec, p), nowMs, p), 0);
 }
 
 export function priceUsage(u: UsageDay | UsageMonth | null | undefined): UsageCostBreakdown {
@@ -384,8 +408,10 @@ export function priceUsage(u: UsageDay | UsageMonth | null | undefined): UsageCo
     1_000_000;
 
   const sie = (nonNeg(u?.sieEmbeddingTokens) * r.sieEmbedPer1MTokens) / 1_000_000;
-  const poc = pocUsageCostUsd(u);
-  const parts = { live, qaLive, stt, text, tts, sie, poc };
+  const poc = pocUsageCostUsd(u, undefined, "legacy");
+  const pocA = pocUsageCostUsd(u, undefined, "a");
+  const pocB = pocUsageCostUsd(u, undefined, "b");
+  const parts = { live, qaLive, stt, text, tts, sie, poc, pocA, pocB };
   return { ...parts, total: sumUsageCostComponents(parts) };
 }
 
@@ -446,6 +472,7 @@ export function estimateCostUsd(d: UsageDelta): number {
     pocTextOutTokens: d.pocTextOutTokens,
     pocTtsInTokens: d.pocTtsInTokens,
     pocTtsAudioSec: d.pocTtsAudioSec,
+    ...pocVariantFieldsOf(d),
   });
 
   const stt =
@@ -462,7 +489,7 @@ export function estimateCostUsd(d: UsageDelta): number {
   return sumUsageCostComponents({ ...base, stt, tts });
 }
 
-export interface UsageFields<T> {
+export interface UsageFields<T> extends Partial<Record<PocVariantFieldName, T>> {
   liveMinutes: T;
   qaLiveMinutes: T;
   liveMinutesSq: T;
@@ -552,31 +579,52 @@ export function buildUsageFields<T>(
   };
   // Test-mode (PoC) counters are written only for a test-mode call, so a normal call's usage
   // write keeps exactly the same fields as before.
+  // Each pricing set (legacy, A, B) is written only when the delta has a value in it, so a
+  // variant-A call never touches B or legacy fields.
   if (hasPocUsage(d)) {
     fields.pocMinutes = inc(nonNeg(d.pocMinutes));
     fields.pocCalls = inc(nonNeg(d.pocCalls));
-    fields.pocSttAudioSec = inc(nonNeg(d.pocSttAudioSec));
-    fields.pocSttOutTokens = inc(nonNeg(d.pocSttOutTokens));
-    fields.pocTextInTokens = inc(nonNeg(d.pocTextInTokens));
-    fields.pocTextOutTokens = inc(nonNeg(d.pocTextOutTokens));
-    fields.pocTtsInTokens = inc(nonNeg(d.pocTtsInTokens));
-    fields.pocTtsAudioSec = inc(nonNeg(d.pocTtsAudioSec));
+    const rec = d as unknown as Partial<Record<string, unknown>>;
+    const target = fields as unknown as Record<string, T>;
+    for (const p of ["legacy", "a", "b"] as const) {
+      if (!pocSetHasValue(rec, p)) continue;
+      for (const c of POC_COUNTERS) {
+        const name = POC_USAGE_FIELDS[p][c];
+        target[name] = inc(nonNeg(rec[name] as number | undefined));
+      }
+    }
   }
   return fields;
 }
 
+function pocSetHasValue(rec: Partial<Record<string, unknown>>, p: PocPricing): boolean {
+  return POC_COUNTERS.some((c) => nonNeg(rec[POC_USAGE_FIELDS[p][c]] as number | undefined) > 0);
+}
+
+/** Copies only the A/B variant counters (for re-pricing a delta). */
+function pocVariantFieldsOf(d: UsageDelta): PocVariantUsage {
+  const out: Record<string, number> = {};
+  const rec = d as unknown as Partial<Record<string, unknown>>;
+  for (const p of ["a", "b"] as const) {
+    for (const c of POC_COUNTERS) {
+      const name = POC_USAGE_FIELDS[p][c];
+      if (rec[name] !== undefined) out[name] = nonNeg(rec[name] as number | undefined);
+    }
+  }
+  return out as PocVariantUsage;
+}
+
 function hasPocUsage(d: UsageDelta): boolean {
+  const rec = d as unknown as Partial<Record<string, unknown>>;
   return (
     nonNeg(d.pocMinutes) > 0 ||
     nonNeg(d.pocCalls) > 0 ||
-    nonNeg(d.pocSttAudioSec) > 0 ||
-    nonNeg(d.pocSttOutTokens) > 0 ||
-    nonNeg(d.pocTextInTokens) > 0 ||
-    nonNeg(d.pocTextOutTokens) > 0 ||
-    nonNeg(d.pocTtsInTokens) > 0 ||
-    nonNeg(d.pocTtsAudioSec) > 0
+    pocSetHasValue(rec, "legacy") ||
+    pocSetHasValue(rec, "a") ||
+    pocSetHasValue(rec, "b")
   );
 }
+
 
 /**
  * 월 합계와 일별(days[day])에 동일한 증분 필드를 넣어 Firestore 저장 payload를 만든다.

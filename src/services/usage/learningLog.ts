@@ -1,6 +1,7 @@
 import type { UsageDelta, UsageMonth } from "./usageService";
 import type { LiveUsageTotals } from "../providers/liveUsage";
-import type { PocUsageTotals } from "../../config/cascadePoc";
+import type { PocTextVariant, PocUsageTotals } from "../../config/cascadePoc";
+import { pocVariantUsageDelta } from "./pocUsageFields";
 import { USAGE_ASSUMPTIONS } from "../../config/models";
 
 /**
@@ -233,22 +234,17 @@ export function callUsageDelta(
 /**
  * 구글 스트리밍 시험 모드(PoC) 통화의 사용량 증분. 분은 liveMinutes가 아니라 pocMinutes에 넣고
  * (기본 엔진 단가로 잘못 계산되지 않게), 통화 횟수(calls)는 일반 통화와 같은 규칙으로 센다.
+ * 토큰·오디오 초는 답변 모델 변형(A/B)별 필드(pocA…/pocB…)에 넣어 각 모델 단가로 계산되게 한다.
  * QA 통화는 비용(토큰)만 남기고 분·횟수는 넣지 않는다.
  */
 export function pocCallUsageDelta(
   durationSec: number,
   isQa: boolean,
-  poc?: Partial<PocUsageTotals> | null
+  poc?: Partial<PocUsageTotals> | null,
+  variant: PocTextVariant = "a"
 ): UsageDelta {
   const sec = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
-  const tokens: UsageDelta = {
-    pocSttAudioSec: posNum(poc?.sttAudioSec),
-    pocSttOutTokens: posNum(poc?.sttOutTokens),
-    pocTextInTokens: posNum(poc?.textInTokens),
-    pocTextOutTokens: posNum(poc?.textOutTokens),
-    pocTtsInTokens: posNum(poc?.ttsInTokens),
-    pocTtsAudioSec: posNum(poc?.ttsAudioSec),
-  };
+  const tokens: UsageDelta = pocVariantUsageDelta(variant, poc);
   if (isQa) return tokens;
   const calls = callsForDuration(sec);
   return { ...tokens, pocMinutes: sec / 60, pocCalls: calls, calls };
