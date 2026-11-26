@@ -72,7 +72,7 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
   goal,
   lessonIndex,
   placeholders,
-  enablePartialTranscribe = true,
+  enablePartialTranscribe = false,
   textOnly = false,
   onEndCall,
   onExit,

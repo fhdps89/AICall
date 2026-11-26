@@ -22,6 +22,7 @@ import {
 } from "../firebase/db";
 import { authFetch } from "../api/authFetch";
 import { mergeChunksToWav } from "./audioMerge";
+import { recordUsage } from "../usage/usageService";
 
 export interface ChunkRecorderOptions {
   userId: string;
@@ -41,6 +42,7 @@ export interface ChunkRecorderDeps {
   appendSessionSttPartial: typeof appendSessionSttPartial;
   authFetch: typeof authFetch;
   mergeChunksToWav: typeof mergeChunksToWav;
+  recordPartialSttMinutes?: (userId: string, minutes: number) => void;
 }
 
 const DEFAULT_DEPS: ChunkRecorderDeps = {
@@ -51,6 +53,9 @@ const DEFAULT_DEPS: ChunkRecorderDeps = {
   appendSessionSttPartial,
   authFetch,
   mergeChunksToWav,
+  recordPartialSttMinutes: (userId, minutes) => {
+    void recordUsage(userId, { partialSttMinutes: minutes });
+  },
 };
 
 export class ChunkRecorder {
@@ -250,7 +255,7 @@ export class ChunkRecorder {
       const minuteIdx = this.minuteBatchIndex++;
       this.accumulatedBlobsForMinute = [];
       this.accumulatedChunkIndices = [];
-      if (this.options.enablePartialTranscribe !== false) {
+      if (this.options.enablePartialTranscribe === true) {
         this.triggerPartialTranscription(minuteIdx, blobsToTranscribe, indicesToTranscribe);
       }
     }
@@ -351,6 +356,8 @@ export class ChunkRecorder {
 
       const data = await response.json();
       if (data.ok && typeof data.transcript === "string") {
+        this.deps.recordPartialSttMinutes?.(userId, (blobs.length * 10) / 60);
+
         const sttItem: SttPartialItem = {
           minuteIndex,
           timeRange,

@@ -27,6 +27,7 @@ import {
   SttFinalData,
 } from "./services/firebase/db";
 import { getAllPendingChunks, retryPendingUploads } from "./services/recording/chunkIndexedDb";
+import { isPartialTranscribeEnabled } from "./services/recording/partialTranscribeSetting";
 import { createRecoveredUsageRecorder } from "./services/session/recoveredUsage";
 import { recordUsage } from "./services/usage/usageService";
 import { runPostCallReview } from "./services/review/reviewPipeline";
@@ -72,15 +73,6 @@ import { applyQaModeFromUrl } from "./data/qaMode";
 
 applyQaModeFromUrl();
 import { Loader2 } from "lucide-react";
-
-/** Settings → 1분 임시 받아쓰기 switch (saved in this browser by SettingsModal). Default on. */
-function isPartialTranscribeEnabled(): boolean {
-  try {
-    return localStorage.getItem("onecall_enable_partial_transcribe") !== "false";
-  } catch {
-    return true;
-  }
-}
 
 type HomeFocus = "lecture" | null;
 
@@ -691,6 +683,7 @@ export const App: React.FC = () => {
         goal={activeCallGoal}
         lessonIndex={activeCallLesson}
         placeholders={placeholders}
+        // Settings → 1분 임시 받아쓰기 switch (saved in this browser by SettingsModal). Default off.
         enablePartialTranscribe={isPartialTranscribeEnabled()}
         textOnly={activeCallTextOnly}
         onEndCall={handleEndCall}
