@@ -64,7 +64,7 @@ import {
   type LatestOnly,
   type MistakeLoadState,
 } from "../../services/mistakes/mistakeLoadState";
-import { markBoot } from "../../services/perf/bootTiming";
+import { markBoot, settleBootPhase } from "../../services/perf/bootTiming";
 import { KeepImportModal } from "../keep/KeepImportModal";
 import { SttBenchmarkModal } from "../sttBench/SttBenchmarkModal";
 import { CoachModal } from "../coach/CoachModal";
@@ -178,11 +178,11 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         : prev
     );
     try {
-      const all = await getUserMistakes(user.uid);
+      // Mark when the read settles, even if this mount was already superseded.
+      const all = await settleBootPhase("mistakes", () => getUserMistakes(user.uid));
       if (!isCurrent()) return;
       rememberMistakes(user.uid, all);
       setMistakeState({ status: "ready", all, refreshing: false });
-      markBoot("mistakes");
 
       // B-8: keep the Grok Bot feed's candidate list fresh (no scheduler server)
       const feedSyncMode = pickFeedSyncMode(reason, pendingFeedChangedRef.current);

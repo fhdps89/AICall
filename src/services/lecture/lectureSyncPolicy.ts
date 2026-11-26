@@ -119,6 +119,90 @@ export function shouldShowLectureSlow(opts: {
   );
 }
 
+export type LectureCardPresence = "unknown" | "none" | "lecture";
+
+export interface LectureCardFlags {
+  loading: boolean;
+  serverChecking: boolean;
+  serverSlow: boolean;
+}
+
+/** A missing local doc stays unknown while the server check is still in flight. */
+export function lectureCardFlagsAfterLocal(
+  lecture: { status?: string } | null,
+  needsServer: boolean
+): LectureCardFlags {
+  return {
+    loading: needsServer && lecture == null,
+    serverChecking: needsServer,
+    serverSlow: false,
+  };
+}
+
+/** Timeout is not confirmation that there is no lecture. */
+export function lectureCardFlagsAfterServer(
+  server: "skipped" | "ok" | "failed" | "timeout"
+): LectureCardFlags {
+  return {
+    loading: false,
+    serverChecking: false,
+    serverSlow: server === "timeout",
+  };
+}
+
+export interface LectureCardView {
+  presence: LectureCardPresence;
+  headline: string;
+  checking: boolean;
+  slow: boolean;
+}
+
+const LECTURE_LOADING_HEADLINE = "불러오는 중…";
+const LECTURE_EMPTY_HEADLINE = "아직 오늘 강의가 없어요";
+
+/**
+ * Three-way card state. "none" only after loading, the server check, and a slow
+ * timeout have all finished without a lecture document.
+ */
+export function lectureCardView(opts: LectureCardFlags & {
+  lecture: { status?: string; title?: string } | null;
+}): LectureCardView {
+  const status = opts.lecture?.status;
+  const checking = shouldShowLectureChecking({
+    loading: opts.loading,
+    status,
+    serverChecking: opts.serverChecking,
+  });
+  const slow = shouldShowLectureSlow({
+    loading: opts.loading,
+    status,
+    serverChecking: opts.serverChecking,
+    serverSlow: opts.serverSlow,
+  });
+
+  if (opts.lecture && status === "ready") {
+    return {
+      presence: "lecture",
+      headline: opts.lecture.title || "오늘 강의 준비 완료",
+      checking,
+      slow,
+    };
+  }
+  if (opts.lecture && status === "generating") {
+    return { presence: "lecture", headline: "강의 만드는 중…", checking, slow };
+  }
+  if (opts.lecture && status === "failed") {
+    return { presence: "lecture", headline: "강의 만들기 실패", checking, slow };
+  }
+  if (!opts.lecture && (opts.loading || opts.serverChecking || opts.serverSlow)) {
+    return { presence: "unknown", headline: LECTURE_LOADING_HEADLINE, checking, slow };
+  }
+  if (!opts.lecture) {
+    return { presence: "none", headline: LECTURE_EMPTY_HEADLINE, checking: false, slow: false };
+  }
+  return { presence: "unknown", headline: LECTURE_LOADING_HEADLINE, checking, slow };
+}
+
 /** Avoid force-overwriting an unconfirmed server job while the status check is still slow. */
 export function shouldForceStartLecture(status?: string, serverSlow = false): boolean {
   return status === "failed" && !serverSlow;

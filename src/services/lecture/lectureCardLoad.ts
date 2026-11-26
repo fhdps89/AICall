@@ -3,6 +3,7 @@ import {
   isLectureAudioRestoring,
   shouldShowLectureImmediately,
 } from "./lectureSyncPolicy";
+import { markBoot } from "../perf/bootTiming";
 
 export interface LoadLectureForCardDeps {
   readLocal: () => Promise<LectureDoc | null>;
@@ -22,7 +23,20 @@ export type LectureCardServerStatus = "skipped" | "ok" | "failed" | "timeout";
 export async function loadLectureForCard(
   deps: LoadLectureForCardDeps
 ): Promise<{ lecture: LectureDoc | null; server: LectureCardServerStatus }> {
+  // Mark when the read settles, not when a card accepts the result. A superseded
+  // mount (first paint before dataLoading, StrictMode) still has to count.
+  try {
+    return await loadLectureForCardBody(deps);
+  } finally {
+    markBoot("lectureServer");
+  }
+}
+
+async function loadLectureForCardBody(
+  deps: LoadLectureForCardDeps
+): Promise<{ lecture: LectureDoc | null; server: LectureCardServerStatus }> {
   const local = await deps.readLocal();
+  markBoot("lectureLocal");
   const needsServer = !(shouldShowLectureImmediately(local) && !isLectureAudioRestoring(local));
   deps.onLocal(local, needsServer);
 
