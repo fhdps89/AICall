@@ -368,7 +368,38 @@ export async function saveLectureFailureBackup(
   isCurrent: () => boolean = () => true
 ): Promise<void> {
   if (!secret || !isCurrent()) return;
+  if (state?.status === 'failed') {
+    // A job that failed after the script was written (e.g. TIMED_OUT during TTS) keeps
+    // its script only on this container's disk. Back it up as a ready lecture with no
+    // audio, so a redeployed container rebuilds just the audio instead of finding
+    // nothing and starting a new generation (11/27). Never replace an existing ready backup.
+    const scriptOnly = failedJobScriptBackup(state);
+    if (!scriptOnly) return;
+    let existing: LectureState | null;
+    try {
+      existing = await loadLectureBackup(secret, scriptOnly.date);
+    } catch {
+      return;
+    }
+    if (existing || !isCurrent()) return;
+    await saveLectureBackup(secret, scriptOnly);
+    return;
+  }
   await saveLectureBackup(secret, state);
+}
+
+/** Ready-without-audio copy of a failed job that already has a script; null when there is no script. */
+export function failedJobScriptBackup(state: LectureState): LectureState | null {
+  if (!state || state.status !== 'failed') return null;
+  if (!Array.isArray(state.script) || state.script.length === 0) return null;
+  const next: LectureState = { ...state, status: 'ready', audioStatus: 'missing' };
+  delete next.audioFile;
+  delete next.audioMime;
+  delete next.audioBackupId;
+  delete next.audioChunks;
+  delete next.audioBackup;
+  delete next.audioProgress;
+  return next;
 }
 
 /**

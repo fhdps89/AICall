@@ -4,6 +4,13 @@
 
 ---
 
+### [2026-11-27 KST] 실패한 강의 잡의 대본을 백업해 재배포 뒤에도 오디오만 다시 만든다
+- **사고(11/27)**: 06:42에 시작한 생성 잡이 TTS 도중 15분 상한(06:57:00)에 걸려 `TIMED_OUT`. 06:57:03 피드 조회가 같은 서버에서 로컬 대본으로 오디오 rebuild를 시작(오늘 생성 2/3, 리스 TTL 31분 → 07:28:03)했고, 피드는 `ready`·오디오 없음·`audioRestoring`. 07:03–07:04 재배포로 그 rebuild와 로컬 대본이 함께 사라졌다. Firestore days 문서에는 `genControl`만 있고 강의 백업이 없어서, 07:15 새 서버는 처음부터 새 생성을 시도했고 죽은 서버의 rebuild 리스에 막혀 `GEN_SKIPPED`(lease)가 됐다.
+- **원인**: `server/feedStore.ts` `saveLectureFailureBackup` → `saveLectureBackup` → `sanitizeReadyLectureForBackup`가 `status !== 'ready'`면 `null`이라, 실패한 잡(`failed`)의 대본은 영구 저장되지 않았다.
+- **수정**: 대본이 있는 `failed` 상태는 `failedJobScriptBackup`으로 ready + `audioStatus: 'missing'`(오디오 파일·포인터·진행률 제거)으로 바꿔 백업한다. 그날 ready 백업이 이미 있으면(예: 완성된 강의 뒤 「다시 만들기」 실패) 덮어쓰지 않고, 백업 읽기가 실패해도 쓰지 않는다. 새 서버는 `ensureTodayLecture`가 이 대본을 설치하고 쿨다운이 끝나면 `restoreReadyLecture`로 오디오만 다시 만든다. 새 대본 호출과 다른 내용의 강의가 생기지 않는다.
+- **그대로 둔 것**: 일일 상한(`LECTURE_DAILY_GEN_CAP`), 리스 TTL, 15분 잡 상한, `firestore.rules`, 대본·오디오 생성 경로.
+- **방어 조치**: `tests/lectureFailedScriptBackup.test.ts` — 실패 대본 백업·복원, 대본 없으면 안 씀, superseded면 안 씀, 기존 ready 백업 보존, TTS 실패 → 디스크 삭제(재배포) → 새 서버가 새 잡 없이 같은 대본으로 rebuild 요청.
+
 ### [2026-11-27 KST] 시험 엔진 `[poc]` 줄을 ?qa=1에서 경고·html 속성으로도 남긴다 (EL-18 후속)
 - **배경**: QA봇 브라우저 자동화가 게시 사이트에서 console.info/log를 모으지 못한다(`#59`의 `[boot]`와 같음). A/B 비교에 필요한 `[poc]`·`[poc-turn]`·`[poc-play]`·`[poc-tts]`·`[poc-summary]`·`[poc-usage]`가 기록에 안 남았다.
 - **수정**: `#59`와 같은 도우미(`src/services/perf/qaReadable.ts`의 `publishQaReadableLine`)를 쓴다. 브라우저 `console.log`/`console.info`의 그 줄은 그대로 두고, 주소에 `?qa=1`이 있을 때만 같은 문자열을 `console.warn`으로도 낸다. 저장된 QA 플래그(`oc_qa_mode`)는 조건이 아니다. `?qa=1`일 때 마지막 `[poc-summary]`는 `<html data-poc-summary>`, 마지막 `[poc-usage]`는 `<html data-poc-usage>`(및 `window.__AICALL_POC_SUMMARY__`·`__AICALL_POC_USAGE__`)에 덮어 쓴다. 일반 사용자(`?qa=1` 아님)는 경고도 속성도 없다.
