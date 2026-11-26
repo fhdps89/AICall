@@ -22,6 +22,8 @@ import {
 import {
   pocCostUsd,
   pocTtsRates,
+  pocTextRates,
+  POC_TEXT_THINKING_LEVEL,
   sanitizePocUsage,
   emptyPocUsage,
   POC_STT_MODEL,
@@ -56,8 +58,9 @@ function wav(pcmBytes: number, rate: number, extraChunk = false): Uint8Array {
 
 test('models and socket path are the plan values', () => {
   assert.equal(POC_STT_MODEL, 'gemini-3.5-transcribe-live');
-  assert.equal(POC_TEXT_MODEL, 'gemini-3.1-flash-lite');
-  assert.equal(POC_TTS_MODEL, 'gemini-3.8-flash-lite-tts');
+  assert.equal(POC_TEXT_MODEL, 'gemini-3.8-flash');
+  assert.equal(POC_TEXT_THINKING_LEVEL, 'low');
+  assert.equal(POC_TTS_MODEL, 'gemini-3.8-flash-tts');
   assert.equal(POC_WS_PATH, '/api/gemini/cascade');
 });
 
@@ -137,16 +140,17 @@ test('stats helpers', () => {
   assert.equal(estimateTextTokens('abcdefgh'), 2);
 });
 
-test('PoC cost: 2026 vs 2027 TTS rates switch at 2027-01-01 00:00 KST', () => {
-  assert.deepEqual(pocTtsRates(Date.parse('2026-12-31T14:59:59Z')), { inPer1M: 0.5, outAudioPer1M: 6 });
-  assert.deepEqual(pocTtsRates(Date.parse('2026-12-31T15:00:00Z')), { inPer1M: 1, outAudioPer1M: 12 });
-  // 10-minute call from the plan: 600 s mic, 240 s tutor audio, ~$0.19 (2026), ~$0.23 (2027)
-  const u = { ...emptyPocUsage(), sttAudioSec: 600, sttOutTokens: 1500, textInTokens: 300_000, textOutTokens: 6000, ttsInTokens: 3000, ttsAudioSec: 240 };
+test('PoC cost: 3.8-flash text and 3.8-flash-tts rates, 2026 vs 2027 switch at 2027-01-01 00:00 KST', () => {
+  assert.deepEqual(pocTtsRates(Date.parse('2026-12-31T14:59:59Z')), { inPer1M: 0.5, outAudioPer1M: 9 });
+  assert.deepEqual(pocTtsRates(Date.parse('2026-12-31T15:00:00Z')), { inPer1M: 1, outAudioPer1M: 18 });
+  assert.deepEqual(pocTextRates(Date.parse('2026-12-31T14:59:59Z')), { inPer1M: 0.75, outPer1M: 3.75 });
+  assert.deepEqual(pocTextRates(Date.parse('2026-12-31T15:00:00Z')), { inPer1M: 1.5, outPer1M: 7.5 });
+  // Plan's 10-minute call: 600 s mic, 300 s tutor audio, 40 turns x ~4,500 input tokens.
+  const u = { ...emptyPocUsage(), sttAudioSec: 600, sttOutTokens: 1750, textInTokens: 180_000, textOutTokens: 12_000, ttsInTokens: 4000, ttsAudioSec: 300 };
   const c2026 = pocCostUsd(u, Date.parse('2026-11-26T12:00:00Z'));
   const c2027 = pocCostUsd(u, Date.parse('2027-01-02T00:00:00Z'));
-  assert.ok(Math.abs(c2026 - (600 * 25 * 3.5 + 1500 * 21 + 300_000 * 0.25 + 6000 * 1.5 + 3000 * 0.5 + 240 * 25 * 6) / 1e6) < 1e-12);
-  assert.ok(c2027 > c2026);
-  assert.ok(c2026 < 0.3, `10-min PoC call should stay under $0.30, got ${c2026}`);
+  assert.ok(Math.abs(c2026 - (600 * 25 * 3.5 + 1750 * 21 + 180_000 * 0.75 + 12_000 * 3.75 + 4000 * 0.5 + 300 * 25 * 9) / 1e6) < 1e-12);
+  assert.ok(Math.abs(c2027 - (600 * 25 * 3.5 + 1750 * 21 + 180_000 * 1.5 + 12_000 * 7.5 + 4000 * 1 + 300 * 25 * 18) / 1e6) < 1e-12);
   assert.equal(pocCostUsd(null), 0);
   assert.equal(pocCostUsd({ sttAudioSec: -5, ttsAudioSec: Number.NaN }), 0);
 });

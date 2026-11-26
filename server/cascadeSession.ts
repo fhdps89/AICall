@@ -1,6 +1,7 @@
 import {
   POC_STT_MODEL,
   POC_TEXT_MODEL,
+  POC_TEXT_THINKING_LEVEL,
   POC_TTS_MODEL,
   emptyPocUsage,
   pocCostUsd,
@@ -22,6 +23,7 @@ import {
   median,
   percentile,
   estimateTextTokens,
+  endWithUserTurn,
 } from "./cascadeText.ts";
 import type { ChatTurn } from "./cascadeText.ts";
 
@@ -82,9 +84,15 @@ export interface CascadeInit {
 export const CASCADE_SETTLE_MS = 400;
 export const STT_ROTATE_AFTER_MS = 9 * 60 * 1000;
 export const STT_CONNECT_TIMEOUT_MS = 7000;
-export const POC_MAX_OUTPUT_TOKENS = 150;
-export const POC_LONG_MAX_OUTPUT_TOKENS = 600;
-export const POC_TEMPERATURE = 0.7;
+/** Spoken reply cap (visible text, estimated tokens); Done / Model answer turns get the long cap. */
+export const POC_REPLY_TOKEN_CAP = 150;
+export const POC_LONG_REPLY_TOKEN_CAP = 600;
+/**
+ * maxOutputTokens counts thinking tokens too (ai.google.dev thinking#token-limits), and a model
+ * that hits it mid-thought returns empty output. So the API cap is the reply cap plus this
+ * headroom, and the reply itself is cut on our side at the reply cap.
+ */
+export const POC_THINKING_HEADROOM_TOKENS = 1024;
 
 const PCM_16K_BYTES_PER_SEC = 32000;
 /** Final segments this soon after the tutor stops are still checked for speaker echo. */
@@ -105,11 +113,16 @@ const CONTROL_COMMAND_PROMPTS: Record<string, string> = {
   Slow: "Please speak a bit slower and enunciate clearly.",
 };
 
-export function maxOutputTokensFor(prompt: string): number {
+export function replyTokenCapFor(prompt: string): number {
   return prompt === CONTROL_COMMAND_PROMPTS.Done ||
     prompt === CONTROL_COMMAND_PROMPTS["Model answer"]
-    ? POC_LONG_MAX_OUTPUT_TOKENS
-    : POC_MAX_OUTPUT_TOKENS;
+    ? POC_LONG_REPLY_TOKEN_CAP
+    : POC_REPLY_TOKEN_CAP;
+}
+
+/** API maxOutputTokens for a turn: reply cap + thinking headroom. */
+export function maxOutputTokensFor(prompt: string): number {
+  return replyTokenCapFor(prompt) + POC_THINKING_HEADROOM_TOKENS;
 }
 
 function nonNegNum(v: unknown): number {
@@ -155,9 +168,12 @@ export function createGeminiCascadeAi(
           config: {
             systemInstruction,
             maxOutputTokens,
-            temperature: POC_TEMPERATURE,
+            // No temperature: deprecated and ignored from Gemini 3.6 Flash on, an error in later
+            // generations (ai.google.dev whats-new-gemini-3.6#sampling-parameter-deprecation).
             abortSignal: signal,
-            ...(withThinking ? { thinkingConfig: { thinkingLevel: "minimal" } } : {}),
+            ...(withThinking
+              ? { thinkingConfig: { thinkingLevel: POC_TEXT_THINKING_LEVEL } }
+              : {}),
           },
         });
       let stream: any;
@@ -293,6 +309,8 @@ export class CascadeSession {
   private turnInProgress: boolean;
   private turnAborted: boolean;
   private turnAbort: AbortController | null;
+  /** Text streams still draining after a reply cap (usage only); aborted on close. */
+  private textDrains: Set<AbortController>;
   private turnSpokenSentences: string[];
   private currentTutorText: string;
   private speakingUntil: number;
@@ -329,6 +347,7 @@ export class CascadeSession {
     this.turnInProgress = false;
     this.turnAborted = false;
     this.turnAbort = null;
+    this.textDrains = new Set();
     this.turnSpokenSentences = [];
     this.currentTutorText = "";
     this.speakingUntil = 0;
@@ -445,6 +464,8 @@ export class CascadeSession {
       this.turnAbort.abort();
       this.turnAbort = null;
     }
+    for (const drain of this.textDrains) drain.abort();
+    this.textDrains.clear();
 
     this.clearSettleTimer();
 
@@ -992,17 +1013,66 @@ export class CascadeSession {
     };
 
     try {
-      const contents = buildContents(this.history);
+      const contents = endWithUserTurn(buildContents(this.history));
+      const replyCap = replyTokenCapFor(timing.prompt);
+      let replyCapped = false;
+      // The text stream follows the turn's abort until the reply cap; after that it keeps
+      // draining (billed usage) even if the turn is interrupted or the next turn starts.
+      const textAbort = new AbortController();
+      abortController.signal.addEventListener("abort", () => {
+        if (!replyCapped) textAbort.abort();
+      });
+      if (abortController.signal.aborted) textAbort.abort();
       const stream = await this.deps.ai.streamText({
         systemInstruction: this.systemInstruction,
         contents,
         maxOutputTokens: maxOutputTokensFor(timing.prompt),
-        signal: abortController.signal,
+        signal: textAbort.signal,
       });
 
       const collected: string[] = [];
       let textBuf = "";
-      for await (const chunk of stream) {
+      // Starts speech for whatever of the reply is not spoken yet (end of text or reply cap).
+      const startRemainingSpeech = (): void => {
+        if (!seg1Started && !isAborted()) {
+          const first = takeFirstSpeechSegment(collected, true);
+          if (first) {
+            seg1Started = true;
+            seg1Used = first.used;
+            seg1Promise = startSpeechStream(1, first.segment, collected.slice(0, first.used));
+          }
+        }
+        // Independent of the branch above: a cap can arrive with 3+ sentences before stream 1
+        // started, and stream 2 buffers its audio until stream 1 is done.
+        if (seg1Started && !seg2Promise && collected.length > seg1Used && !isAborted() && !ttsError) {
+          const restSentences = collected.slice(seg1Used);
+          const restText = restSentences.join(" ");
+          if (restText) {
+            seg2Promise = startSpeechStream(2, restText, restSentences);
+          }
+        }
+      };
+      const addTextUsage = (usage: any): void => {
+        if (!usage || typeof usage !== "object") return;
+        this.totals.textInTokens += nonNegNum(usage.promptTokenCount);
+        this.totals.textOutTokens +=
+          nonNegNum(usage.candidatesTokenCount) + nonNegNum(usage.thoughtsTokenCount);
+      };
+      const capReply = (): void => {
+        // Cut at the last complete sentence; later text is never spoken or echo-checked.
+        replyCapped = true;
+        textBuf = "";
+        this.currentTutorText = collected.join(" ");
+        this.log("[poc] stage=reply_capped");
+        startRemainingSpeech();
+      };
+      // Manual iteration: after the cap the turn goes on with speech while the rest of the
+      // stream is drained in the background, only for its billed usage (thinking included).
+      const iter = stream[Symbol.asyncIterator]();
+      for (;;) {
+        const step = await iter.next();
+        if (step.done) break;
+        const chunk = step.value;
         if (isAborted()) break;
         if (chunk?.usageMetadata) {
           lastTextUsage = chunk.usageMetadata;
@@ -1019,9 +1089,26 @@ export class CascadeSession {
           for (const raw of sentences) {
             const s = stripMarkdownForSpeech(raw);
             if (!s) continue;
+            if (collected.length > 0 && estimateTextTokens([...collected, s].join(" ")) > replyCap) {
+              capReply();
+              break;
+            }
             collected.push(s);
           }
-          if (!seg1Started && !isAborted()) {
+          if (
+            !replyCapped &&
+            textBuf &&
+            estimateTextTokens([...collected, textBuf].join(" ")) > replyCap
+          ) {
+            // The unfinished sentence would pass the cap: drop it. With nothing complete yet
+            // (no sentence end at all), speak what came, cut mid-sentence.
+            if (collected.length === 0) {
+              const forced = stripMarkdownForSpeech(textBuf);
+              if (forced) collected.push(forced);
+            }
+            capReply();
+          }
+          if (!replyCapped && !seg1Started && !isAborted()) {
             const first = takeFirstSpeechSegment(collected, false);
             if (first) {
               seg1Started = true;
@@ -1033,45 +1120,61 @@ export class CascadeSession {
               );
             }
           }
+          if (!replyCapped && estimateTextTokens(collected.join(" ")) >= replyCap) {
+            capReply();
+          }
+          if (replyCapped) break;
         }
       }
 
-      if (lastTextUsage && typeof lastTextUsage === "object") {
-        this.totals.textInTokens += nonNegNum(lastTextUsage.promptTokenCount);
-        this.totals.textOutTokens +=
-          nonNegNum(lastTextUsage.candidatesTokenCount) +
-          nonNegNum(lastTextUsage.thoughtsTokenCount);
+      if (replyCapped && !this.closed) {
+        this.textDrains.add(textAbort);
+        void (async () => {
+          let usage: any = lastTextUsage;
+          try {
+            for (;;) {
+              const step = await iter.next();
+              if (step.done) break;
+              if (step.value?.usageMetadata) usage = step.value.usageMetadata;
+            }
+          } catch {
+            // Aborted (barge-in / close) or failed after the cap: keep what was seen.
+          }
+          this.textDrains.delete(textAbort);
+          addTextUsage(usage);
+          if (!this.closed) this.deps.send({ type: "poc_usage", usage: this.usage() });
+        })();
+      } else {
+        addTextUsage(lastTextUsage);
       }
-      if (isCancelled()) return;
+      if (isCancelled()) {
+        // bargeIn already sent poc_usage before this turn's text usage was added.
+        if (!this.closed) this.deps.send({ type: "poc_usage", usage: this.usage() });
+        return;
+      }
 
       const tail = flushSentences(textBuf)
         .map(stripMarkdownForSpeech)
         .filter(Boolean);
-      if (finishReason === "MAX_TOKENS" && collected.length > 0) {
+      if (replyCapped) {
+        // Speech for the capped reply already started inside the loop.
+      } else if (finishReason === "MAX_TOKENS" && collected.length > 0) {
         this.log("[poc] stage=reply_capped");
+        startRemainingSpeech();
       } else {
         for (const s of tail) {
+          if (collected.length > 0 && estimateTextTokens([...collected, s].join(" ")) > replyCap) {
+            this.log("[poc] stage=reply_capped");
+            break;
+          }
           collected.push(s);
         }
+        startRemainingSpeech();
       }
 
-      if (!seg1Started && !isAborted()) {
-        const first = takeFirstSpeechSegment(collected, true);
-        if (first) {
-          seg1Started = true;
-          seg1Used = first.used;
-          seg1Promise = startSpeechStream(
-            1,
-            first.segment,
-            collected.slice(0, first.used),
-          );
-        }
-      } else if (seg1Started && collected.length > seg1Used && !isAborted() && !ttsError) {
-        const restSentences = collected.slice(seg1Used);
-        const restText = restSentences.join(" ");
-        if (restText) {
-          seg2Promise = startSpeechStream(2, restText, restSentences);
-        }
+      if (collected.length === 0) {
+        // e.g. thinking used the whole maxOutputTokens: visible in logs, turn ends quietly.
+        this.log(`[poc] stage=reply_empty finish=${finishReason ?? "none"}`);
       }
 
       const pendingStreams: Promise<void>[] = [];

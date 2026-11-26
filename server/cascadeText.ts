@@ -349,6 +349,18 @@ export function median(xs: number[]): number {
   return percentile(xs, 50);
 }
 
+/**
+ * Gemini 3.6+ rejects a request whose last non-empty turn is the model's (prefill → 400).
+ * The session always pushes the user turn first, so this only guards unexpected states; the
+ * placeholder is request-only and never stored in history.
+ */
+export function endWithUserTurn<T extends { role: "user" | "model"; parts: [{ text: string }] }>(
+  contents: T[],
+): Array<T | { role: "user"; parts: [{ text: string }] }> {
+  if (contents.length === 0 || contents[contents.length - 1].role === "user") return contents;
+  return [...contents, { role: "user", parts: [{ text: "(continue)" }] }];
+}
+
 export function estimateTextTokens(text: string): number {
   if (!text) return 0;
   return Math.ceil(text.length / 4);

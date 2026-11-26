@@ -8,13 +8,14 @@ import {
   CASCADE_SETTLE_MS,
   STT_ROTATE_AFTER_MS,
   STT_CONNECT_TIMEOUT_MS,
-  POC_MAX_OUTPUT_TOKENS,
-  POC_LONG_MAX_OUTPUT_TOKENS,
-  POC_TEMPERATURE,
+  POC_REPLY_TOKEN_CAP,
+  POC_LONG_REPLY_TOKEN_CAP,
+  POC_THINKING_HEADROOM_TOKENS,
   maxOutputTokensFor,
+  replyTokenCapFor,
 } from '../server/cascadeSession.ts';
 import type { CascadeAi, CascadeClock } from '../server/cascadeSession.ts';
-import { estimateTextTokens } from '../server/cascadeText.ts';
+import { estimateTextTokens, endWithUserTurn } from '../server/cascadeText.ts';
 import { handleCascadeConnection } from '../server/cascadeWs.ts';
 
 class FakeClock implements CascadeClock {
@@ -55,6 +56,10 @@ function makeFakeAi(
   opts: {
     reply?: string;
     finishReason?: string;
+    /** Pause the text stream before chunk index `at` until `wait` resolves. */
+    textGate?: { at: number; wait: Promise<void> };
+    /** Text chunk size in chars (default 7). */
+    chunkSize?: number;
     failStt?: boolean;
     hangStt?: boolean;
     ttsBytes?: number;
@@ -83,10 +88,11 @@ function makeFakeAi(
     async streamText(req) {
       textCalls.push(req);
       const reply = opts.reply ?? 'Hello there. How are you today?';
-      const parts = reply.match(/.{1,7}/gs) || [];
+      const parts = reply.match(new RegExp(`.{1,${opts.chunkSize ?? 7}}`, 'gs')) || [];
       return {
         async *[Symbol.asyncIterator]() {
           for (let i = 0; i < parts.length; i++) {
+            if (opts.textGate && i === opts.textGate.at) await opts.textGate.wait;
             if (req.signal.aborted) return;
             const isLast = i === parts.length - 1;
             yield {
@@ -145,7 +151,7 @@ const interim = (text: string) => ({ serverContent: { interimInputTranscription:
 test('start: ready after STT connects; fallback_required when STT fails or times out', async () => {
   const ok = makeSession(makeFakeAi());
   await ok.session.start();
-  assert.deepEqual(ok.sent[0], { type: 'ready', model: 'cascade-poc', models: { stt: 'gemini-3.5-transcribe-live', text: 'gemini-3.1-flash-lite', tts: 'gemini-3.8-flash-lite-tts' } });
+  assert.deepEqual(ok.sent[0], { type: 'ready', model: 'cascade-poc', models: { stt: 'gemini-3.5-transcribe-live', text: 'gemini-3.8-flash', tts: 'gemini-3.8-flash-tts' } });
 
   const bad = makeSession(makeFakeAi({ failStt: true }));
   await bad.session.start();
@@ -178,7 +184,7 @@ test('voice turn: waits 0.4 s after the final segment, then text → streamed au
   assert.equal(fake.textCalls.length, 1);
   const contents = fake.textCalls[0].contents;
   assert.equal(contents[contents.length - 1].parts[0].text, 'I went hiking. With my dad.');
-  assert.equal(fake.textCalls[0].maxOutputTokens, POC_MAX_OUTPUT_TOKENS);
+  assert.equal(fake.textCalls[0].maxOutputTokens, POC_REPLY_TOKEN_CAP + POC_THINKING_HEADROOM_TOKENS);
   assert.match(fake.textCalls[0].systemInstruction, /^You are a tutor\.\n\nVoice call output rules/);
   assert.deepEqual(fake.ttsCalls.map((c) => c.text), ['Hello there. How are you today?']);
   assert.deepEqual(types(sent), [
@@ -373,7 +379,7 @@ test('Gemini adapter: TEXT-only STT, text cap/temp/finishReason with thinking re
     for await (const ch of await ai.streamText({
       systemInstruction: 'x',
       contents: [],
-      maxOutputTokens: POC_MAX_OUTPUT_TOKENS,
+      maxOutputTokens: 1174,
       signal: new AbortController().signal,
     })) {
       out.push({ text: ch.text, finishReason: ch.finishReason });
@@ -384,8 +390,11 @@ test('Gemini adapter: TEXT-only STT, text cap/temp/finishReason with thinking re
   assert.deepEqual(out, [{ text: 'Hi.', finishReason: 'STOP' }]);
   const textCalls = calls.filter((c) => c[0] === 'text');
   assert.equal(textCalls.length, 2);
-  assert.equal(textCalls[0][1].config.maxOutputTokens, POC_MAX_OUTPUT_TOKENS);
-  assert.equal(textCalls[0][1].config.temperature, POC_TEMPERATURE);
+  assert.equal(textCalls[0][1].config.maxOutputTokens, 1174);
+  // gemini-3.8-flash: "low" thinking (minimal errors), no temperature (deprecated since 3.6).
+  assert.deepEqual(textCalls[0][1].config.thinkingConfig, { thinkingLevel: 'low' });
+  assert.equal('temperature' in textCalls[0][1].config, false);
+  assert.equal('thinkingConfig' in textCalls[1][1].config, false, 'retry drops the rejected thinking setting');
 
   const ac = new AbortController();
   const ttsOut: any[] = [];
@@ -605,27 +614,28 @@ test('old STT dying during a failed rotation goes through the one-reconnect path
   assert.ok(!sent.some((m) => m.error === 'stt_closed'));
 });
 
-test('length: maxOutputTokensFor short vs Done/Model answer, passed to streamText, and MAX_TOKENS tail dropped', async () => {
-  assert.equal(maxOutputTokensFor('Hello there'), POC_MAX_OUTPUT_TOKENS);
-  assert.equal(maxOutputTokensFor('Done'), POC_MAX_OUTPUT_TOKENS);
+test('length: reply caps short vs Done/Model answer, API cap adds thinking headroom, MAX_TOKENS tail dropped', async () => {
+  assert.equal(replyTokenCapFor('Hello there'), POC_REPLY_TOKEN_CAP);
+  assert.equal(replyTokenCapFor('Done'), POC_REPLY_TOKEN_CAP);
   assert.equal(
-    maxOutputTokensFor('Feedback. (Please provide quick feedback on what I just said.)'),
-    POC_MAX_OUTPUT_TOKENS,
+    replyTokenCapFor('Feedback. (Please provide quick feedback on what I just said.)'),
+    POC_REPLY_TOKEN_CAP,
   );
   assert.equal(
-    maxOutputTokensFor(
+    replyTokenCapFor(
       'Done. (I have finished my answer. Please provide concise feedback, estimated level, and AL upgrade expression under 40 seconds.)',
     ),
-    POC_LONG_MAX_OUTPUT_TOKENS,
+    POC_LONG_REPLY_TOKEN_CAP,
   );
   assert.equal(
-    maxOutputTokensFor(
+    replyTokenCapFor(
       'Model answer. (Please give a 60-second AL model answer to this question using my details.)',
     ),
-    POC_LONG_MAX_OUTPUT_TOKENS,
+    POC_LONG_REPLY_TOKEN_CAP,
   );
+  // maxOutputTokens counts thinking tokens, so the API cap is reply cap + headroom.
+  assert.equal(maxOutputTokensFor('Hello there'), 150 + POC_THINKING_HEADROOM_TOKENS);
 
-  // Voice turn gets 150; Done control command gets 600.
   const fake = makeFakeAi({
     reply: 'That sounds great! What did you enjoy most? And then I was about to',
     finishReason: 'MAX_TOKENS',
@@ -635,16 +645,183 @@ test('length: maxOutputTokensFor short vs Done/Model answer, passed to streamTex
   fake.stt[0].cb.onmessage(finalSeg('I went to the park.'));
   clock.advance(CASCADE_SETTLE_MS);
   await flush();
-  assert.equal(fake.textCalls[0].maxOutputTokens, 150);
+  assert.equal(fake.textCalls[0].maxOutputTokens, 150 + POC_THINKING_HEADROOM_TOKENS);
   assert.deepEqual(fake.ttsCalls.map((c) => c.text), ['That sounds great! What did you enjoy most?']);
   assert.ok(logs.includes('[poc] stage=reply_capped'));
   const transcripts = sent.filter((m) => m.type === 'output_transcript').map((m) => m.text);
   assert.deepEqual(transcripts, ['That sounds great! What did you enjoy most?']);
 
-  // Done button gets 600.
+  // Done button gets the long cap.
   session.handleClientMessage({ type: 'control_command', command: 'Done' });
   await flush();
-  assert.equal(fake.textCalls[1].maxOutputTokens, 600);
+  assert.equal(fake.textCalls[1].maxOutputTokens, 600 + POC_THINKING_HEADROOM_TOKENS);
+});
+
+test('length: visible reply past the cap is cut at the last full sentence and spoken; usage still counted', async () => {
+  // 20 sentences of 40 chars = 800 chars (~200 tokens) > 150-token cap.
+  const sentence = 'This is a sentence of about forty chars.';
+  const reply = Array.from({ length: 20 }, () => sentence).join(' ');
+  const fake = makeFakeAi({ reply, finishReason: 'STOP' });
+  const { session, sent, logs } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'tell me a story' });
+  await flush();
+  assert.ok(logs.includes('[poc] stage=reply_capped'));
+  const spoken = fake.ttsCalls.map((c) => c.text).join(' ');
+  assert.ok(spoken.length > 0 && spoken.length < reply.length, 'spoken text is shorter than the reply');
+  assert.ok(estimateTextTokens(spoken) <= POC_REPLY_TOKEN_CAP, 'never past the cap');
+  assert.ok(estimateTextTokens(spoken) > POC_REPLY_TOKEN_CAP - 15, 'cut at the last sentence that fits');
+  assert.ok(spoken.endsWith('.'), 'cut at a sentence end');
+  assert.ok(fake.ttsCalls.length <= 2, 'still at most 2 speech streams');
+  const transcripts = sent.filter((m) => m.type === 'output_transcript').map((m) => m.text).join(' ');
+  assert.equal(transcripts, spoken);
+  const usage = [...sent].reverse().find((m) => m.type === 'poc_usage').usage;
+  assert.equal(usage.textInTokens, 100, 'stream drained after the cap so billed usage is recorded');
+  assert.equal(usage.textOutTokens, 12);
+});
+
+test('length: after the cap the turn ends with speech while the stream drains; user speech then is not a barge-in', async () => {
+  const sentence = 'This is a sentence of about forty chars.';
+  const reply = Array.from({ length: 20 }, () => sentence).join(' ');
+  let release!: () => void;
+  const wait = new Promise<void>((r) => (release = r));
+  // Pause near the end (after the cap is reached) so the drain is still running.
+  const fake = makeFakeAi({ reply, finishReason: 'STOP', textGate: { at: 110, wait } });
+  const { session, clock, sent, logs } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'tell me a story' });
+  await flush();
+  assert.ok(logs.includes('[poc] stage=reply_capped'));
+  assert.ok(types(sent).includes('turnComplete'), 'turn completes without waiting for the drain');
+  clock.advance(60_000); // tutor audio long finished
+  fake.stt[0].cb.onmessage(finalSeg('Okay I see what you mean.'));
+  await flush();
+  assert.ok(!types(sent).includes('interrupted'), 'not treated as a barge-in');
+  const before = [...sent].reverse().find((m) => m.type === 'poc_usage').usage.textInTokens;
+  release();
+  await flush();
+  const after = [...sent].reverse().find((m) => m.type === 'poc_usage').usage.textInTokens;
+  assert.equal(after - before, 100, 'drained usage is added and re-sent');
+});
+
+test('length: cap reached in one chunk before stream 1 started -> all fitting sentences spoken over 2 streams', async () => {
+  const sentence = 'This is a sentence of about forty chars.';
+  const reply = Array.from({ length: 20 }, () => sentence).join(' ');
+  const fake = makeFakeAi({ reply, finishReason: 'STOP', chunkSize: 100_000 });
+  const { session, sent, logs } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'tell me a story' });
+  await flush();
+  assert.ok(logs.includes('[poc] stage=reply_capped'));
+  assert.equal(fake.ttsCalls.length, 2);
+  const spoken = fake.ttsCalls.map((c) => c.text).join(' ');
+  assert.ok(estimateTextTokens(spoken) <= POC_REPLY_TOKEN_CAP && estimateTextTokens(spoken) > POC_REPLY_TOKEN_CAP - 15);
+  const transcripts = sent.filter((m) => m.type === 'output_transcript').map((m) => m.text).join(' ');
+  assert.equal(transcripts, spoken);
+});
+
+test('length: one short sentence then a long unpunctuated run -> only the finished sentence is spoken', async () => {
+  const reply = `Nice. ${'and then '.repeat(80)}`; // ~720 chars without a sentence end
+  const fake = makeFakeAi({ reply, finishReason: 'STOP' });
+  const { session, logs } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'go' });
+  await flush();
+  assert.ok(logs.includes('[poc] stage=reply_capped'));
+  assert.deepEqual(fake.ttsCalls.map((c) => c.text), ['Nice.']);
+});
+
+test('length: barge-in during capped speech and the next turn do not cut the drain; usage counted once', async () => {
+  const sentence = 'This is a sentence of about forty chars.';
+  const reply = Array.from({ length: 20 }, () => sentence).join(' ');
+  let release!: () => void;
+  const wait = new Promise<void>((r) => (release = r));
+  const fake = makeFakeAi({ reply, finishReason: 'STOP', textGate: { at: 110, wait }, ttsBytes: 240000 });
+  const { session, clock, sent } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'tell me a story' });
+  await flush();
+  clock.advance(1000); // tutor audio still playing
+  session.handleClientMessage({ type: 'interrupt' });
+  assert.ok(types(sent).includes('interrupted'));
+  assert.ok(!fake.textCalls[0].signal.aborted, 'capped text stream keeps draining after barge-in');
+  session.handleClientMessage({ type: 'text_prompt', text: 'next' }); // next turn starts
+  await flush();
+  assert.ok(!fake.textCalls[0].signal.aborted, 'and after the next turn starts');
+  release();
+  await flush();
+  const usage = [...sent].reverse().find((m) => m.type === 'poc_usage').usage;
+  assert.equal(usage.textInTokens, 200, 'two turns x 100, the capped one counted once');
+  session.close();
+});
+
+test('length: closing the session aborts a draining text stream', async () => {
+  const sentence = 'This is a sentence of about forty chars.';
+  const reply = Array.from({ length: 20 }, () => sentence).join(' ');
+  const fake = makeFakeAi({ reply, finishReason: 'STOP', textGate: { at: 110, wait: new Promise(() => {}) } });
+  const { session } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'tell me a story' });
+  await flush();
+  assert.ok(!fake.textCalls[0].signal.aborted);
+  session.close();
+  assert.ok(fake.textCalls[0].signal.aborted);
+});
+
+test('length: reply with no sentence end is still capped', async () => {
+  const reply = 'word '.repeat(200).trim(); // 999 chars, no punctuation
+  const fake = makeFakeAi({ reply, finishReason: 'STOP' });
+  const { session, logs } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'go' });
+  await flush();
+  assert.ok(logs.includes('[poc] stage=reply_capped'));
+  const spoken = fake.ttsCalls.map((c) => c.text).join(' ');
+  assert.ok(spoken.length > 0 && estimateTextTokens(spoken) <= POC_REPLY_TOKEN_CAP + 2);
+});
+
+test('length: thinking ate the whole budget (MAX_TOKENS, no text) -> no speech, reply_empty logged, turn completes', async () => {
+  const fake = makeFakeAi({ reply: '', finishReason: 'MAX_TOKENS' });
+  const { session, sent, logs } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'hi' });
+  await flush();
+  assert.equal(fake.ttsCalls.length, 0);
+  assert.ok(logs.some((l) => l.startsWith('[poc] stage=reply_empty')));
+  assert.ok(types(sent).includes('turnComplete'));
+});
+
+test('endWithUserTurn: appends a request-only user turn after a trailing model turn (prefill is 400)', () => {
+  const tail = [{ role: 'user' as const, parts: [{ text: 'hi' }] as [{ text: string }] }, { role: 'model' as const, parts: [{ text: 'Hello!' }] as [{ text: string }] }];
+  const out = endWithUserTurn(tail);
+  assert.equal(out.length, 3);
+  assert.deepEqual(out[2], { role: 'user', parts: [{ text: '(continue)' }] });
+  assert.equal(tail.length, 2, 'input not mutated');
+  const ok = [{ role: 'user' as const, parts: [{ text: 'hi' }] as [{ text: string }] }];
+  assert.equal(endWithUserTurn(ok), ok);
+  assert.deepEqual(endWithUserTurn([]), []);
+});
+
+test('Gemini adapter: a non-thinking error or an aborted request is not retried', async () => {
+  const calls: any[] = [];
+  const mk = (msg: string) => ({
+    live: { connect: async () => ({ sendRealtimeInput() {}, close() {} }) },
+    models: {
+      generateContentStream: async (req: any) => {
+        calls.push(req);
+        throw new Error(msg);
+      },
+    },
+  });
+  const ai1 = createGeminiCascadeAi(mk('quota exceeded') as any, { stt: 's', text: 't', tts: 'v' }, {} as any);
+  await assert.rejects(ai1.streamText({ systemInstruction: 'x', contents: [], maxOutputTokens: 1, signal: new AbortController().signal }), /quota/);
+  assert.equal(calls.length, 1);
+  calls.length = 0;
+  const ac = new AbortController();
+  ac.abort();
+  const ai2 = createGeminiCascadeAi(mk('thinking_level is not supported') as any, { stt: 's', text: 't', tts: 'v' }, {} as any);
+  await assert.rejects(ai2.streamText({ systemInstruction: 'x', contents: [], maxOutputTokens: 1, signal: ac.signal }));
+  assert.equal(calls.length, 1);
 });
 
 test('chunking: 2-sentence reply uses 1 stream; long 3+ sentence reply (first >= 80 chars) uses 2 streams in order', async () => {

@@ -332,8 +332,8 @@ export function liveUsageBasis(u: UsageDay | UsageMonth | null | undefined): Liv
 }
 
 /**
- * Test-mode (PoC) cost from the stored poc* counters. Re-pricing uses today's TTS rate (the TTS
- * price doubles from 2027-01-01 KST), so a 2026 PoC call viewed in 2027 shows the 2027 TTS rate.
+ * Test-mode (PoC) cost from the stored poc* counters. Re-pricing uses today's text and TTS rates
+ * (both double from 2027-01-01 KST), so a 2026 PoC call viewed in 2027 shows the 2027 rates.
  */
 export function pocUsageCostUsd(u: UsageDelta | UsageDay | UsageMonth | null | undefined, nowMs?: number): number {
   if (!u) return 0;

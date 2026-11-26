@@ -3,7 +3,7 @@
  *
  * Browser side only does mic capture (16 kHz PCM), playback (24 kHz PCM through the shared
  * playback scheduler) and UI callbacks. Transcription (gemini-3.5-transcribe-live), the tutor
- * reply (gemini-3.1-flash-lite) and speech (gemini-3.8-flash-lite-tts) all run on the server
+ * reply (gemini-3.8-flash) and speech (gemini-3.8-flash-tts) all run on the server
  * WebSocket POC_WS_PATH, so no key ever reaches the browser.
  *
  * connect() REJECTS unless the server is ready AND the tutor's first sentence (text + speech)
