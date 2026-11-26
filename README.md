@@ -13,9 +13,9 @@ AI 튜터와 영어로 통화하고, 통화에서 **틀린 말을 틀린 그대�
 | 1단계 | Google 로그인(허용된 1개 계정만), Firestore·Cloud Storage | `src/services/firebase/`, `firestore.rules`, `server/auth.ts` |
 | 1단계 | 4개 목표(OPIc AL·필리조선소 업무·미국/호주 여행·Bluey 듣기)와 요일 루틴, 오늘 수업 카드(아침 강의를 홈 루프에 노출, 진도 변경은 확인 시트에서 확정) | `src/data/defaultGoals.ts`, `src/ui/home/` |
 | 1단계 | 실시간 통화 `gemini-3.8-live`: 임시 토큰 직접 연결 → 실패 시 서버 중계, 세션 재개, 재연결(5번 실패하면 멈추고 안내). 통화마다 새 연결 객체라 앞 통화가 섞이지 않음 | `src/services/providers/geminiLiveProvider.ts`, `server.ts` `/live` |
-| 1단계 | 10초 조각 녹음(IndexedDB 먼저 저장 → Storage 업로드, 통화 마지막 조각까지 포함), 1분 단위 임시 받아쓰기(설정에서 끄기 가능), 끊긴 통화 복구 | `src/services/recording/` |
+| 1단계 | 10초 조각 녹음(IndexedDB 먼저 저장 → Storage 업로드, 통화 마지막 조각까지 포함), 1분 단위 임시 받아쓰기(기본 꺼짐, 설정에서 켜기), 끊긴 통화 복구 | `src/services/recording/` |
 | 1단계 | 통화 후 복기: 녹음을 1분 WAV로 합쳐 `gemini-3.5-transcribe` VERBATIM 받아쓰기 → `gemini-3.8-flash` 복기(`myPhrase`는 틀린 그대로). "내가 한 말 아님" 신고 시 그 실수는 복습 목록에서 빠짐. 다시 복기해도 중복·진도 후퇴 없음. 복기 화면에서 이번 통화 성과(졸업·재복습·다음 수업 진행)도 함께 표시 | `src/services/review/reviewPipeline.ts`, `/api/review` |
-| 1단계 | Keep 실수 목록 붙여넣기 가져오기, 사용량·예상 비용(공식 단가 기준, Live 컨텍스트 재과금·받아쓰기 2회·강의 TTS 오디오 토큰 포함 추정), 받아쓰기 품질 시험(개발자 메뉴) | `src/ui/keep/`, `src/ui/settings/UsagePanel.tsx`, `src/ui/sttBench/` |
+| 1단계 | Keep 실수 목록 붙여넣기 가져오기, 사용량·예상 비용(공식 단가 기준, Live는 실측 `usageMetadata` 토큰 우선·없으면 컨텍스트 재과금 추정, 받아쓰기는 실제 호출 분, 강의 TTS 오디오 토큰), 받아쓰기 품질 시험(개발자 메뉴) | `src/ui/keep/`, `src/ui/settings/UsagePanel.tsx`, `src/ui/sttBench/` |
 | 2단계 | 간격 반복(1→3→7→14일, 보류, 졸업)과 퀴즈(말하기/타이핑, `gemini-3.8-flash` 채점) | `src/services/firebase/db.ts`, `src/ui/quiz/` |
 | 2단계 | 아침 강의(대본 `gemini-3.8-flash`, 2인 음성 `gemini-3.8-flash-tts`, 답 전 3초 무음). 서버 재시작으로 멈추면 "다시 만들기" 안내. 아침 강의는 하루 최대 2회(환경변수 `LECTURE_DAILY_GEN_CAP`)까지만 새로 만듭니다. 그 뒤로는 백업 복원만 하며, 이유는 피드 `today/diag.json`의 `genSkipReason`에서 볼 수 있습니다. | `server/lecture.ts`, `server/lectureGenGuard.ts`, `src/ui/lecture/` |
 | 2단계 | 그록봇 피드: `/feed/{비밀키}/today` 주소로 오늘 강의 상태·음성 링크 제공 | `server/feed.ts`, `src/ui/settings/FeedSettingsPanel.tsx` |
@@ -58,7 +58,7 @@ AI 튜터와 영어로 통화하고, 통화에서 **틀린 말을 틀린 그대�
 - 아침 강의 음성, 그록봇 피드 설정, 서버 예비 녹음은 서버 안 `.data/` 폴더에 저장됩니다. AI Studio 배포(Cloud Run)에서는 서버가 다시 켜지면 지워질 수 있습니다. 피드 설정과 설정에 저장한 Gemini 키는 Firestore `feeds/{id}`에 암호화 백업되어, 새로 켜진 서버가 그록봇 요청만으로 복원합니다(v2.8.1). 아침 강의 음성은 mp3(48kbps; ffmpeg가 있으면 lame, 없으면 `@breezystack/lamejs`)로 생성·서빙·백업하고 피드 키로 암호화해 Firestore `feeds/{id}/days/{날짜}/audio/{n}` 청크 문서(청크 한도 8 유지, `firestore.rules` 변경 없음)에 함께 백업하며, 새로 켜진 서버가 TTS를 다시 돌리지 않고 내려받아 복원합니다(2026-11-25, Firebase 콘솔에서 `firestore.rules` 게시 필요). 오디오 재생성이 실패하면 원인 분류(`audioError`), 다음 재시도 시각(`audioRetryAfter`), 백업 업로드 결과(`audioBackup`)가 진단 `diag.json`에 남습니다. 예비 녹음은 여전히 지워질 수 있습니다. `.data/`는 배포 이미지에 넣지 않습니다(`.dockerignore`·`.gcloudignore`). 개발 작업공간의 옛 데이터가 게시본에 섞이지 않게 하기 위해서입니다. 로컬 `feed.json`이 이미 있어도 서버는 5분에 한 번 Firestore 백업을 다시 확인합니다. 백업의 sync가 더 새로우면 그 상태와 키로 바꿉니다(2026-11-25).
 - 허용 계정 이메일이 `firestore.rules`, `server/auth.ts`, `src/services/firebase/auth.ts`에 고정돼 있습니다(베타 전에 바꿔야 함).
 - `npm audit`에 10건(high 8, moderate 2, 2026-11-10 기준)이 나옵니다. Firebase가 쓰는 `@grpc/grpc-js`(서버용 통신 라이브러리), 개발 서버용 `vite`·`esbuild`, `qs`·`re2js`·`source-map-js` 등입니다. `npm audit fix`는 Firebase SDK 버전을 올리므로 실기기 QC 뒤에 따로 적용하는 것을 권장합니다.
-- 설정 → 사용량의 "예상 비용"은 `src/config/models.ts`의 단가표로 계산한 추정치입니다. 통화 단가(`livePerMinute`)는 공식 단가로 확인되지 않은 값이라 실제 청구액보다 낮게 나올 수 있습니다.
+- 설정 → 사용량의 "예상 비용"은 `src/config/models.ts`의 단가표로 계산합니다. 2026-11-26 이후 통화는 Gemini Live가 보내 준 실측 토큰(`usageMetadata`)으로, 그 전 통화와 끊긴 통화 복구분은 추정식으로 계산합니다. 최종 청구액은 Google Cloud 콘솔이 기준입니다.
 
 ## 실행
 

@@ -926,3 +926,159 @@ test('second connect() without resumeToken on the same provider resets tutorSpok
     }
   });
 });
+
+
+test('GeminiLiveProvider tracks usageMetadata across direct turns, GoAway reconnect, proxy path, and resets on fresh connect', async (t) => {
+  await withFakeBrowserEnv(async () => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      const provider = new GeminiLiveProvider();
+      const statuses: string[] = [];
+
+      // 1) Direct path: 2 snapshots in turn 1 (last-wins) + turnComplete, then pending snapshot across GoAway reconnect
+      const p1 = provider.connect({
+        sessionId: 'sess-usage-direct',
+        systemPrompt: 'System prompt',
+        skipMic: true,
+        onAudioData: () => {},
+        onTranscript: () => {},
+        onStatusChange: (status) => statuses.push(status),
+      });
+
+      await waitFor(() => FakeWebSocket.instances.length === 1 && FakeWebSocket.instances[0].sent.length >= 1);
+      const sock1 = FakeWebSocket.instances[0];
+      sock1.emitMessage(new Blob([JSON.stringify({ setupComplete: {} })]));
+      await p1;
+
+      sock1.emitMessage(
+        new Blob([
+          JSON.stringify({
+            usageMetadata: {
+              promptTokenCount: 100,
+              responseTokenCount: 10,
+              promptTokensDetails: [{ modality: 'AUDIO', tokenCount: 100 }],
+              responseTokensDetails: [{ modality: 'AUDIO', tokenCount: 10 }],
+            },
+          }),
+        ]),
+      );
+      sock1.emitMessage(
+        new Blob([
+          JSON.stringify({
+            usageMetadata: {
+              promptTokenCount: 100,
+              responseTokenCount: 40,
+              thoughtsTokenCount: 5,
+              promptTokensDetails: [{ modality: 'AUDIO', tokenCount: 100 }],
+              responseTokensDetails: [{ modality: 'AUDIO', tokenCount: 40 }],
+            },
+            serverContent: { turnComplete: true },
+          }),
+        ]),
+      );
+
+      // Turn 2 observed, then GoAway arrives before turnComplete -> pending turn must be committed and preserved.
+      sock1.emitMessage(
+        new Blob([
+          JSON.stringify({
+            usageMetadata: {
+              promptTokenCount: 220,
+              responseTokenCount: 30,
+              promptTokensDetails: [
+                { modality: 'AUDIO', tokenCount: 200 },
+                { modality: 'TEXT', tokenCount: 20 },
+              ],
+              responseTokensDetails: [{ modality: 'AUDIO', tokenCount: 30 }],
+            },
+          }),
+        ]),
+      );
+      sock1.emitMessage(new Blob([JSON.stringify({ goAway: { timeLimit: '5s' } })]));
+
+      await waitFor(() => statuses.includes('reconnecting'));
+      t.mock.timers.tick(1000);
+      await waitFor(() => FakeWebSocket.instances.length === 2 && FakeWebSocket.instances[1].sent.length >= 1);
+
+      const sock2 = FakeWebSocket.instances[1];
+      const connectedBefore = statuses.filter((s) => s === 'connected').length;
+      sock2.emitMessage(new Blob([JSON.stringify({ setupComplete: {} })]));
+      await waitFor(() => statuses.filter((s) => s === 'connected').length > connectedBefore);
+
+      // Turn 3 on reconnected socket ends with interrupted
+      sock2.emitMessage(
+        new Blob([
+          JSON.stringify({
+            usageMetadata: {
+              promptTokenCount: 300,
+              responseTokenCount: 50,
+            },
+            serverContent: { interrupted: true },
+          }),
+        ]),
+      );
+      await waitFor(() => provider.getLiveUsage().turns === 3);
+
+      const directTotals = provider.finalizeLiveUsage();
+      assert.equal(directTotals.turns, 3);
+      assert.equal(directTotals.inAudio, 100 + 200 + 300);
+      assert.equal(directTotals.inText, 20);
+      assert.equal(directTotals.outAudio, 40 + 30 + 50);
+      assert.equal(directTotals.thoughts, 5);
+      assert.equal(directTotals.unsplitPromptTokens, 300);
+
+      await provider.disconnect(false);
+
+      // 2) Brand new call via proxy path on same provider -> resets previous call totals
+      (globalThis as any).fetch = async () =>
+        new Response(JSON.stringify({ ok: false, error: 'proxy test' }), { status: 200 });
+      const p2 = provider.connect({
+        sessionId: 'sess-usage-proxy',
+        systemPrompt: 'System prompt',
+        skipMic: true,
+        onAudioData: () => {},
+        onTranscript: () => {},
+        onStatusChange: (status) => statuses.push(status),
+      });
+
+      await waitFor(() => FakeWebSocket.instances.length === 3 && FakeWebSocket.instances[2].sent.length >= 1);
+      const proxyWs = FakeWebSocket.instances[2];
+      proxyWs.emitMessage(new Blob([JSON.stringify({ type: 'ready', model: 'gemini-3.8-live' })]));
+      await p2;
+
+      assert.equal(provider.getLiveUsage().turns, 0);
+
+      proxyWs.emitMessage(
+        new Blob([
+          JSON.stringify({
+            type: 'usage_metadata',
+            usageMetadata: {
+              promptTokenCount: 150,
+              responseTokenCount: 60,
+              promptTokensDetails: [
+                { modality: 'AUDIO', tokenCount: 110 },
+                { modality: 'TEXT', tokenCount: 40 },
+              ],
+              responseTokensDetails: [
+                { modality: 'AUDIO', tokenCount: 50 },
+                { modality: 'TEXT', tokenCount: 10 },
+              ],
+            },
+          }),
+        ]),
+      );
+      proxyWs.emitMessage(new Blob([JSON.stringify({ type: 'turnComplete' })]));
+      await waitFor(() => provider.getLiveUsage().turns === 1);
+
+      const proxyTotals = provider.finalizeLiveUsage();
+      assert.equal(proxyTotals.turns, 1);
+      assert.equal(proxyTotals.inAudio, 110);
+      assert.equal(proxyTotals.inText, 40);
+      assert.equal(proxyTotals.outAudio, 50);
+      assert.equal(proxyTotals.outText, 10);
+
+      await provider.disconnect(false);
+    } finally {
+      t.mock.timers.reset();
+    }
+  });
+});

@@ -30,6 +30,7 @@ export const PRICING_RATES = {
   liveInTextPer1M: 0.75,
   liveInAudioPer1M: 3,
   liveOutAudioPer1M: 12,
+  liveOutTextPer1M: 4.5,
   sttInAudioPer1M: 2,
   sttOutTextPer1M: 12,
   textInPer1M: 0.75,

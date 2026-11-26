@@ -16,7 +16,7 @@ import { sanitizeLectureInputs } from './server/lectureMaterial.ts';
 import { mimeForAudioFile } from './server/lectureAudioEncode.ts';
 import { computeMistakeClusters, validateClusterRequestBody } from './server/mistakeClusters.ts';
 import { runLectureSupplement } from './server/lectureSupplement.ts';
-import { tokensFromUsageMetadata } from './server/usageMeta.ts';
+import { tokensFromUsageMetadata, sanitizeLiveUsageMetadata } from './server/usageMeta.ts';
 import { preferredUserTranscript, buildUserCorpus } from './src/services/lecture/lectureSource.ts';
 import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive } from './server/sttBench.ts';
 import { LIVE_MODEL, TEXT_MODEL, GEMINI_STT_MODEL, GEMINI_TTS_LITE_MODEL } from './src/config/models.ts';
@@ -1841,6 +1841,16 @@ async function startServer() {
                   type: 'output_transcript',
                   text: serverMsg.serverContent.outputTranscription.text,
                 }));
+              }
+
+              if (serverMsg.usageMetadata && typeof serverMsg.usageMetadata === 'object') {
+                const usageMetadata = sanitizeLiveUsageMetadata(serverMsg.usageMetadata);
+                if (usageMetadata) {
+                  clientWs.send(JSON.stringify({
+                    type: 'usage_metadata',
+                    usageMetadata,
+                  }));
+                }
               }
 
               if (serverMsg.serverContent?.turnComplete) {

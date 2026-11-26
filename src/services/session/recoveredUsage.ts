@@ -83,6 +83,7 @@ export function recoveredCallUsage(
 
   const sec = Math.min(rawSec, MAX_RECOVERED_CALL_SEC);
   const m = sec / 60;
+  // 복구된 통화에서는 실측 Live 토큰(usageMetadata)을 얻을 수 없으므로 분/분² 기반 추정치로 폴백한다.
   return {
     liveMinutes: m,
     liveMinutesSq: liveContextMinutesSq(m),

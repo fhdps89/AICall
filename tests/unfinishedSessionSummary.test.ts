@@ -10,6 +10,9 @@ import {
   DEFAULT_STALE_SESSION_MS,
   isInterruptedSession,
 } from "../src/services/session/interruptedSession.ts";
+import { planChunkSources } from "../src/services/review/chunkSource.ts";
+import { mergeMinuteTranscripts } from "../src/services/review/reviewRules.ts";
+import { decideSttSource } from "../src/services/review/speechCheck.ts";
 
 test("describeRecordingState: 조각 0개 & 대화 기록 0턴", () => {
   const res = describeRecordingState({
@@ -179,4 +182,64 @@ test("isInterruptedSession: lastTranscriptAt counts as activity for a live text-
   assert.equal(isInterruptedSession(session, now), false);
   // 3 minutes after last transcript → stale
   assert.equal(isInterruptedSession(session, now + 3 * 60 * 1000), true);
+});
+
+test("recovery path treats empty/missing sttPartial as recoverable from 10s chunks", () => {
+  const sessionWithoutPartial = {
+    status: "in-progress" as const,
+    startedAt: "2026-11-21T14:00:00.000Z",
+    lastChunkAt: "2026-11-21T14:01:00.000Z",
+    recordingChunks: [
+      {
+        index: 0,
+        path: "recordings/s1/chunk_0000.webm",
+        storageUrl: "https://firebasestorage.googleapis.com/v0/b/x/o/chunk_0000.webm?alt=media&token=tok",
+        timestamp: "2026-11-21T14:00:10.000Z",
+        uploaded: true,
+        durationSeconds: 10,
+      },
+      {
+        index: 1,
+        path: "recordings/s1/chunk_0001.webm",
+        timestamp: "2026-11-21T14:00:20.000Z",
+        uploaded: false,
+        durationSeconds: 10,
+      },
+    ],
+    liveTranscript: [],
+    sttPartial: [] as Array<{ minuteIndex: number; transcript: string }>,
+  };
+
+  // Interruption detection works without sttPartial
+  assert.equal(isInterruptedSession(sessionWithoutPartial, Date.parse("2026-11-21T14:05:00.000Z")), true);
+
+  // Summary & chunk planning recover both uploaded remote chunk and local IndexedDB chunk
+  const counts = countSessionChunks(sessionWithoutPartial.recordingChunks, [1]);
+  assert.deepEqual(counts, { total: 2, uploaded: 1, localPending: 1 });
+  assert.equal(describeRecordingState(sessionWithoutPartial, counts).tone, "uploading");
+
+  const allUploaded = {
+    ...sessionWithoutPartial,
+    recordingChunks: sessionWithoutPartial.recordingChunks.map((c) => ({ ...c, uploaded: true })),
+    sttPartial: undefined,
+  };
+  assert.equal(describeRecordingState(allUploaded).tone, "saved");
+
+  const sources = planChunkSources(sessionWithoutPartial.recordingChunks, [1]);
+  assert.equal(sources.length, 2);
+  assert.equal(sources[0].kind, "storageRelay");
+  assert.equal(sources[1].kind, "local");
+
+  // Final transcription succeeds with source="sttFinal" even when sttPartial is empty
+  const merged = mergeMinuteTranscripts(["I went to the store yesterday."], []);
+  assert.equal(merged.source, "sttFinal");
+  assert.deepEqual(merged.missingMinutes, []);
+  const decided = decideSttSource({
+    finalText: merged.text,
+    finalSource: merged.source,
+    partials: [],
+    liveTranscript: [],
+  });
+  assert.equal(decided.source, "sttFinal");
+  assert.equal(decided.text, "I went to the store yesterday.");
 });

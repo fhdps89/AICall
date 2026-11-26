@@ -1,15 +1,27 @@
 import type { UsageDelta, UsageMonth } from "./usageService";
+import type { LiveUsageTotals } from "../providers/liveUsage";
 import { USAGE_ASSUMPTIONS } from "../../config/models";
 
 /**
  * Live 컨텍스트 재과금용 "유효 분²" (통화 1회). 컨텍스트는 slidingWindow 압축으로 창 크기(C분)에서 더 커지지 않으므로
  * T ≤ C이면 T², T > C이면 2CT − C² (턴별 컨텍스트 합 = ∫min(t, C)dt × 2).
+ *
+ * `windowTokens`를 지정하면 향후 contextWindowCompression의 triggerTokens/targetTokens에 맞춰 상한을 조절할 수 있다
+ * (압축이 동작할 때 유효 컨텍스트 창은 대략 targetTokens와 triggerTokens 사이).
+ * 생략하거나 유효하지 않은(0 이하·비유한) 값이면 기본값(USAGE_ASSUMPTIONS.liveContextWindowTokens)을 사용한다.
  */
-export function liveContextMinutesSq(minutes: number): number {
+export function liveContextMinutesSq(
+  minutes: number,
+  windowTokens: number = USAGE_ASSUMPTIONS.liveContextWindowTokens
+): number {
   const t = Number.isFinite(minutes) && minutes > 0 ? minutes : 0;
   const a = USAGE_ASSUMPTIONS;
+  const effectiveWindow =
+    typeof windowTokens === "number" && Number.isFinite(windowTokens) && windowTokens > 0
+      ? windowTokens
+      : a.liveContextWindowTokens;
   const tokensPerMin = a.audioTokensPerSec * 60 * (1 + a.liveModelTalkShare);
-  const capMin = a.liveContextWindowTokens / tokensPerMin;
+  const capMin = effectiveWindow / tokensPerMin;
   return t <= capMin ? t * t : 2 * capMin * t - capMin * capMin;
 }
 
@@ -151,17 +163,70 @@ export function callsForDuration(sec: number): number {
   return Number.isFinite(sec) && sec >= 10 ? 1 : 0;
 }
 
+function posNum(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+function hasMeasuredLiveUsage(
+  measured: LiveUsageTotals | null | undefined
+): measured is LiveUsageTotals {
+  if (!measured) return false;
+  return (
+    posNum(measured.turns) > 0 ||
+    posNum(measured.inAudio) > 0 ||
+    posNum(measured.inText) > 0 ||
+    posNum(measured.outAudio) > 0 ||
+    posNum(measured.outText) > 0 ||
+    posNum(measured.thoughts) > 0
+  );
+}
+
 /**
  * 통화 종료 시 기록할 사용량 증분을 계산한다.
  * QA 통화는 비용만 남기도록 qaLiveMinutes·qaLiveMinutesSq만 반환하고 liveMinutes·calls는 넣지 않는다.
+ * 실측 usageMetadata 합계(`measured`)에 턴/토큰이 있으면 실측 토큰 및 실측 분/분²(일반 통화는 호출 수 포함)도 함께 기록한다.
  */
-export function callUsageDelta(durationSec: number, isQa: boolean): UsageDelta {
+export function callUsageDelta(
+  durationSec: number,
+  isQa: boolean,
+  measured?: LiveUsageTotals | null
+): UsageDelta {
   const sec = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
   const m = sec / 60;
+  const sq = liveContextMinutesSq(m);
   if (isQa) {
-    return { qaLiveMinutes: m, qaLiveMinutesSq: liveContextMinutesSq(m) };
+    if (hasMeasuredLiveUsage(measured)) {
+      return {
+        qaLiveMinutes: m,
+        qaLiveMinutesSq: sq,
+        qaLiveInputAudioTokens: posNum(measured.inAudio),
+        qaLiveInputTextTokens: posNum(measured.inText),
+        qaLiveOutputAudioTokens: posNum(measured.outAudio),
+        qaLiveOutputTextTokens: posNum(measured.outText),
+        qaLiveThoughtTokens: posNum(measured.thoughts),
+        qaLiveMeasuredMinutes: m,
+        qaLiveMeasuredMinutesSq: sq,
+      };
+    }
+    return { qaLiveMinutes: m, qaLiveMinutesSq: sq };
   }
-  return { liveMinutes: m, liveMinutesSq: liveContextMinutesSq(m), calls: callsForDuration(sec) };
+  const calls = callsForDuration(sec);
+  if (hasMeasuredLiveUsage(measured)) {
+    return {
+      liveMinutes: m,
+      liveMinutesSq: sq,
+      calls,
+      liveInputAudioTokens: posNum(measured.inAudio),
+      liveInputTextTokens: posNum(measured.inText),
+      liveOutputAudioTokens: posNum(measured.outAudio),
+      liveOutputTextTokens: posNum(measured.outText),
+      liveThoughtTokens: posNum(measured.thoughts),
+      liveMeasuredMinutes: m,
+      liveMeasuredMinutesSq: sq,
+      liveMeasuredCalls: calls,
+    };
+  }
+  return { liveMinutes: m, liveMinutesSq: sq, calls };
 }
 
 /**

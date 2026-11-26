@@ -4,6 +4,15 @@
 
 ---
 
+### [2026-11-26 KST] 통화 비용 절감 Track 2: Live 실측 토큰·임시 받아쓰기 기본 끔·비용식 (브랜치 `englead/live-cost-track2-20261126`)
+- **배경**: 작업지시서 `docs/plan/work-order-live-cost-optimization.md`(원문 그대로 추가) Track 2. 통화 엔진·모델명·컨텍스트 압축 값은 바꾸지 않음(Phase Gate).
+- **2-1 실측 계측**: `src/services/providers/liveUsage.ts`(턴 단위 스냅샷, 턴 안 마지막 값만, 턴 끝·재연결·종료 때 합산, AUDIO/TEXT 분리, 잘못된 값 무시). 직연결은 `geminiLiveProvider.ts`, 서버 중계는 `server.ts`가 `sanitizeLiveUsageMetadata`(`server/usageMeta.ts`)로 숫자만 `usage_metadata`로 전달. 통화 종료 때 `[live-usage] …` 한 줄(숫자만)과 실측 토큰 필드를 사용량 문서에 저장.
+- **2-2 임시 받아쓰기 기본 끔**: `onecall_enable_partial_transcribe`가 `"true"`일 때만 1분 임시 받아쓰기. `App.tsx`·`SettingsModal.tsx` 판별을 `partialTranscribeSetting.ts` 하나로 합침. 설정 안내 문구 갱신. 성공한 임시 받아쓰기 분만 `partialSttMinutes`로 기록.
+- **2-3 비용식**: 받아쓰기 비용 = (`sttMinutes` + `partialSttMinutes`) × 분당 단가. 통화 분을 무조건 더하던 것 제거(옛 문서 하위호환은 코드 주석). Live는 실측 토큰 × 단가 + 실측 없는 나머지만 추정식. `PRICING_RATES.liveOutTextPer1M = 4.5` 추가. `liveContextMinutesSq`에 창 크기 인자. 개발자 모드 사용량에 실측/추정 표시.
+- **2차 검증 수정**: 커밋된 턴과 프롬프트 토큰 수가 같은 스냅샷이 커밋 뒤에 다시 오면(interrupted 뒤 갱신본 등) 새 턴으로 더하지 않고 그 턴을 다시 열어 이중 집계를 막음(`liveUsage.ts`, 테스트 추가).
+- **테스트**: `tests/liveUsage.test.ts` 신규, `liveMessage`·`usageCost`·`learningLog`·`chunkRecorder`·`unfinishedSessionSummary` 테스트 보강.
+- **남은 일**: 실제 10분 통화 실측(`[live-usage]` 대 추정치 비교)은 배포 뒤 통화 1회가 필요함.
+
 ### [2026-11-26 KST] `[boot]` 요약의 `data`가 비던 문제 (브랜치 `englead/boot-data-phase-20261126`)
 - **증상**: 라이브 QA의 `data-boot-timing`이 `[boot] auth=1162ms data=- home=1166ms mistakes=1804ms lectureLocal=1802ms lectureServer=1802ms`처럼 읽힌다. 첫 방문과 재방문 모두 `data`가 `-`.
 - **원인 (a)**: `flush`는 `mistakes`와 `lectureServer`가 둘 다 찍히면 바로 호출되고, 아니면 60초를 기다렸다(수정 전 `bootTiming.ts` 91–93행). 이미 찍힌 줄은 나중에 단계가 찍혀도 다시 쓰지 않는다. 홈은 프로필·목표 조회가 끝나기 전에 그려진다. `App.tsx` 116행의 `dataLoading`이 거짓으로 시작해 인증 뒤 첫 그리기(677행 관문)가 홈을 마운트하고, 재방문은 부트 캐시가 goals를 채워 `dataLoading && goals.length === 0` 스피너를 타지 않는다. 예시에서 `home`은 `auth`보다 4ms 늦고 mistakes·`lectureServer`는 약 1.8초다. `markBoot("data")`는 `loadProfileAndGoals`가 resolve되고 `isActive()`가 참인 뒤에만 있었다(수정 전 256행 return, 281행 mark). 그 Firestore 읽기가 1.8초보다 늦으면 요약의 `data`는 `-`로 닫힌다.

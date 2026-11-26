@@ -4,8 +4,10 @@ import {
   getUsageMonths,
   lectureAudioCostPerMinute,
   liveCostPerMinute,
+  liveUsageBasis,
   priceUsage,
   USAGE_COST_COMPONENTS,
+  UsageDay,
   UsageMonth,
 } from "../../services/usage/usageService";
 import {
@@ -69,14 +71,38 @@ export const UsagePanel: React.FC<{ userId?: string }> = ({ userId }) => {
   const d = usage?.days?.[today.slice(8, 10)];
   const monthCost = priceUsage(usage);
   const dayCost = priceUsage(d);
+  const monthBasis = liveUsageBasis(usage);
+  const dayBasis = liveUsageBasis(d);
   const livePerMin = liveCostPerMinute(usage);
   const lectureAudioPerMin = lectureAudioCostPerMinute();
   const usd = (n?: number) => `$${(n || 0).toFixed(4)}`;
+  const fmtBasis = (b: { measuredMinutes: number; estimatedMinutes: number }) =>
+    `실측 ${b.measuredMinutes.toFixed(1)}분 · 추정 ${b.estimatedMinutes.toFixed(1)}분`;
+  const fmtLiveTokens = (u: UsageDay | UsageMonth | null | undefined) => {
+    const inTok = Math.round(
+      (u?.liveInputAudioTokens || 0) +
+        (u?.liveInputTextTokens || 0) +
+        (u?.qaLiveInputAudioTokens || 0) +
+        (u?.qaLiveInputTextTokens || 0)
+    );
+    const outTok = Math.round(
+      (u?.liveOutputAudioTokens || 0) +
+        (u?.liveOutputTextTokens || 0) +
+        (u?.liveThoughtTokens || 0) +
+        (u?.qaLiveOutputAudioTokens || 0) +
+        (u?.qaLiveOutputTextTokens || 0) +
+        (u?.qaLiveThoughtTokens || 0)
+    );
+    return `in ${inTok.toLocaleString()} · out ${outTok.toLocaleString()}`;
+  };
   const rows: [string, string, string][] = [
     ["통화", `${(usage?.liveMinutes || 0).toFixed(1)}분`, `${(d?.liveMinutes || 0).toFixed(1)}분`],
     ["받아쓰기", `${(usage?.sttMinutes || 0).toFixed(1)}분`, `${(d?.sttMinutes || 0).toFixed(1)}분`],
     ...(devMode
       ? ([
+          ["임시 받아쓰기", `${(usage?.partialSttMinutes || 0).toFixed(1)}분`, `${(d?.partialSttMinutes || 0).toFixed(1)}분`],
+          ["통화 비용 기준", fmtBasis(monthBasis), fmtBasis(dayBasis)],
+          ["통화 실측 토큰", fmtLiveTokens(usage), fmtLiveTokens(d)],
           ["텍스트 토큰", `${Math.round(usage?.textTokens || 0).toLocaleString()}`, `${Math.round(d?.textTokens || 0).toLocaleString()}`],
           ["TTS 글자 수", `${Math.round(usage?.ttsChars || 0).toLocaleString()}`, `${Math.round(d?.ttsChars || 0).toLocaleString()}`],
           ...USAGE_COST_COMPONENTS.map(({ key, label }): [string, string, string] => [

@@ -25,13 +25,21 @@ import {
   LocalRecordingChunk,
   retryPendingUploadsDetailed,
 } from "../../services/recording/chunkIndexedDb";
+import {
+  isPartialTranscribeEnabled,
+  setPartialTranscribeEnabled,
+} from "../../services/recording/partialTranscribeSetting";
 import { ALLOWED_USER_EMAIL } from "../../services/firebase/auth";
 import { friendlyError } from "../common/friendlyError";
 import { FeedSettingsPanel } from "./FeedSettingsPanel";
 import { UsagePanel } from "./UsagePanel";
 import { GeminiKeyPanel } from "./GeminiKeyPanel";
 import { VoicePanel } from "./VoicePanel";
-import { ADVANCED_TOGGLE_TEXT, KEY_TAB_LABEL } from "./settingsText";
+import {
+  ADVANCED_TOGGLE_TEXT,
+  KEY_TAB_LABEL,
+  PARTIAL_TRANSCRIBE_DESCRIPTION,
+} from "./settingsText";
 import { Sparkles, Bell } from "lucide-react";
 
 interface SettingsModalProps {
@@ -70,9 +78,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [activeTab, setActiveTab] = useState<SettingsTabId>("prompts");
   const tabRefs = useRef<Partial<Record<SettingsTabId, HTMLButtonElement | null>>>({});
   const [coachNudges, setCoachNudges] = useState<string[]>(["weekly", "absence2d"]);
-  const [enablePartialStt, setEnablePartialStt] = useState<boolean>(() => {
-    return localStorage.getItem("onecall_enable_partial_transcribe") !== "false";
-  });
+  const [enablePartialStt, setEnablePartialStt] = useState<boolean>(() =>
+    isPartialTranscribeEnabled()
+  );
   const [sessionsList, setSessionsList] = useState<SessionData[]>([]);
   const [pendingLocalChunks, setPendingLocalChunks] = useState<LocalRecordingChunk[]>([]);
   const [loadingRecordings, setLoadingRecordings] = useState(false);
@@ -492,7 +500,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       onChange={(e) => {
                         const val = e.target.checked;
                         setEnablePartialStt(val);
-                        localStorage.setItem("onecall_enable_partial_transcribe", String(val));
+                        setPartialTranscribeEnabled(val);
                       }}
                       className="sr-only peer"
                     />
@@ -500,7 +508,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </label>
                 </div>
                 <p className="text-[11px] text-slate-400 leading-relaxed">
-                  10초 녹음 조각이 약 1분(6조각) 쌓일 때마다 백그라운드에서 별도로 받아써서 sessions.sttPartial에 저장합니다. 대화와 독립적으로 작동하며 필요 시 끌 수 있습니다.
+                  {PARTIAL_TRANSCRIBE_DESCRIPTION}
                 </p>
               </div>
 

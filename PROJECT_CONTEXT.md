@@ -1,7 +1,7 @@
 # 📖 프로젝트 컨텍스트 및 히스토리 (Project Context)
 
 > **프로젝트**: One Call English (옛 이름: 「오늘도 한 통」) — AI 1:1 전화영어  
-> **현재 버전**: `v2.10.0` (공식 빌드 표기: `getBuildVersion()`이 `server.ts` 수정 시각으로 계산하는 `20261110-multilingual-HHmm`) | **최종 갱신**: 2026-11-24 (KST)  
+> **현재 버전**: `v2.10.0` (공식 빌드 표기: `getBuildVersion()`이 `server.ts` 수정 시각으로 계산하는 `20261110-multilingual-HHmm`) | **최종 갱신**: 2026-11-26 (KST)  
 > **기준 기획**: [`docs/plan/implementation_plan_v4.md`](./docs/plan/implementation_plan_v4.md) Part B · 진행 가이드 [`docs/plan/ai-studio-build-guide.md`](./docs/plan/ai-studio-build-guide.md) · 현재 앱과의 차이 [`docs/plan/gap-v2.1.0-vs-plan-v4.md`](./docs/plan/gap-v2.1.0-vs-plan-v4.md)  
 > **관리 규칙**: `README.md` 변경 시 본 문서의 아키텍처 및 히스토리를 함께 최신화하며, 모든 일시는 한국 표준시(KST)를 기준으로 합니다.
 
@@ -53,11 +53,18 @@
 - **실수 임베딩 (선택)**: `EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-4B"` (`SIE_EMBEDDING_URL = "https://api.superlinked.com/v1/embeddings"`, `PRICING_RATES.sieEmbedPer1MTokens = 0.06`). 서버 전용 선택 env `SIE_API_KEY`가 없으면 기능이 자동으로 꺼짐(`enabled: false`).
 - **사용량·예상 비용 (2026-11-25 개정, 브랜치 `englead/usage-cost-estimate-20261125`)**: 단가는 `PRICING_RATES`(공식 유료 단가, USD/1M 토큰, aistudio pricing 2026-11-25 기준), 모델링 가정은 `USAGE_ASSUMPTIONS`(오디오 25 tok/s, 튜터 발화 비율 0.5, 4턴/분, 시스템 프롬프트 1,500 tok, 받아쓰기 출력 175 tok/분, 옛 텍스트 출력 비중 0.3, 옛 TTS 10자/초) 한 곳에 둔다. 화면의 예상 비용은 저장된 `estCostUsd`가 아니라 원천 필드에서 `priceUsage()`로 다시 계산하므로 옛 기록도 새 단가로 재평가된다.
   - Live: 입력 오디오 + 튜터 발화 출력 오디오 + 턴마다 시스템 프롬프트 재과금 + 세션 컨텍스트 재과금(턴/분 × 2,250 tok/분 × ΣT²/2). 통화별 `liveMinutesSq`(유효 분², `liveContextMinutesSq`: slidingWindow 창 128k 토큰 ≈ 57분을 넘으면 더 커지지 않음)를 누적하고, 없던 기간은 평균 통화 길이로 계산한 하한을 쓴다. 옛 QA 분(저장 안 됨)과 AssemblyAI·ElevenLabs 엔진 구분은 재평가에 들어가지 않는다. QA 통화는 `qaLiveMinutes`·`qaLiveMinutesSq`로 따로 저장한다.
-  - 받아쓰기: 통화 중 1분 partial + 종료 후 VERBATIM 두 번을 모두 센다(partial 분 = 통화 분으로 추정).
+  - 받아쓰기 (2026-11-26 개정): 종료 후 VERBATIM(`sttMinutes`) + 실제로 성공한 1분 임시 받아쓰기(`partialSttMinutes`)만 센다. 예전의 「통화 분 = partial 분」 무조건 가산은 없앴다. 옛 문서에는 partial 분이 없어, 임시 받아쓰기가 기본 ON이던 달은 실제 청구보다 약 통화 분 × 분당 STT만큼 낮게 보인다(`priceUsage` 주석).
   - 텍스트: 서버가 `tokensFromUsageMetadata`(`server/usageMeta.ts`)로 출력에 thinking 토큰을 더하고, 월 문서에 `textInputTokens`·`textOutputTokens`를 따로 쌓는다. 나머지 옛 `textTokens`는 혼합 단가.
   - 강의 TTS: 세그먼트 캐시 미스로 실제 생성한 오디오 초(`ttsAudioSec`)를 오디오 토큰으로 과금한다. 옛 기록은 글자 수 ÷ 10자/초로 추정.
   - 개발자 모드 항목별 비용 행은 `USAGE_COST_COMPONENTS` 한 목록에서 그린다(통화·QA 통화·받아쓰기·텍스트·강의 TTS·실수 묶기 임베딩). 행 합 = 예상 비용 합계(2026-11-26, QA 63행).
-  - 범위 밖: 서버 쪽 재생성 낭비, 그록봇 피드 강의, 퀴즈 받아쓰기, 발음 듣기 lite TTS. Live 실제 `usageMetadata`로 가정값 보정은 후속 과제.
+  - 범위 밖: 서버 쪽 재생성 낭비, 그록봇 피드 강의, 퀴즈 받아쓰기, 발음 듣기 lite TTS.
+- **Live 실측 토큰 (2026-11-26, 브랜치 `englead/live-cost-track2-20261126`, 작업지시서 `docs/plan/work-order-live-cost-optimization.md` Track 2)**:
+  - `src/services/providers/liveUsage.ts`: Live `usageMetadata`는 요청(턴) 단위 스냅샷으로 본다(세션 누적도, 메시지별 증분도 아님. promptTokenCount에 재과금 이력 포함). 한 턴 안에서는 마지막 스냅샷만 쓰고, turnComplete·interrupted·재연결·종료 때 합계에 넣는다. 프롬프트 토큰 수가 다른 스냅샷이 오면 앞 요청 것으로 보고 먼저 커밋한다(turnComplete 뒤 늦게 온 경우). 반대로 방금 커밋한 턴과 프롬프트 토큰 수가 같은 스냅샷이 커밋 뒤에 오면 같은 요청의 갱신본으로 보고 그 턴을 다시 연다(이중 집계 방지). 입력·출력은 `promptTokensDetails`·`responseTokensDetails`의 AUDIO/TEXT로 나누고, 상세가 없으면 오디오로 본다(`unsplitPromptTokens`로 표시).
+  - 직연결은 `geminiLiveProvider.ts`가 바로 읽고, 서버 중계는 `server.ts`가 `server/usageMeta.ts`의 `sanitizeLiveUsageMetadata`로 숫자만 남겨 `{ type: "usage_metadata" }`로 넘긴다(turnComplete보다 먼저). 같은 통화 안 재연결은 합계를 이어 간다.
+  - 통화 종료 시 `NewCallScreen`이 콘솔에 한 줄 `[live-usage] turns= inAudio= inText= outAudio= outText= thoughts= durationSec= actualUsd= estUsd= qa=`를 남기고(숫자만), `callUsageDelta(..., measured)`가 `liveInputAudioTokens`·`liveInputTextTokens`·`liveOutputAudioTokens`·`liveOutputTextTokens`·`liveThoughtTokens`·`liveMeasuredMinutes`·`liveMeasuredMinutesSq`·`liveMeasuredCalls`(QA는 `qaLive…`)를 저장한다.
+  - `priceUsage()`: 실측 토큰은 `PRICING_RATES`(새 `liveOutTextPer1M` 4.5, 텍스트 출력·thinking)로 계산하고, 실측 없는 나머지 분·분²·통화 수만 기존 추정식으로 더한다(혼합 달 이중 계산 없음). 끊긴 통화 복구(`recoveredUsage.ts`)는 실측이 없어 추정식을 쓴다. 개발자 모드 사용량에 「통화 비용 기준(실측/추정 분)」「통화 실측 토큰」「임시 받아쓰기」 행 추가.
+  - `liveContextMinutesSq(minutes, windowTokens?)`: 나중에 contextWindowCompression `triggerTokens`/`targetTokens`를 넣을 수 있게 창 크기를 인자로 받는다. 현재 호출은 기본값(128k)이고, 압축 설정 자체는 바꾸지 않았다(Phase Gate).
+  - 1분 임시 받아쓰기(`onecall_enable_partial_transcribe`)는 기본 꺼짐(값이 정확히 `"true"`일 때만 켜짐, `src/services/recording/partialTranscribeSetting.ts`). 꺼져 있어도 10초 조각 백업(IndexedDB + Storage)과 종료 후 최종 받아쓰기·끊긴 통화 복구는 그대로다.
 - **공급자 추상화 레이어 (`src/services/providers/`)**: `LiveProvider`, `SttProvider`, `LlmProvider`, `TtsProvider` 인터페이스 분리(`types.ts`). 브라우저에 구현된 것은 Live(`GeminiLiveProvider`)뿐이고, **통화마다 새 인스턴스**를 만듦(`createLiveProvider()`, v2.8.0). 같은 통화 안의 "다시 시도"는 같은 인스턴스를 써서 대화 기록·세션 재개 핸들을 이어 감. 받아쓰기·텍스트·음성 합성은 서버(`server.ts`, `server/lecture.ts`, `server/sttBench.ts`)에서 처리하며, 브라우저용 빈 뼈대 구현은 v2.8.0에서 삭제.
 
 ---
