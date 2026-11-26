@@ -345,6 +345,17 @@ async function ensureTodayLectureOnce(
     }
     const validBackup =
       backup && backup.uid === st.uid && backup.date === date && hasScript(backup) ? backup : null;
+    // The script-only backup of a job that failed on this server: buildFeedToday retries it from
+    // the local script as before (TIMED_OUT right away). The backup is for a new server.
+    if (
+      validBackup &&
+      local?.status === 'failed' &&
+      Array.isArray(local.script) &&
+      local.script.length > 0 &&
+      validBackup.createdAt === local.createdAt
+    ) {
+      return;
+    }
     if (validBackup && hasPointers(validBackup) && !isOlderThan(validBackup.createdAt, local?.createdAt)) {
       cand = validBackup;
     } else if (hasScript(local)) {
