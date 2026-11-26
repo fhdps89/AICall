@@ -6,6 +6,7 @@
 import type { LiveCommand, LiveProvider, LiveSessionOptions, LiveTranscriptItem } from "./types";
 import type { LiveUsageTotals } from "./liveUsage";
 import type { PocTextVariant, PocUsageTotals } from "../../config/cascadePoc";
+import { logPoc } from "../perf/pocQaLog";
 
 export const POC_FALLBACK_NOTICE = "시험 모드 연결 실패, 기본 엔진으로 연결합니다";
 
@@ -67,7 +68,7 @@ export class PocFallbackProvider implements LiveProvider {
     } catch (err: any) {
       if (gen !== this.connectGen || err?.code === "POC_CANCELLED") {
         // Hung up / screen closed during connect: no fallback, nothing left open.
-        console.log("[poc] stage=connect_cancelled");
+        logPoc("[poc] stage=connect_cancelled");
         return;
       }
       this.fallbackReason = String(err?.code || err?.message || err || "unknown").slice(0, 120);

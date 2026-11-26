@@ -5,7 +5,8 @@ import {
 } from "../../services/usage/usageService";
 import { callUsageDelta, liveContextMinutesSq, pocCallUsageDelta } from "../../services/usage/learningLog";
 import { activeEngineOf, pocTextVariantOf, pocUsageOf } from "../../services/providers/cascadeFallbackProvider";
-import { pocCostUsd } from "../../config/cascadePoc";
+import { pocCostUsd, POC_TEXT_VARIANTS } from "../../config/cascadePoc";
+import { infoPoc } from "../../services/perf/pocQaLog";
 import { formatLiveUsageLog } from "../../services/providers/liveUsage";
 import React, { useState, useEffect, useRef } from "react";
 import { useDevMode } from "../../data/devMode";
@@ -401,8 +402,8 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
     const durationMin = callDuration > 0 ? callDuration / 60 : 0;
     const estUsd = liveCostEstimateUsd(durationMin, liveContextMinutesSq(durationMin));
     if (pocUsage) {
-      console.info(
-        `[poc-usage] durationSec=${callDuration} turns=${pocUsage.turns} sttAudioSec=${pocUsage.sttAudioSec.toFixed(1)} ttsAudioSec=${pocUsage.ttsAudioSec.toFixed(1)} sttOutEstimated=${pocUsage.sttOutEstimated ? 1 : 0} variant=${pocVariant} usd=${pocCostUsd(pocUsage, Date.now(), pocVariant).toFixed(4)} qa=${qaCallRef.current ? 1 : 0}`
+      infoPoc(
+        `[poc-usage] durationSec=${callDuration} turns=${pocUsage.turns} sttAudioSec=${pocUsage.sttAudioSec.toFixed(1)} ttsAudioSec=${pocUsage.ttsAudioSec.toFixed(1)} sttOutEstimated=${pocUsage.sttOutEstimated ? 1 : 0} variant=${pocVariant} textModel=${POC_TEXT_VARIANTS[pocVariant].model} usd=${pocCostUsd(pocUsage, Date.now(), pocVariant).toFixed(4)} qa=${qaCallRef.current ? 1 : 0}`
       );
     } else if (liveUsage && liveUsage.turns > 0) {
       const actualUsd = liveMeasuredCostUsd(liveUsage);
