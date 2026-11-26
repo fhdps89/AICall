@@ -21,6 +21,8 @@ export interface CascadeClientSocket {
 export interface CascadeWsDeps {
   /** GoogleGenAI client or null when the server has no usable key. */
   getGenAI: () => unknown | null;
+  /** v1beta client for 3.8 TTS streaming (Interactions API); falls back to getGenAI's client. */
+  getTtsGenAI?: () => unknown | null;
   /** Test seam: build the cascade AI from the client (defaults to the real Gemini adapter). */
   makeAi?: (genAI: unknown) => CascadeAi;
   log?: (line: string) => void;
@@ -74,7 +76,11 @@ export function handleCascadeConnection(clientWs: CascadeClientSocket, deps: Cas
       }
       const ai = deps.makeAi
         ? deps.makeAi(genAI)
-        : createGeminiCascadeAi(genAI, { stt: POC_STT_MODEL, text: POC_TEXT_MODEL, tts: POC_TTS_MODEL });
+        : createGeminiCascadeAi(
+            genAI,
+            { stt: POC_STT_MODEL, text: POC_TEXT_MODEL, tts: POC_TTS_MODEL },
+            deps.getTtsGenAI?.() ?? undefined
+          );
       session = new CascadeSession(
         { ai, send, log },
         {

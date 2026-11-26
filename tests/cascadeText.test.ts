@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  POC_VOICE_ADDENDUM,
+  TTS_FIRST_SEGMENT_MIN_CHARS,
+  takeFirstSpeechSegment,
   splitSentences,
   flushSentences,
   stripMarkdownForSpeech,
@@ -155,4 +158,49 @@ test('sanitizePocUsage coerces untrusted client data', () => {
   assert.equal(s.turns, 2);
   assert.equal(s.sttOutEstimated, true);
   assert.deepEqual(sanitizePocUsage('nope'), emptyPocUsage());
+});
+
+test('POC_VOICE_ADDENDUM states 1-2 short sentences (~25 words) and one open question', () => {
+  assert.match(POC_VOICE_ADDENDUM, /^Voice call output rules:/);
+  assert.match(POC_VOICE_ADDENDUM, /1 to 2 short/i);
+  assert.match(POC_VOICE_ADDENDUM, /25 words/i);
+  assert.match(POC_VOICE_ADDENDUM, /one open question/i);
+  assert.match(POC_VOICE_ADDENDUM, /markdown/i);
+});
+
+test('takeFirstSpeechSegment covers all branches (empty, 1 short, 2+ sentences, >=80 chars, streamDone)', () => {
+  assert.equal(TTS_FIRST_SEGMENT_MIN_CHARS, 80);
+  // Empty input
+  assert.equal(takeFirstSpeechSegment([], false), null);
+  assert.equal(takeFirstSpeechSegment([], true), null);
+  // Single short sentence before streamDone waits
+  assert.equal(takeFirstSpeechSegment(['Short sentence.'], false), null);
+  // Single short sentence when streamDone takes all
+  assert.deepEqual(takeFirstSpeechSegment(['Short sentence.'], true), {
+    segment: 'Short sentence.',
+    used: 1,
+  });
+  // Branch (a): 2+ sentences available -> takes first 2
+  assert.deepEqual(takeFirstSpeechSegment(['First one.', 'Second one.', 'Third one.'], false), {
+    segment: 'First one. Second one.',
+    used: 2,
+  });
+  // Branch (b): single sentence >= 80 chars -> takes just that 1 sentence
+  const long1 = 'A'.repeat(80) + '.';
+  assert.deepEqual(takeFirstSpeechSegment([long1], false), {
+    segment: long1,
+    used: 1,
+  });
+  // Branch (b) with multiple sentences where first already reaches 80 chars -> takes as few leading sentences as reach 80 (1)
+  assert.deepEqual(takeFirstSpeechSegment([long1, 'Second.', 'Third.'], false), {
+    segment: long1,
+    used: 1,
+  });
+  // Branch (b) where first 2 sentences together reach >= 80 chars -> takes 2
+  const med1 = 'B'.repeat(45) + '.';
+  const med2 = 'C'.repeat(45) + '.';
+  assert.deepEqual(takeFirstSpeechSegment([med1, med2, 'Third.'], false), {
+    segment: `${med1} ${med2}`,
+    used: 2,
+  });
 });

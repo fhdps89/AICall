@@ -8,8 +8,10 @@
  *
  * connect() REJECTS unless the server is ready AND the tutor's first sentence (text + speech)
  * has arrived within CASCADE_CONNECT_BUDGET_MS (8 s, one deadline for both); PocFallbackProvider
- * then connects the normal engine for this call. The mic opens only after that, so a fallback
- * never leaves a second mic stream or chunk recorder behind.
+ * then connects the normal engine for this call. The mic opens in parallel at connect start (same
+ * order as the normal engine) but sends nothing before "ready"; the chunk recorder is attached
+ * only once this engine is committed, and a fallback closes this mic before the normal engine
+ * opens its own.
  */
 import { normalizeVoiceName } from "../../config/voices";
 import { POC_WS_PATH, emptyPocUsage, sanitizePocUsage, type PocUsageTotals } from "../../config/cascadePoc";
@@ -70,6 +72,11 @@ export class CascadePocProvider implements PocCapableProvider {
   private generation = 0;
   private connectStartedAt = 0;
   private firstAudioLogged = false;
+  /** Mic opened at connect start (call mode settles before the tutor speaks). */
+  private micInit: Promise<void> | null = null;
+  /** The recorder hookup (onMediaStreamReady) waits until this engine is committed to the call. */
+  private micCommitted = false;
+  private turnPlay = { chunks: 0, underrunsAtStart: 0, gaps: 0, turn: 0 };
   private firstAudioWaiter: { resolve: () => void; reject: (e: Error) => void } | null = null;
 
   private inputAudioCtx: AudioContext | null = null;
@@ -102,27 +109,42 @@ export class CascadePocProvider implements PocCapableProvider {
     options.onStatusChange("connecting", LIVE_STATUS_TEXT.preparing);
     console.log("[poc] stage=connect_start");
 
-    // Speaker first (same order as the normal engine, keeps autoplay close to the tap), then the
-    // server; the mic opens only after "ready" so a fallback never leaves a second mic stream
-    // or chunk recorder behind (disconnect() closes the speaker on fallback).
+    // Same order as the normal engine (geminiLiveProvider connect): the mic opens in parallel
+    // right away, so Android's switch to call mode happens before the tutor's first word, not
+    // in the middle of it. No audio is sent before the server is ready (processor checks
+    // `ready`), and the chunk recorder is only attached once this engine is committed, so a
+    // fallback never leaves a second recorder; on fallback disconnect() stops this mic before
+    // the normal engine opens its own.
+    this.micCommitted = false;
     const deadline = this.connectStartedAt + this.connectBudgetMs;
+    if (!options.skipMic) {
+      this.micInit = this.initAudioCapture(gen)
+        .then((live) => {
+          if (live) console.log("[poc] stage=mic_ready");
+        })
+        .catch((err: any) => {
+          if (gen !== this.generation) return;
+          console.warn("[poc] stage=mic_failed", err?.cause || err);
+          this.options?.onMicWarning?.(
+            err?.message || "마이크를 쓸 수 없어요. 튜터 목소리는 들을 수 있지만 말하려면 마이크를 확인해 주세요."
+          );
+        });
+    }
     await this.initAudioPlayback().catch((err) => console.warn("[poc] stage=playback_init_failed", err));
     if (gen !== this.generation) throw cascadeError("POC_CANCELLED", "cancelled");
     await this.openSocket(gen, Math.max(0, deadline - Date.now()));
     if (gen !== this.generation) throw cascadeError("POC_CANCELLED", "cancelled");
     await this.kickoffAndWaitFirstAudio(Math.max(0, deadline - Date.now()));
     if (gen !== this.generation) throw cascadeError("POC_CANCELLED", "cancelled");
-    if (!options.skipMic) {
-      await this.initAudioCapture().catch((err: any) => {
-        console.warn("[poc] stage=mic_failed", err?.cause || err);
-        this.options?.onMicWarning?.(
-          err?.message || "마이크를 쓸 수 없어요. 튜터 목소리는 들을 수 있지만 말하려면 마이크를 확인해 주세요."
-        );
-      });
-    }
-    if (gen !== this.generation) throw cascadeError("POC_CANCELLED", "cancelled");
+    this.commitMic();
     options.onStatusChange("connected", LIVE_STATUS_TEXT.connected);
     console.log(`[poc] stage=connected ms=${Date.now() - this.connectStartedAt}`);
+  }
+
+  /** Attach the recorder now if the mic is ready; otherwise initAudioCapture() does it when it is. */
+  private commitMic(): void {
+    this.micCommitted = true;
+    if (this.recordDest) this.options?.onMediaStreamReady?.(this.recordDest.stream);
   }
 
   /** Sends the kickoff and waits for the tutor's first audio (proves text + speech both work). */
@@ -262,6 +284,7 @@ export class CascadePocProvider implements PocCapableProvider {
     }
     this.reconnects += 1;
     console.warn(`[poc] stage=reconnect attempt=${this.reconnects} code=${code}`);
+    if (this.turnPlay.chunks > 0) this.logTurnPlayback(true);
     this.stopAudioPlayback();
     this.options?.onStatusChange("reconnecting", "연결이 잠깐 끊겼어요. 다시 연결하는 중...");
     this.reconnectTimer = setTimeout(() => {
@@ -308,10 +331,12 @@ export class CascadePocProvider implements PocCapableProvider {
         }
         return;
       case "interrupted":
+        this.logTurnPlayback(true);
         this.stopAudioPlayback();
         this.options?.onInterrupted?.();
         return;
       case "turnComplete":
+        this.logTurnPlayback();
         this.options?.onTurnComplete?.();
         return;
       case "poc_usage":
@@ -395,6 +420,7 @@ export class CascadePocProvider implements PocCapableProvider {
     this.options?.onTranscriptLogged?.(item, [...this.transcriptItems]);
   }
 
+  private static readonly MIC_RELEASE_WAIT_MS = 2000;
   private static readonly MIC_CONSTRAINTS: MediaStreamConstraints = {
     audio: {
       channelCount: 1,
@@ -405,8 +431,10 @@ export class CascadePocProvider implements PocCapableProvider {
     },
   };
 
-  private async initAudioCapture(): Promise<void> {
-    if (this.mediaStream) return;
+  /** Resolves true when the mic is live for this connect; false when it was released (hang-up/fallback). */
+  private async initAudioCapture(gen: number): Promise<boolean> {
+    const stale = () => this.closing || gen !== this.generation;
+    if (this.mediaStream) return true;
     if (!navigator.mediaDevices?.getUserMedia) {
       const e: any = new Error("이 브라우저에서는 마이크를 쓸 수 없어요.");
       e.code = "MIC_UNAVAILABLE";
@@ -420,10 +448,10 @@ export class CascadePocProvider implements PocCapableProvider {
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia(CascadePocProvider.MIC_CONSTRAINTS);
-      if (this.closing) {
-        // Hung up while the permission prompt was open: release the mic right away.
+      if (stale()) {
+        // Hung up or fell back while the permission prompt was open: release the mic right away.
         stream.getTracks().forEach((tr) => tr.stop());
-        return;
+        return false;
       }
       this.mediaStream = stream;
     } catch (err: any) {
@@ -440,10 +468,11 @@ export class CascadePocProvider implements PocCapableProvider {
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
     this.inputAudioCtx = new AudioContextClass({ sampleRate: 16000 });
     if (this.inputAudioCtx.state === "suspended") await this.inputAudioCtx.resume().catch(() => {});
+    if (stale() || !this.inputAudioCtx || !this.mediaStream) return false;
     const source = this.inputAudioCtx.createMediaStreamSource(this.mediaStream);
     this.recordDest = this.inputAudioCtx.createMediaStreamDestination();
     source.connect(this.recordDest);
-    this.options?.onMediaStreamReady?.(this.recordDest.stream);
+    if (this.micCommitted) this.options?.onMediaStreamReady?.(this.recordDest.stream);
     this.processorNode = this.inputAudioCtx.createScriptProcessor(2048, 1, 1);
     this.processorNode.onaudioprocess = (e) => {
       if (!this.ready) return;
@@ -457,6 +486,7 @@ export class CascadePocProvider implements PocCapableProvider {
     };
     source.connect(this.processorNode);
     this.processorNode.connect(this.inputAudioCtx.destination);
+    return true;
   }
 
   private async initAudioPlayback(): Promise<void> {
@@ -493,16 +523,30 @@ export class CascadePocProvider implements PocCapableProvider {
     const source = this.outputAudioCtx.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(this.playbackOut || this.outputAudioCtx.destination);
-    const { startTime } = scheduleChunk(this.playbackScheduler, {
+    const { startTime, newUtterance } = scheduleChunk(this.playbackScheduler, {
       now: this.outputAudioCtx.currentTime,
       durationSec: audioBuffer.duration,
     });
+    this.turnPlay.chunks += 1;
+    // A "new utterance" after the first chunk of a turn is an audible hole of 1 s or more.
+    if (newUtterance && this.turnPlay.chunks > 1) this.turnPlay.gaps += 1;
     source.start(startTime);
     this.activeSources.push(source);
     source.onended = () => {
       const idx = this.activeSources.indexOf(source);
       if (idx !== -1) this.activeSources.splice(idx, 1);
     };
+  }
+
+  /** One line per tutor turn: scheduler underruns, lead buffer and 1 s+ holes in this turn. */
+  private logTurnPlayback(interrupted: boolean = false): void {
+    const s = this.playbackScheduler;
+    const p = this.turnPlay;
+    p.turn += 1;
+    console.log(
+      `[poc-play] n=${p.turn} chunks=${p.chunks} underruns=${s.underruns - p.underrunsAtStart} gaps=${p.gaps} leadMs=${Math.round(s.leadSec * 1000)}${interrupted ? " interrupted=1" : ""}`
+    );
+    this.turnPlay = { chunks: 0, underrunsAtStart: s.underruns, gaps: 0, turn: p.turn };
   }
 
   private stopAudioPlayback(): void {
@@ -525,6 +569,7 @@ export class CascadePocProvider implements PocCapableProvider {
     }
     this.cancelOpen?.(cascadeError("POC_CANCELLED", "disconnected"));
     this.firstAudioWaiter?.reject(cascadeError("POC_CANCELLED", "disconnected"));
+    this.micCommitted = false;
     this.generation++;
     this.ready = false;
     const s = this.socket;
@@ -567,6 +612,20 @@ export class CascadePocProvider implements PocCapableProvider {
     if (this.mediaStream) {
       this.mediaStream.getTracks().forEach((t) => t.stop());
       this.mediaStream = null;
+    }
+    // A mic request still in flight (permission prompt) is released by initAudioCapture() once it
+    // settles; wait briefly for that so the fallback engine never opens a second mic beside it.
+    const micInit = this.micInit;
+    this.micInit = null;
+    if (micInit) {
+      let capTimer: ReturnType<typeof setTimeout> | null = null;
+      await Promise.race([
+        micInit,
+        new Promise<void>((r) => {
+          capTimer = setTimeout(r, CascadePocProvider.MIC_RELEASE_WAIT_MS);
+        }),
+      ]);
+      if (capTimer) clearTimeout(capTimer);
     }
     if (notifyClosed) this.options?.onStatusChange("closed");
   }
