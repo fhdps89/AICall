@@ -196,7 +196,8 @@ test('redeploy after a TTS failure: the new container restores the script and re
       restored.push(backup);
       return backup;
     }) as any;
-    const farFuture = Date.parse('2026-11-27T12:00:00.000Z');
+    // Past the failure cooldown, which starts from the real clock when the job fails (a fixed date broke after it passed).
+    const farFuture = Date.now() + 24 * 3600 * 1000;
     await ensureTodayLecture(ai, st, date, { restoreLecture, genRemote: null, now: farFuture });
     assert.equal(restored.length, 1, 'audio rebuild requested from the backed-up script');
     assert.equal(restored[0].title, '생산 회의 보고');

@@ -3,6 +3,7 @@
  */
 
 import { normalizeVoiceName } from "../../config/voices";
+import { buildLiveContextWindowCompression } from "../../config/liveCompression";
 
 export type LiveWireKind = "direct" | "proxy";
 
@@ -111,9 +112,7 @@ export function buildDirectSetup(input: DirectSetupInput): DirectClientMessage {
       },
       inputAudioTranscription: {},
       outputAudioTranscription: {},
-      contextWindowCompression: {
-        slidingWindow: {},
-      },
+      contextWindowCompression: buildLiveContextWindowCompression(),
     },
   };
 }

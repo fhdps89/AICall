@@ -496,10 +496,12 @@ test('deriveHomeLearningStatus(null) hides both', () => {
 
 test('callUsageDelta isolates QA calls from liveMinutes and calls while keeping qaLiveMinutes (A17)', () => {
   const m = 260 / 60;
-  assert.deepEqual(callUsageDelta(260, false), { liveMinutes: m, liveMinutesSq: m * m, calls: 1 });
+  // 4.33 min is past the 4-minute compression cap (12k/6k → 9k avg tokens): 2·4·m − 4²
+  assert.deepEqual(callUsageDelta(260, false), { liveMinutes: m, liveMinutesSq: liveContextMinutesSq(m), calls: 1 });
+  assert.ok(Math.abs(liveContextMinutesSq(m) - (8 * m - 16)) < 1e-9);
 
   const qa = callUsageDelta(260, true);
-  assert.deepEqual(qa, { qaLiveMinutes: m, qaLiveMinutesSq: m * m });
+  assert.deepEqual(qa, { qaLiveMinutes: m, qaLiveMinutesSq: liveContextMinutesSq(m) });
   assert.equal('liveMinutes' in qa, false);
   assert.equal('calls' in qa, false);
 
@@ -571,13 +573,13 @@ test('callUsageDelta includes measured Live token fields for normal and QA calls
 });
 
 test('liveContextMinutesSq supports custom windowTokens and falls back on invalid values', () => {
-  // Default unchanged for long call (180 min > 128k cap)
+  // Default = 9k-token average (12k/6k compression)
   const defaultSq = liveContextMinutesSq(180);
-  // Smaller window (e.g. compression target/trigger 32k tokens) gives smaller sq for long calls
-  const compressedSq = liveContextMinutesSq(180, 32_000);
+  // Smaller window gives smaller sq for long calls
+  const compressedSq = liveContextMinutesSq(180, 4_500);
   assert.ok(compressedSq < defaultSq);
-  // Short call below smaller cap is unaffected (t^2)
-  assert.equal(liveContextMinutesSq(5, 32_000), 25);
+  // Short call below the smaller cap (2 min) is unaffected (t^2)
+  assert.equal(liveContextMinutesSq(1.5, 4_500), 2.25);
   // Invalid / non-positive windowTokens fall back to default
   assert.equal(liveContextMinutesSq(180, 0), defaultSq);
   assert.equal(liveContextMinutesSq(180, -100), defaultSq);

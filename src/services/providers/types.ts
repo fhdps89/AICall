@@ -47,6 +47,8 @@ export interface LiveProvider {
   getConnectionStats(): { connectionPath: "direct" | "proxy"; directFailCount: number };
   getLiveUsage?(): LiveUsageTotals;
   finalizeLiveUsage?(): LiveUsageTotals;
+  /** Largest single-turn promptTokenCount this call (Live engine only). */
+  getLivePeakPromptTokens?(): number;
   disconnect(): Promise<void>;
 }
 

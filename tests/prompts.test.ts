@@ -22,3 +22,34 @@ test('lesson prompt lists at most 3 review mistakes', () => {
   assert.match(p, /wrong 3/);
   assert.doesNotMatch(p, /wrong 4/);
 });
+
+test('lesson prompt wrapper is short English (re-billed every Live turn) for every default goal', () => {
+  for (const g of DEFAULT_GOALS) {
+    const p = buildTodayLessonSystemPrompt(g, 1, ph, []);
+    const hydrated = hydrateTutorPrompt(g.tutorPrompt, ph, g.id);
+    const wrapper = p.replace(hydrated, '');
+    // Was ~1,550 chars with ~710 Hangul chars of fixed rules; now English only (goal/lesson titles excluded).
+    const rules = wrapper.replace(g.title, '').replace(g.why, '');
+    assert.ok(wrapper.length <= 1800, `wrapper too long for ${g.id}: ${wrapper.length}`);
+    assert.doesNotMatch(rules.replace(/Lesson \d+: .*/g, ''), /[\uac00-\ud7a3]/, `Hangul left in fixed rules for ${g.id}`);
+  }
+});
+
+test('lesson prompt wrapper preserves key call rules and commands', () => {
+  const p = buildTodayLessonSystemPrompt(goal('opic'), 1, ph, []);
+  for (const re of [
+    /Tell me more/,
+    /That's it for today/,
+    /Model answer/,
+    /Slow/,
+    /Next lesson/,
+    /PROGRESS/,
+    /70%/,
+    /Done/,
+    /Feedback/,
+    /Pause/,
+    /Australian/,
+  ]) {
+    assert.match(p, re, `expected lesson prompt to match ${re}`);
+  }
+});

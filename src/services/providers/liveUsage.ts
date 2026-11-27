@@ -28,6 +28,8 @@ export interface LiveUsageAccumulator {
   finalize(): LiveUsageTotals;
   reset(): void;
   hasData(): boolean;
+  /** Largest single-turn promptTokenCount seen this call (re-billed context incl. system prompt; shows whether compression caps it). */
+  peakPromptTokens(): number;
 }
 
 function emptyTotals(): LiveUsageTotals {
@@ -162,6 +164,7 @@ export function createLiveUsageAccumulator(): LiveUsageAccumulator {
   // 다시 오면(예: interrupted 뒤 turnComplete와 함께 갱신본 도착) 새 턴으로 더하지 않고 그 턴을 다시 연다(이중 집계 방지).
   let lastCommitted: LiveUsageTotals | null = null;
   let committedBeforeLast: LiveUsageTotals = emptyTotals();
+  let peakPrompt = 0;
 
   const commitTurn = (): void => {
     if (!pending) return;
@@ -175,6 +178,7 @@ export function createLiveUsageAccumulator(): LiveUsageAccumulator {
     observe(usageMetadata: unknown): void {
       const parsed = parseUsageMetadata(usageMetadata);
       if (!parsed) return;
+      if (parsed.promptTokens > peakPrompt) peakPrompt = parsed.promptTokens;
       // 같은 생성 요청의 스냅샷은 프롬프트 토큰 수가 같다. 프롬프트 수가 달라졌다면 앞 요청의
       // 스냅샷이 turnComplete 뒤에 늦게 도착한 것이므로, 덮어쓰지 말고 먼저 커밋한다(과소 집계 방지).
       if (pending && pending.promptTokens !== parsed.promptTokens) commitTurn();
@@ -197,9 +201,13 @@ export function createLiveUsageAccumulator(): LiveUsageAccumulator {
       pending = null;
       lastCommitted = null;
       committedBeforeLast = emptyTotals();
+      peakPrompt = 0;
     },
     hasData(): boolean {
       return committed.turns > 0 || pending !== null;
+    },
+    peakPromptTokens(): number {
+      return peakPrompt;
     },
   };
 }

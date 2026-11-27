@@ -70,7 +70,32 @@ test("buildLiveConfigAttempts preserves attempt 1 resumption/compression and att
   });
 
   assert.deepEqual(attempts[0].config.sessionResumption, { handle: "h-1" });
-  assert.deepEqual(attempts[0].config.contextWindowCompression, { slidingWindow: {} });
+  // H1-보수: explicit 12k trigger / 6k target (API default 80% of the window never fires in 10 minutes).
+  assert.deepEqual(attempts[0].config.contextWindowCompression, {
+    triggerTokens: "12000",
+    slidingWindow: { targetTokens: "6000" },
+  });
   assert.equal("sessionResumption" in attempts[1].config, false);
   assert.equal("contextWindowCompression" in attempts[1].config, false);
+});
+
+test("live compression config: 12k/6k as int64 strings, fresh object, target < trigger, estimate average", async () => {
+  const m = await import("../src/config/liveCompression.ts");
+  const { USAGE_ASSUMPTIONS } = await import("../src/config/models.ts");
+  const a = m.buildLiveContextWindowCompression();
+  const b = m.buildLiveContextWindowCompression();
+  assert.deepEqual(a, { triggerTokens: "12000", slidingWindow: { targetTokens: "6000" } });
+  assert.notEqual(a, b);
+  a.slidingWindow.targetTokens = "1";
+  assert.equal(b.slidingWindow.targetTokens, "6000");
+  assert.ok(m.LIVE_COMPRESSION_TARGET_TOKENS < m.LIVE_COMPRESSION_TRIGGER_TOKENS);
+  assert.equal(m.LIVE_COMPRESSED_CONTEXT_AVG_TOKENS, 9000);
+  assert.equal(USAGE_ASSUMPTIONS.liveContextWindowTokens, m.LIVE_COMPRESSED_CONTEXT_AVG_TOKENS);
+});
+
+test("direct setup sends the same compression config as the server relay", async () => {
+  const { buildDirectSetup } = await import("../src/services/providers/liveWire.ts");
+  const setup = buildDirectSetup({ model: "gemini-3.8-live", voiceName: "Kore", systemInstruction: "s" }) as any;
+  const attempts = buildLiveConfigAttempts({ voiceName: "Kore", systemInstruction: "s" });
+  assert.deepEqual(setup.setup.contextWindowCompression, attempts[0].config.contextWindowCompression);
 });

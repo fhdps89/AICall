@@ -1,5 +1,6 @@
 import { Modality } from '@google/genai';
 import { LIVE_LANGUAGE_CODE, normalizeVoiceName } from '../src/config/voices.ts';
+import { buildLiveContextWindowCompression } from '../src/config/liveCompression.ts';
 
 export interface LiveConfigAttemptInput {
   voiceName?: unknown;
@@ -53,9 +54,7 @@ export function buildLiveConfigAttempts({
         sessionResumption: {
           handle: resumeHandle || undefined,
         },
-        contextWindowCompression: {
-          slidingWindow: {},
-        },
+        contextWindowCompression: buildLiveContextWindowCompression(),
         speechConfig: buildSpeechConfig(voiceName),
         systemInstruction,
       },

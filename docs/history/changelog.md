@@ -4,6 +4,18 @@
 
 ---
 
+### [2026-11-27 KST] 통화 비용 절감 H1-보수: Live 대화 기록 압축 12k/6k, 수업 지시서 경량화, 강의 TTS Flex
+- **배경**: 찬식님 21:45 「Live 쓰면서 비용 줄이는 혼합안으로 가」, 21:46 「어제 다 기획한게있어」 → 제안서(PR #61 `docs/plan/live-cost-optimization-proposal.md`) 6장 2단계 H1-보수 그대로. Live 비용의 88%는 턴마다 이전 대화를 다시 청구하는 몫인데, 압축 기준을 비워 두면 API 기본값(창의 80%, 약 10만 토큰)이라 10분 통화(약 2만 2천 토큰)에서는 한 번도 줄지 않았다.
+- **압축**: `contextWindowCompression = { triggerTokens: "12000", slidingWindow: { targetTokens: "6000" } }`(직연결·서버 중계 같은 값, `src/config/liveCompression.ts`). 필드 이름·위치는 공식 Live API 레퍼런스 `ContextWindowCompressionConfig`/`SlidingWindow` 기준(int64는 문자열, SDK 타입과 같음). 시스템 지시문은 항상 남고 가장 오래된 턴부터 버린다.
+- **추정식**: `USAGE_ASSUMPTIONS.liveContextWindowTokens` 128,000 → 9,000(12k/6k 평균). 10분 통화 Live 추정 $1.53 → $1.04(제안서 12k/6k 월 $30.90 ÷ 30 = $1.03와 일치). 저장된 예전 통화의 분²는 그대로.
+- **수업 지시서**: 고정 앱 규칙(한국어 약 1,550자, 한글 약 710자)을 같은 규칙 그대로 짧은 영어(약 1,750자, 한글 0)로. 목표별 튜터 프롬프트 원문은 손대지 않음.
+- **강의 TTS Flex**: 조각마다 Flex를 20초 상한으로 한 번 시도, 실패·15초 초과면 30분간 일반 등급. 일반 3회 시도 루프는 그대로. `LECTURE_TTS_FLEX=off`로 끔.
+- **QA 신호**: `[live-usage]`에 `peakPrompt= ctxTrigger= ctxTarget= path=`, `?qa=1`이면 `<html data-live-usage>`.
+- **넣지 않은 것**: 1분 임시 받아쓰기 끔(#62에서 반영됨), 무음 차단(제안서 조건 = 무음 과금 실측 미확인).
+- **테스트 수리**: `lectureFailedScriptBackup.test.ts`의 고정 시각(2026-11-27 21:00 KST)이 지나 실패하던 것을 `Date.now()` 기준으로.
+
+---
+
 ### [2026-11-27 KST] 시험 통화 엔진 첫 음성 구간 TTS 비교(`?pocTts=full|lite`)와 끼어들기 지표 분리
 - **배경**: 찬식님 08:13 「제안한 방식으로 qa를 해보자. 4.3초는 너무 길어」. A 기준 말 끝→첫 소리 중앙값 4.27초 중 음성 첫 조각이 2.38초. 제안 ②(첫 구간만 lite TTS) 측정용.
 - **선택**: 주소 `?pocTts=lite`면 매 튜터 턴(인사말 포함) 첫 구간만 `gemini-3.8-flash-lite-tts`, 나머지는 `gemini-3.8-flash-tts`, 같은 목소리. 없거나 `full`·잘못된 값이면 지금과 같음. 저장·설정 UI 없음. 브라우저는 `full`/`lite`만 보내고 서버가 모델 ID를 고름. 문장 자르기 규칙은 그대로(비교를 깨끗하게).

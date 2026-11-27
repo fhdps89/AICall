@@ -125,6 +125,9 @@ export class PocFallbackProvider implements LiveProvider {
   finalizeLiveUsage(): LiveUsageTotals {
     return this.p?.finalizeLiveUsage?.() as LiveUsageTotals;
   }
+  getLivePeakPromptTokens(): number {
+    return this.p?.getLivePeakPromptTokens?.() ?? 0;
+  }
   disconnect(): Promise<void> {
     this.connectGen++;
     return this.p ? this.p.disconnect() : Promise.resolve();

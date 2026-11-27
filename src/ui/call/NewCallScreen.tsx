@@ -12,6 +12,8 @@ import {
 } from "../../services/providers/cascadeFallbackProvider";
 import { pocCostUsd, POC_TEXT_VARIANTS } from "../../config/cascadePoc";
 import { infoPoc } from "../../services/perf/pocQaLog";
+import { publishQaReadableLine } from "../../services/perf/qaReadable";
+import { LIVE_COMPRESSION_TARGET_TOKENS, LIVE_COMPRESSION_TRIGGER_TOKENS } from "../../config/liveCompression";
 import { formatLiveUsageLog } from "../../services/providers/liveUsage";
 import React, { useState, useEffect, useRef } from "react";
 import { useDevMode } from "../../data/devMode";
@@ -413,14 +415,24 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
       );
     } else if (liveUsage && liveUsage.turns > 0) {
       const actualUsd = liveMeasuredCostUsd(liveUsage);
-      console.info(
-        formatLiveUsageLog(liveUsage, {
-          durationSec: callDuration,
-          actualUsd,
-          estUsd,
-          qa: qaCallRef.current ? 1 : 0,
-        })
-      );
+      const line = formatLiveUsageLog(liveUsage, {
+        durationSec: callDuration,
+        actualUsd,
+        estUsd,
+        qa: qaCallRef.current ? 1 : 0,
+        peakPrompt: providerRef.current.getLivePeakPromptTokens?.() ?? 0,
+        ctxTrigger: LIVE_COMPRESSION_TRIGGER_TOKENS,
+        ctxTarget: LIVE_COMPRESSION_TARGET_TOKENS,
+        // direct = our setup (with compression) was accepted on the first path; proxy may have fallen back.
+        path: stats.connectionPath,
+      });
+      console.info(line);
+      // ?qa=1: also <html data-live-usage> / window.__AICALL_LIVE_USAGE__ so QA can read it without the console.
+      publishQaReadableLine(line, {
+        datasetKey: "liveUsage",
+        windowKey: "__AICALL_LIVE_USAGE__",
+        attributesOnlyInQa: true,
+      });
     } else {
       console.info("[live-usage] turns=0 (no usageMetadata received)");
     }

@@ -8,6 +8,8 @@ declare global {
     __AICALL_POC_SUMMARY__?: string;
     /** Latest `[poc-usage]` line under `?qa=1`. */
     __AICALL_POC_USAGE__?: string;
+    /** Latest `[live-usage]` line (normal Live engine) under `?qa=1`. */
+    __AICALL_LIVE_USAGE__?: string;
   }
 }
 

@@ -1021,6 +1021,10 @@ export class GeminiLiveProvider implements LiveProvider {
     return this.liveUsage.finalize();
   }
 
+  public getLivePeakPromptTokens(): number {
+    return this.liveUsage.peakPromptTokens();
+  }
+
   public sendAudioChunk(pcm16kChunk: ArrayBuffer): void {
     const c = this.conn;
     if (!c?.ready) return;

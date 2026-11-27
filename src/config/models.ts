@@ -52,8 +52,13 @@ export const USAGE_ASSUMPTIONS = {
   liveModelTalkShare: 0.5,
   /** ~1 user/tutor turn exchange every 15s (4 turns/min). */
   liveTurnsPerMin: 4,
-  /** Cap for Live context re-billing: slidingWindow (default trigger/target) keeps context at or below this, so re-billing stops growing past it. Conservative: the real average after compression is lower. */
-  liveContextWindowTokens: 128_000,
+  /**
+   * Average re-billed Live history once compression runs (contextWindowCompression 12k trigger / 6k target,
+   * src/config/liveCompression.ts LIVE_COMPRESSED_CONTEXT_AVG_TOKENS = (12k + 6k) / 2). Used only for calls
+   * recorded without measured usageMetadata; each call stores its own liveMinutesSq, so earlier calls keep theirs.
+   * Was 128_000 (API default trigger = 80% of the window, never reached in a 10-minute call).
+   */
+  liveContextWindowTokens: 9_000,
   /** lessonPromptBuilder (~4.3KB) + goal context re-billed on every Live turn. */
   liveSystemPromptTokens: 1500,
   /** ~150 spoken words/min plus speaker labels and timestamps. */

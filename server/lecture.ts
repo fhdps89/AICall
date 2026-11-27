@@ -10,7 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import { monitorEventLoopDelay } from 'perf_hooks';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ServiceTier, Type } from '@google/genai';
 import { TEXT_MODEL, GEMINI_TTS_MODEL } from '../src/config/models.ts';
 import { tokensFromUsageMetadata } from './usageMeta.ts';
 import { stripSpeechDirections, cleanLectureScriptItem } from './speechText.ts';
@@ -89,8 +89,24 @@ const VOICE_PARTNER = 'Puck';
 export const LECTURE_JOB_TIMEOUT_MS = 15 * 60 * 1000;
 /** One generateContent call (script or one TTS segment). Lets the 3-try loop actually retry. */
 export const LECTURE_STEP_TIMEOUT_MS = 90 * 1000;
+/**
+ * Lecture TTS on the Flex tier (H1-보수, 50% price, preview, best-effort; https://ai.google.dev/gemini-api/docs/flex-inference).
+ * Flex has no server-side fallback and can queue for minutes, while the whole lecture job has a 15-minute cap.
+ * So each segment tries Flex once with a short cap, then falls back to the unchanged standard 3-try loop.
+ * A failure or a slow Flex answer turns Flex off for 30 minutes (rest of the job), so a job loses at most ~20s.
+ * LECTURE_TTS_FLEX=off disables it.
+ */
+export const LECTURE_TTS_FLEX_TIMEOUT_MS = 20_000;
+export const LECTURE_TTS_FLEX_SLOW_MS = 15_000;
+export const LECTURE_TTS_FLEX_COOLDOWN_MS = 30 * 60 * 1000;
 export const LECTURE_AUDIO_REBUILD_TIMEOUT_MS = 30 * 60 * 1000;
 export const LECTURE_AUDIO_RETRY_COOLDOWN_MS = 30 * 60 * 1000;
+
+let lectureTtsFlexDisabledUntil = 0;
+
+export function resetLectureTtsFlexStateForTest(): void {
+  lectureTtsFlexDisabledUntil = 0;
+}
 export const LECTURE_AUDIO_REBUILD_TIMED_OUT = 'AUDIO_REBUILD_TIMED_OUT';
 export const LECTURE_GEN_SKIPPED = 'GEN_SKIPPED';
 const JOB_TIMED_OUT_RE = /^(lecture job|audio rebuild) timed out/;
@@ -1654,6 +1670,7 @@ export interface SynthesizeGeminiOpts {
   now?: () => number;
   stepTimeoutMs?: number;
   loopDelayMonitor?: () => { stop(): number };
+  flex?: boolean;
 }
 
 function clampLoopDelayMs(v: number): number {
@@ -1699,6 +1716,65 @@ export async function synthesizeGemini(
         },
       }
     : { voiceConfig: { prebuiltVoiceConfig: { voiceName: VOICE_COACH } } };
+  const parts = toSpeechParts(text, twoSpeakers);
+  const callTts = async (
+    stepSig: AbortSignal,
+    timeoutMs: number,
+    serviceTier?: ServiceTier
+  ): Promise<Pcm> => {
+    const config: any = {
+      abortSignal: stepSig,
+      responseModalities: ['AUDIO'],
+      speechConfig,
+      ...(serviceTier !== undefined ? { serviceTier } : {}),
+    };
+    const response = await withAbort(
+      withTimeout(
+        ai.models.generateContent({
+          model: LECTURE_TTS_MODEL,
+          contents: [{ role: 'user', parts }],
+          config,
+        }),
+        timeoutMs,
+        'lecture TTS'
+      ),
+      signal
+    );
+    const part = response.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData?.data);
+    if (!part?.inlineData?.data) throw new Error('TTS 음성 데이터 없음');
+    return parseAudio(part.inlineData.data, part.inlineData.mimeType || '');
+  };
+
+  const flexEnabled = opts.flex ?? process.env.LECTURE_TTS_FLEX !== 'off';
+  if (flexEnabled) {
+    if (signal?.aborted) throw new Error('lecture job superseded');
+    const flexStart = nowFn();
+    if (flexStart >= lectureTtsFlexDisabledUntil) {
+      const flexTimeoutMs = Math.min(LECTURE_TTS_FLEX_TIMEOUT_MS, stepTimeoutMs);
+      const timeoutSig = AbortSignal.timeout(flexTimeoutMs);
+      const stepSig = signal ? AbortSignal.any([signal, timeoutSig]) : timeoutSig;
+      try {
+        const pcm = await callTts(stepSig, flexTimeoutMs, ServiceTier.FLEX);
+        const tookMs = nowFn() - flexStart;
+        if (tookMs > LECTURE_TTS_FLEX_SLOW_MS) {
+          // Slow queue: keep this segment, send the rest of the job to standard so the 15-minute cap holds.
+          lectureTtsFlexDisabledUntil = nowFn() + LECTURE_TTS_FLEX_COOLDOWN_MS;
+          console.warn('[Lecture] TTS flex slow, standard for 30m:', JSON.stringify({ elapsedMs: Math.round(tookMs) }));
+        }
+        return pcm;
+      } catch (err: any) {
+        if (signal?.aborted) throw err;
+        const failedAt = nowFn();
+        const elapsedMs = Math.max(0, Math.round(failedAt - flexStart));
+        lectureTtsFlexDisabledUntil = failedAt + LECTURE_TTS_FLEX_COOLDOWN_MS;
+        console.warn(
+          '[Lecture] TTS flex fallback:',
+          JSON.stringify({ elapsedMs, errName: safeErrName(err) })
+        );
+      }
+    }
+  }
+
   const attemptMs: number[] = [];
   let maxLoopDelayMs: number | undefined;
   let lastErr: any;
@@ -1711,21 +1787,7 @@ export async function synthesizeGemini(
     let loopDelayMaxMs = 0;
     try {
       try {
-        const response = await withAbort(
-          withTimeout(
-            ai.models.generateContent({
-              model: LECTURE_TTS_MODEL,
-              contents: [{ role: 'user', parts: toSpeechParts(text, twoSpeakers) }],
-              config: { abortSignal: stepSig, responseModalities: ['AUDIO'], speechConfig },
-            }),
-            stepTimeoutMs,
-            'lecture TTS'
-          ),
-          signal
-        );
-        const part = response.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData?.data);
-        if (!part?.inlineData?.data) throw new Error('TTS 음성 데이터 없음');
-        return parseAudio(part.inlineData.data, part.inlineData.mimeType || '');
+        return await callTts(stepSig, stepTimeoutMs);
       } finally {
         loopDelayMaxMs = clampLoopDelayMs(loopMonitor.stop());
         maxLoopDelayMs =
