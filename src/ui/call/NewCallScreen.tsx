@@ -429,7 +429,9 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
       });
       infoLiveUsage(line);
     } else {
-      console.info("[live-usage] turns=0 (no usageMetadata received)");
+      infoLiveUsage(
+        `[live-usage] turns=0 (no usageMetadata received) path=${stats.connectionPath} ctx=${providerRef.current.getLiveContextCompression?.() ?? "unknown"}`
+      );
     }
 
     if (userId) {

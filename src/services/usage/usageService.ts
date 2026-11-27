@@ -34,13 +34,6 @@ import type {
   PocVariantFieldName,
   PocVariantUsage,
 } from "./pocUsageFields";
-
-/**
- * Lower bounds for docs written before liveMinutesSq existed: those calls ran before explicit
- * compression (API default trigger, never reached in short calls), so keep the old 128k window here.
- */
-const LEGACY_LIVE_CONTEXT_WINDOW_TOKENS = 128_000;
-
 export {
   POC_TTS_LITE_FIELDS,
   POC_USAGE_FIELDS,
@@ -319,9 +312,7 @@ function computeLiveParts(u: UsageDay | UsageMonth | null | undefined) {
     remLiveMin > 0
       ? Math.max(
           remLiveSqRaw,
-          remLiveCalls > 0
-            ? remLiveCalls * liveContextMinutesSq(remLiveMin / remLiveCalls, LEGACY_LIVE_CONTEXT_WINDOW_TOKENS)
-            : 0
+          remLiveCalls > 0 ? remLiveCalls * liveContextMinutesSq(remLiveMin / remLiveCalls) : 0
         )
       : 0;
   const liveEstimatedUsd = liveCost(remLiveMin, remLiveSq);
@@ -340,12 +331,7 @@ function computeLiveParts(u: UsageDay | UsageMonth | null | undefined) {
   const remQaSqRaw = Math.max(0, nonNeg(u?.qaLiveMinutesSq) - qaMeasuredSq);
   // qaCalls is not stored separately; qaLiveMinutes and qaLiveMinutesSq are written together, so this
   // fallback (all remaining QA minutes as one call, an upper bound) only guards malformed docs.
-  const remQaSq =
-    remQaMin > 0
-      ? remQaSqRaw > 0
-        ? remQaSqRaw
-        : liveContextMinutesSq(remQaMin, LEGACY_LIVE_CONTEXT_WINDOW_TOKENS)
-      : 0;
+  const remQaSq = remQaMin > 0 ? (remQaSqRaw > 0 ? remQaSqRaw : liveContextMinutesSq(remQaMin)) : 0;
   const qaEstimatedUsd = liveCost(remQaMin, remQaSq);
 
   return {

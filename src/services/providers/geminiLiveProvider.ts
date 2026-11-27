@@ -165,6 +165,7 @@ export class GeminiLiveProvider implements LiveProvider {
       this.tutorSpoke = false;
       this.kickoffAttempts = 0;
       this.liveUsage.reset();
+      this.contextCompression = "unknown";
     } else {
       this.liveUsage.commitTurn();
     }
