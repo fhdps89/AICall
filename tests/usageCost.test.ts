@@ -146,7 +146,7 @@ test('priceUsage: additive across components when Sq is present', () => {
 
 test('priceUsage: mixed legacy + new month uses max(liveMinutesSq, liveMinutes^2/calls) lower bound', () => {
   // 2 calls totaling 10 min: one legacy 8m (Sq not stored) + one new 2m (Sq=4).
-  // liveMinutesSq=4 < lower bound 2 × liveContextMinutesSq(5) = 2 × (2·4·5 − 4²) = 48 (12k/6k cap = 4 min) -> 48 applies.
+  // liveMinutesSq=4 < 10^2/2=50 -> lower bound 50 applies (legacy docs keep the pre-compression 128k window).
   const mixed = priceUsage({
     liveMinutes: 10,
     liveMinutesSq: 4,
@@ -158,7 +158,7 @@ test('priceUsage: mixed legacy + new month uses max(liveMinutesSq, liveMinutes^2
   });
   const lowerBound = priceUsage({
     liveMinutes: 10,
-    liveMinutesSq: 48,
+    liveMinutesSq: 50,
     calls: 2,
     sttMinutes: 0,
     textTokens: 0,
@@ -167,7 +167,7 @@ test('priceUsage: mixed legacy + new month uses max(liveMinutesSq, liveMinutes^2
   });
   assert.ok(Math.abs(mixed.live - lowerBound.live) < 1e-12);
 
-  // When actual Sq > liveMinutes^2/calls (e.g. 9m + 1m => Sq=82 > 48), stored Sq is kept.
+  // When actual Sq > liveMinutes^2/calls (e.g. 9m + 1m => Sq=82 > 50), stored Sq is kept.
   const skewed = priceUsage({
     liveMinutes: 10,
     liveMinutesSq: 82,

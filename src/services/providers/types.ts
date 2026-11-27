@@ -49,6 +49,8 @@ export interface LiveProvider {
   finalizeLiveUsage?(): LiveUsageTotals;
   /** Largest single-turn promptTokenCount this call (Live engine only). */
   getLivePeakPromptTokens?(): number;
+  /** Whether this call's Live connection(s) used contextWindowCompression. */
+  getLiveContextCompression?(): "on" | "off" | "unknown";
   disconnect(): Promise<void>;
 }
 

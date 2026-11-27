@@ -1913,6 +1913,7 @@ async function startServer() {
 
           let activeLock: string | null = LIVE_LANGUAGE_CODE;
           let activeModel = NATIVE_AUDIO_MODEL;
+          let activeCompression = false;
           let connectError: any = null;
 
           for (const modelToTry of LIVE_MODELS) {
@@ -1942,6 +1943,7 @@ async function startServer() {
                 }
                 activeLock = attempt.lock;
                 activeModel = modelToTry;
+                activeCompression = attempt.contextCompression;
                 console.log(`[Gemini Live] Successfully connected with ${modelToTry}: ${attempt.desc} (languageLock: ${activeLock})`);
                 break;
               } catch (err: any) {
@@ -1962,6 +1964,8 @@ async function startServer() {
               model: activeModel,
               modelName: `${activeModel} (Live native audio)`,
               languageLock: activeLock,
+              // false = the compression attempt was rejected and the plain fallback config is in use.
+              contextCompression: activeCompression,
             }));
           } else {
             console.error('Failed to establish Gemini Live session across all configurations:', connectError);

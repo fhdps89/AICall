@@ -12,7 +12,7 @@ import {
 } from "../../services/providers/cascadeFallbackProvider";
 import { pocCostUsd, POC_TEXT_VARIANTS } from "../../config/cascadePoc";
 import { infoPoc } from "../../services/perf/pocQaLog";
-import { publishQaReadableLine } from "../../services/perf/qaReadable";
+import { infoLiveUsage } from "../../services/perf/liveUsageQaLog";
 import { LIVE_COMPRESSION_TARGET_TOKENS, LIVE_COMPRESSION_TRIGGER_TOKENS } from "../../config/liveCompression";
 import { formatLiveUsageLog } from "../../services/providers/liveUsage";
 import React, { useState, useEffect, useRef } from "react";
@@ -423,16 +423,11 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
         peakPrompt: providerRef.current.getLivePeakPromptTokens?.() ?? 0,
         ctxTrigger: LIVE_COMPRESSION_TRIGGER_TOKENS,
         ctxTarget: LIVE_COMPRESSION_TARGET_TOKENS,
-        // direct = our setup (with compression) was accepted on the first path; proxy may have fallen back.
         path: stats.connectionPath,
+        // on = every connection this call sent contextWindowCompression; off = the relay fell back to the plain config.
+        ctx: providerRef.current.getLiveContextCompression?.() ?? "unknown",
       });
-      console.info(line);
-      // ?qa=1: also <html data-live-usage> / window.__AICALL_LIVE_USAGE__ so QA can read it without the console.
-      publishQaReadableLine(line, {
-        datasetKey: "liveUsage",
-        windowKey: "__AICALL_LIVE_USAGE__",
-        attributesOnlyInQa: true,
-      });
+      infoLiveUsage(line);
     } else {
       console.info("[live-usage] turns=0 (no usageMetadata received)");
     }

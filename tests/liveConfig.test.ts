@@ -99,3 +99,24 @@ test("direct setup sends the same compression config as the server relay", async
   const attempts = buildLiveConfigAttempts({ voiceName: "Kore", systemInstruction: "s" });
   assert.deepEqual(setup.setup.contextWindowCompression, attempts[0].config.contextWindowCompression);
 });
+
+test("relay attempts report whether they carry compression (ready.contextCompression)", () => {
+  const attempts = buildLiveConfigAttempts({ voiceName: "Kore", systemInstruction: "s" });
+  assert.equal(attempts[0].contextCompression, true);
+  assert.equal("contextWindowCompression" in attempts[0].config, true);
+  assert.equal(attempts[1].contextCompression, false);
+  assert.equal("contextWindowCompression" in attempts[1].config, false);
+});
+
+test("compression state: one connection without compression makes the call off; old servers are unknown", async () => {
+  const { mergeLiveContextCompression: merge, compressionFromReady } = await import("../src/config/liveCompression.ts");
+  assert.equal(compressionFromReady(true), "on");
+  assert.equal(compressionFromReady(false), "off");
+  assert.equal(compressionFromReady(undefined), "unknown");
+  assert.equal(merge("unknown", "on"), "on");
+  assert.equal(merge("on", "on"), "on");
+  assert.equal(merge("on", "off"), "off");
+  assert.equal(merge("off", "on"), "off");
+  assert.equal(merge("unknown", "unknown"), "unknown");
+  assert.equal(merge("on", "unknown"), "on");
+});

@@ -12,6 +12,8 @@ export interface LiveConfigAttempt {
   desc: string;
   config: Record<string, unknown>;
   lock: string | null;
+  /** True when this attempt sends contextWindowCompression (reported to the client in 'ready'). */
+  contextCompression: boolean;
 }
 
 /**
@@ -59,6 +61,7 @@ export function buildLiveConfigAttempts({
         systemInstruction,
       },
       lock: LIVE_LANGUAGE_CODE,
+      contextCompression: true,
     },
     {
       desc: 'gemini-3.8-live standard audio session',
@@ -70,6 +73,7 @@ export function buildLiveConfigAttempts({
         systemInstruction,
       },
       lock: LIVE_LANGUAGE_CODE,
+      contextCompression: false,
     },
   ];
 }

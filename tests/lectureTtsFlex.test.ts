@@ -312,3 +312,66 @@ test('(6) slow flex success keeps the audio but sends later segments to standard
     resetLectureTtsFlexStateForTest();
   }
 });
+
+test('(7) job abort during the flex attempt rethrows without falling back or starting the cooldown', async () => {
+  resetLectureTtsFlexStateForTest();
+  const prevEnv = process.env.LECTURE_TTS_FLEX;
+  delete process.env.LECTURE_TTS_FLEX;
+  const origWarn = console.warn;
+  const warns: string[] = [];
+  console.warn = (...a: unknown[]) => warns.push(a.map(String).join(' '));
+  const job = new AbortController();
+  const captured: any[] = [];
+  const fakeAi = {
+    models: {
+      generateContent: (req: any) => {
+        captured.push(req);
+        if (req.config?.serviceTier === 'flex') {
+          setTimeout(() => job.abort(), 5);
+          return new Promise((_r, reject) =>
+            req.config.abortSignal.addEventListener('abort', () =>
+              reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+            )
+          );
+        }
+        return Promise.resolve(fakeAudioResponse());
+      },
+    },
+  } as unknown as GoogleGenAI;
+  try {
+    await assert.rejects(
+      synthesizeGemini(fakeAi, 'Coach: abort', false, job.signal, { sleepFn: async () => {} })
+    );
+    assert.equal(captured.length, 1);
+    assert.equal(warns.some((w) => w.startsWith('[Lecture] TTS flex fallback')), false);
+    // No cooldown was set: a fresh job still tries flex first.
+    const captured2: any[] = [];
+    await synthesizeGemini(
+      { models: { generateContent: async (req: any) => (captured2.push(req), fakeAudioResponse()) } } as unknown as GoogleGenAI,
+      'Coach: next job',
+      false,
+      undefined,
+      { sleepFn: async () => {} }
+    );
+    assert.equal(captured2[0].config.serviceTier, 'flex');
+    // Already-aborted job never calls the API.
+    const captured3: any[] = [];
+    const done = new AbortController();
+    done.abort();
+    await assert.rejects(
+      synthesizeGemini(
+        { models: { generateContent: async (req: any) => (captured3.push(req), fakeAudioResponse()) } } as unknown as GoogleGenAI,
+        'Coach: aborted',
+        false,
+        done.signal,
+        { sleepFn: async () => {} }
+      )
+    );
+    assert.equal(captured3.length, 0);
+  } finally {
+    console.warn = origWarn;
+    if (prevEnv === undefined) delete process.env.LECTURE_TTS_FLEX;
+    else process.env.LECTURE_TTS_FLEX = prevEnv;
+    resetLectureTtsFlexStateForTest();
+  }
+});

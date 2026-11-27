@@ -10,6 +10,11 @@ import { authFetch } from "../api/authFetch";
 import { auth } from "../firebase/config";
 import { decodeLiveMessage, createSerialQueue } from "./liveMessage";
 import { createLiveUsageAccumulator, LiveUsageTotals } from "./liveUsage";
+import {
+  compressionFromReady,
+  mergeLiveContextCompression,
+  type LiveContextCompressionState,
+} from "../../config/liveCompression";
 import { LIVE_STATUS_TEXT } from "./liveStatusText";
 import {
   LiveWireKind,
@@ -101,6 +106,7 @@ export class GeminiLiveProvider implements LiveProvider {
 
   // Connection path tracking (2-1 requirement 5)
   private connectionPath: "direct" | "proxy" = "direct";
+  private contextCompression: LiveContextCompressionState = "unknown";
   private directFailCount = 0;
   private liveUsage = createLiveUsageAccumulator();
 
@@ -394,6 +400,7 @@ export class GeminiLiveProvider implements LiveProvider {
                 this.isReconnecting = false;
                 this.reconnectFailures = 0;
                 this.connectionPath = "direct";
+                this.contextCompression = mergeLiveContextCompression(this.contextCompression, "on");
                 console.log("[Live] path=direct (setupComplete received)");
                 this.options?.onStatusChange("connected", LIVE_STATUS_TEXT.connected);
 
@@ -613,6 +620,10 @@ export class GeminiLiveProvider implements LiveProvider {
             this.isReconnecting = false;
             this.reconnectFailures = 0;
             this.connectionPath = "proxy";
+            this.contextCompression = mergeLiveContextCompression(
+              this.contextCompression,
+              compressionFromReady(data.contextCompression)
+            );
             console.log("[Live] path=proxy model=" + (data.model || "?"));
             this.options?.onStatusChange("connected", LIVE_STATUS_TEXT.connected);
             resolve();
@@ -1023,6 +1034,10 @@ export class GeminiLiveProvider implements LiveProvider {
 
   public getLivePeakPromptTokens(): number {
     return this.liveUsage.peakPromptTokens();
+  }
+
+  public getLiveContextCompression(): LiveContextCompressionState {
+    return this.contextCompression;
   }
 
   public sendAudioChunk(pcm16kChunk: ArrayBuffer): void {

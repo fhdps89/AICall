@@ -128,6 +128,9 @@ export class PocFallbackProvider implements LiveProvider {
   getLivePeakPromptTokens(): number {
     return this.p?.getLivePeakPromptTokens?.() ?? 0;
   }
+  getLiveContextCompression(): "on" | "off" | "unknown" {
+    return this.p?.getLiveContextCompression?.() ?? "unknown";
+  }
   disconnect(): Promise<void> {
     this.connectGen++;
     return this.p ? this.p.disconnect() : Promise.resolve();

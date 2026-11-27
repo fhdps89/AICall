@@ -34,3 +34,23 @@ export function buildLiveContextWindowCompression(): LiveContextWindowCompressio
  */
 export const LIVE_COMPRESSED_CONTEXT_AVG_TOKENS =
   (LIVE_COMPRESSION_TRIGGER_TOKENS + LIVE_COMPRESSION_TARGET_TOKENS) / 2;
+
+export type LiveContextCompressionState = "on" | "off" | "unknown";
+
+/**
+ * Per-call compression state across (re)connections. Direct setup always sends compression ("on");
+ * the relay reports it in 'ready'. One connection without compression makes the whole call "off".
+ */
+export function mergeLiveContextCompression(
+  prev: LiveContextCompressionState,
+  next: LiveContextCompressionState
+): LiveContextCompressionState {
+  if (prev === "off" || next === "off") return "off";
+  if (prev === "on" || next === "on") return "on";
+  return "unknown";
+}
+
+/** Relay 'ready' payload → state (older servers don't send the field). */
+export function compressionFromReady(value: unknown): LiveContextCompressionState {
+  return value === true ? "on" : value === false ? "off" : "unknown";
+}

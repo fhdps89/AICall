@@ -53,3 +53,14 @@ test('lesson prompt wrapper preserves key call rules and commands', () => {
     assert.match(p, re, `expected lesson prompt to match ${re}`);
   }
 });
+
+test('lesson prompt keeps spoken/friendly style and formats review mistakes in English', () => {
+  const p = buildTodayLessonSystemPrompt(goal('opic'), 1, ph, [
+    { myPhrase: 'I go yesterday', naturalPhrase: 'I went yesterday', reason: 'past tense' },
+  ]);
+  assert.match(p, /spoken, concise, friendly/);
+  assert.match(p, /Review mistakes \(wrong -> correct\)\. Naturally create chances/);
+  assert.match(p, /1\. "I go yesterday" -> "I went yesterday" \(past tense\)/);
+  const empty = buildTodayLessonSystemPrompt(goal('opic'), 1, ph, []);
+  assert.match(empty, /Review mistakes: none yet\. Focus on the new lesson\./);
+});

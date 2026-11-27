@@ -299,3 +299,31 @@ test("boot publish still writes attributes when qa is off (only warn is qa-gated
     console.warn = originalWarn;
   }
 });
+
+test("infoLiveUsage mirrors [live-usage] to data-live-usage and window only under ?qa=1", async () => {
+  const { infoLiveUsage } = await import("../src/services/perf/liveUsageQaLog.ts");
+  const LINE = "[live-usage] turns=3 inAudio=10 inText=2 outAudio=5 outText=1 thoughts=0 peakPrompt=11800 ctxTrigger=12000 ctxTarget=6000 path=direct ctx=on";
+  const g = globalThis as unknown as { document?: unknown; window?: unknown };
+  const prevDoc = g.document;
+  const prevWin = g.window;
+  const origInfo = console.info;
+  const origWarn = console.warn;
+  console.info = () => {};
+  console.warn = () => {};
+  try {
+    for (const [search, expectWrite] of [["?qa=1", true], ["", false]] as const) {
+      const attrs: Record<string, string> = {};
+      g.document = { documentElement: { dataset: attrs } };
+      const win: Record<string, unknown> = { location: { search } };
+      g.window = win;
+      infoLiveUsage(LINE);
+      assert.equal(attrs.liveUsage, expectWrite ? LINE : undefined);
+      assert.equal(win.__AICALL_LIVE_USAGE__, expectWrite ? LINE : undefined);
+    }
+  } finally {
+    console.info = origInfo;
+    console.warn = origWarn;
+    g.document = prevDoc;
+    g.window = prevWin;
+  }
+});
