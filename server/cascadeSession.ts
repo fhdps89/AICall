@@ -2,12 +2,14 @@ import {
   POC_STT_MODEL,
   POC_TEXT_VARIANTS,
   parsePocTextVariant,
+  parsePocFirstTts,
+  pocFirstTtsModel,
   POC_TEXT_THINKING_LEVEL,
   POC_TTS_MODEL,
   emptyPocUsage,
   pocCostUsd,
 } from "../src/config/cascadePoc.ts";
-import type { PocTextVariant, PocUsageTotals } from "../src/config/cascadePoc.ts";
+import type { PocFirstTts, PocTextVariant, PocUsageTotals } from "../src/config/cascadePoc.ts";
 import {
   POC_VOICE_ADDENDUM,
   takeFirstSpeechSegment,
@@ -53,6 +55,7 @@ export interface CascadeAi {
   streamSpeech(req: {
     text: string;
     voiceName: string;
+    model?: string;
     signal: AbortSignal;
   }): Promise<
     AsyncIterable<{
@@ -82,12 +85,16 @@ export interface CascadeInit {
   history?: unknown;
   /** Reply-text A/B variant; anything else is treated as "a". */
   textVariant?: unknown;
+  /** First-segment TTS mode ("full" | "lite"); anything else is treated as "full". */
+  firstTts?: unknown;
 }
 
 export interface CascadeModels {
   stt: string;
   text: string;
   tts: string;
+  /** First-segment TTS model (when different from tts). */
+  ttsFirst?: string;
   /** thinkingConfig.thinkingLevel for the text model (default POC_TEXT_THINKING_LEVEL). */
   thinkingLevel?: string;
 }
@@ -214,11 +221,11 @@ export function createGeminiCascadeAi(
       };
     },
 
-    async streamSpeech({ text, voiceName, signal }) {
+    async streamSpeech({ text, voiceName, model, signal }) {
       const client = ttsAi ?? ai;
       const stream = await client.interactions.create(
         {
-          model: models.tts,
+          model: model ?? models.tts,
           input: [{ type: "user_input", content: [{ type: "text", text }] }],
           response_format: {
             type: "audio",
@@ -326,6 +333,7 @@ export class CascadeSession {
   private currentTutorText: string;
   private speakingUntil: number;
   private bargeIns: number;
+  private textInterrupts: number;
   private echoDrops: number;
   private ttsStreams: number;
   private finalToAudioSamples: number[];
@@ -333,6 +341,7 @@ export class CascadeSession {
   /** Per turn: first audio chunk latency of the turn's first speech request. */
   private ttsFirstChunkSamples: number[];
   private textVariant: PocTextVariant;
+  private firstTts: PocFirstTts;
   private totals: PocUsageTotals;
   private sttMeasured: boolean;
 
@@ -367,12 +376,14 @@ export class CascadeSession {
     this.currentTutorText = "";
     this.speakingUntil = 0;
     this.bargeIns = 0;
+    this.textInterrupts = 0;
     this.echoDrops = 0;
     this.ttsStreams = 0;
     this.finalToAudioSamples = [];
     this.finalToTokenSamples = [];
     this.ttsFirstChunkSamples = [];
     this.textVariant = parsePocTextVariant(init.textVariant);
+    this.firstTts = parsePocFirstTts(init.firstTts);
     this.totals = emptyPocUsage();
     this.sttMeasured = false;
   }
@@ -405,10 +416,12 @@ export class CascadeSession {
         type: "ready",
         model: "cascade-poc",
         textVariant: this.textVariant,
+        firstTts: this.firstTts,
         models: {
           stt: POC_STT_MODEL,
           text: POC_TEXT_VARIANTS[this.textVariant].model,
           tts: POC_TTS_MODEL,
+          ttsFirst: pocFirstTtsModel(this.firstTts),
         },
       });
     } catch (err) {
@@ -510,7 +523,7 @@ export class CascadeSession {
     const ttsMed = Math.round(median(this.ttsFirstChunkSamples));
     const usd = pocCostUsd(u, this.clock.now(), this.textVariant).toFixed(4);
     this.log(
-      `[poc-summary] variant=${this.textVariant} textModel=${POC_TEXT_VARIANTS[this.textVariant].model} turns=${u.turns} medianFinalToToken=${ftMed}ms p90FinalToToken=${ftP90}ms medianTtsFirstChunk=${ttsMed}ms medianFinalToAudio=${med}ms p90FinalToAudio=${p90}ms bargeIns=${this.bargeIns} echoDrops=${this.echoDrops} ttsStreams=${this.ttsStreams} sttAudioSec=${u.sttAudioSec.toFixed(2)} ttsAudioSec=${u.ttsAudioSec.toFixed(2)} usd=${usd}`,
+      `[poc-summary] variant=${this.textVariant} textModel=${POC_TEXT_VARIANTS[this.textVariant].model} firstTts=${this.firstTts} ttsFirstModel=${pocFirstTtsModel(this.firstTts)} turns=${u.turns} medianFinalToToken=${ftMed}ms p90FinalToToken=${ftP90}ms medianTtsFirstChunk=${ttsMed}ms medianFinalToAudio=${med}ms p90FinalToAudio=${p90}ms bargeIns=${this.bargeIns} textInterrupts=${this.textInterrupts} echoDrops=${this.echoDrops} ttsStreams=${this.ttsStreams} sttAudioSec=${u.sttAudioSec.toFixed(2)} ttsAudioSec=${u.ttsAudioSec.toFixed(2)} ttsLiteAudioSec=${u.ttsLiteAudioSec.toFixed(2)} usd=${usd}`,
     );
   }
 
@@ -520,7 +533,12 @@ export class CascadeSession {
     this.deps.send({
       type: "poc_usage",
       usage: this.usage(),
-      counters: { echoDrops: this.echoDrops, ttsStreams: this.ttsStreams, bargeIns: this.bargeIns },
+      counters: {
+        echoDrops: this.echoDrops,
+        ttsStreams: this.ttsStreams,
+        bargeIns: this.bargeIns,
+        textInterrupts: this.textInterrupts,
+      },
     });
   }
 
@@ -536,6 +554,8 @@ export class CascadeSession {
       textOutTokens: this.totals.textOutTokens,
       ttsInTokens: this.totals.ttsInTokens,
       ttsAudioSec: this.totals.ttsAudioSec,
+      ttsLiteInTokens: this.totals.ttsLiteInTokens,
+      ttsLiteAudioSec: this.totals.ttsLiteAudioSec,
       turns: this.totals.turns,
     };
   }
@@ -862,7 +882,11 @@ export class CascadeSession {
       });
     }
     this.speakingUntil = this.clock.now();
-    this.bargeIns++;
+    if (reason === "text") {
+      this.textInterrupts++;
+    } else {
+      this.bargeIns++;
+    }
     this.deps.send({ type: "interrupted" });
     this.sendPocUsage();
     this.log(`[poc] barge_in reason=${reason}`);
@@ -946,6 +970,7 @@ export class CascadeSession {
       this.speakingUntil = Math.max(now, this.speakingUntil) + chunk.sec * 1000;
     };
 
+    const ttsFirstModel = pocFirstTtsModel(this.firstTts);
     const startSpeechStream = (
       seg: 1 | 2,
       segmentText: string,
@@ -957,6 +982,8 @@ export class CascadeSession {
       segState.transcriptSent = false;
       this.ttsStreams++;
 
+      const segModel = seg === 1 ? ttsFirstModel : POC_TTS_MODEL;
+      const isLite = seg === 1 && this.firstTts === "lite";
       const startedAt = this.clock.now();
       let firstChunkAt = -1;
       let chunks = 0;
@@ -969,6 +996,7 @@ export class CascadeSession {
           const speechStream = await this.deps.ai.streamSpeech({
             text: segmentText,
             voiceName: this.init.voiceName,
+            model: segModel,
             signal: abortController.signal,
           });
           for await (const item of speechStream) {
@@ -989,7 +1017,11 @@ export class CascadeSession {
                   : 24000;
               const sec = pcmSeconds(item.audio.byteLength, sampleRate);
               // Billed even when a barge-in drops it, so count every received chunk.
-              this.totals.ttsAudioSec += sec;
+              if (isLite) {
+                this.totals.ttsLiteAudioSec += sec;
+              } else {
+                this.totals.ttsAudioSec += sec;
+              }
               if (firstChunkAt < 0) firstChunkAt = this.clock.now();
               chunks++;
               streamAudioSec += sec;
@@ -1010,17 +1042,25 @@ export class CascadeSession {
             abortController.abort();
           }
         } finally {
-          if (reportedInTokens !== null) {
-            this.totals.ttsInTokens += reportedInTokens;
-          } else if (!failed || chunks > 0) {
-            this.totals.ttsInTokens += estimateTextTokens(segmentText);
+          const inTokens =
+            reportedInTokens !== null
+              ? reportedInTokens
+              : !failed || chunks > 0
+                ? estimateTextTokens(segmentText)
+                : 0;
+          if (inTokens > 0) {
+            if (isLite) {
+              this.totals.ttsLiteInTokens += inTokens;
+            } else {
+              this.totals.ttsInTokens += inTokens;
+            }
           }
           const firstChunkMs =
             firstChunkAt >= 0 ? Math.max(0, Math.round(firstChunkAt - startedAt)) : -1;
           if (seg === 1) ttsFirstChunkMs = firstChunkMs;
           const totalMs = Math.max(0, Math.round(this.clock.now() - startedAt));
           this.log(
-            `[poc-tts] n=${turnNum} seg=${seg} chars=${segmentText.length} firstChunkMs=${firstChunkMs} chunks=${chunks} audioSec=${streamAudioSec.toFixed(2)} totalMs=${totalMs}`,
+            `[poc-tts] n=${turnNum} seg=${seg} model=${segModel} chars=${segmentText.length} firstChunkMs=${firstChunkMs} chunks=${chunks} audioSec=${streamAudioSec.toFixed(2)} totalMs=${totalMs}`,
           );
           // A cancelled turn already reported usage at barge-in time; chunks and tokens counted
           // after that would otherwise only reach the client with the next completed turn.
@@ -1263,13 +1303,15 @@ export class CascadeSession {
         tokenToAudioMs: t2a,
         finalToAudioMs: f2a,
         ttsFirstChunkMs,
+        ttsFirstModel,
         // Running session counters so the browser can print its own [poc-summary].
         echoDrops: this.echoDrops,
         ttsStreams: this.ttsStreams,
         bargeIns: this.bargeIns,
+        textInterrupts: this.textInterrupts,
       });
       this.log(
-        `[poc-turn] n=${this.totals.turns} variant=${this.textVariant} interimToFinal=${i2f}ms finalToToken=${f2t}ms tokenToAudio=${t2a}ms ttsFirstChunk=${ttsFirstChunkMs}ms finalToAudio=${f2a}ms`,
+        `[poc-turn] n=${this.totals.turns} variant=${this.textVariant} interimToFinal=${i2f}ms finalToToken=${f2t}ms tokenToAudio=${t2a}ms ttsFirstChunk=${ttsFirstChunkMs}ms finalToAudio=${f2a}ms ttsModel=${ttsFirstModel}`,
       );
     } catch (err) {
       abortController.abort();

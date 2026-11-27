@@ -1,7 +1,7 @@
 import type { UsageDelta, UsageMonth } from "./usageService";
 import type { LiveUsageTotals } from "../providers/liveUsage";
 import type { PocTextVariant, PocUsageTotals } from "../../config/cascadePoc";
-import { pocVariantUsageDelta } from "./pocUsageFields";
+import { pocTtsLiteUsageDelta, pocVariantUsageDelta } from "./pocUsageFields";
 import { USAGE_ASSUMPTIONS } from "../../config/models";
 
 /**
@@ -244,7 +244,10 @@ export function pocCallUsageDelta(
   variant: PocTextVariant = "a"
 ): UsageDelta {
   const sec = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
-  const tokens: UsageDelta = pocVariantUsageDelta(variant, poc);
+  const tokens: UsageDelta = {
+    ...pocVariantUsageDelta(variant, poc),
+    ...pocTtsLiteUsageDelta(poc),
+  };
   if (isQa) return tokens;
   const calls = callsForDuration(sec);
   return { ...tokens, pocMinutes: sec / 60, pocCalls: calls, calls };

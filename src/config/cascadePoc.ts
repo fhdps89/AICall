@@ -1,5 +1,19 @@
 export const POC_STT_MODEL = "gemini-3.5-transcribe-live" as const;
 export const POC_TTS_MODEL = "gemini-3.8-flash-tts" as const;
+export const POC_TTS_LITE_MODEL = "gemini-3.8-flash-lite-tts" as const;
+
+/** First-segment TTS comparison: client sends only "full" or "lite"; server maps it here. */
+export type PocFirstTts = "full" | "lite";
+export const POC_DEFAULT_FIRST_TTS: PocFirstTts = "full";
+
+/** Anything other than "lite" (any case, trimmed) falls back to "full". */
+export function parsePocFirstTts(raw: unknown): PocFirstTts {
+  return typeof raw === "string" && raw.trim().toLowerCase() === "lite" ? "lite" : "full";
+}
+
+export function pocFirstTtsModel(v: PocFirstTts): typeof POC_TTS_LITE_MODEL | typeof POC_TTS_MODEL {
+  return v === "lite" ? POC_TTS_LITE_MODEL : POC_TTS_MODEL;
+}
 
 /** Reply-text A/B test (EL-18): the client sends only "a" or "b"; the server maps it here. */
 export type PocTextVariant = "a" | "b";
@@ -36,7 +50,8 @@ export const POC_WS_PATH = "/api/gemini/cascade" as const;
  * 2026-11-27: transcribe-live $3.50 audio in / $21 text out; gemini-3.8-flash $0.75 in /
  * $3.75 out incl. thinking (2027: $1.50 / $7.50); gemini-3.5-flash-lite $0.30 in / $2.50 out
  * incl. thinking (no 2027 change listed); gemini-3.8-flash-tts $0.50 text in / $9.00 audio out
- * (2027: $1.00 / $18.00).
+ * (2027: $1.00 / $18.00); gemini-3.8-flash-lite-tts $0.50 text in / $6.00 audio out
+ * (2027: $1.00 / $12.00).
  * legacy* = models of test-mode records written before the A/B split (PR #63 on main:
  * gemini-3.1-flash-lite $0.25 / $1.50, gemini-3.8-flash-lite-tts $0.50 / $6.00, 2027 $1.00 / $12.00).
  */
@@ -59,6 +74,11 @@ export const POC_RATES = {
   ttsOutAudioPer1M_2026: 9,
   ttsInPer1M_2027: 1,
   ttsOutAudioPer1M_2027: 18,
+  /** gemini-3.8-flash-lite-tts (ai.google.dev pricing, 2026-11-27). */
+  ttsLiteInPer1M_2026: 0.5,
+  ttsLiteOutAudioPer1M_2026: 6,
+  ttsLiteInPer1M_2027: 1,
+  ttsLiteOutAudioPer1M_2027: 12,
 } as const;
 
 export const POC_AUDIO_TOKENS_PER_SEC = 25;
@@ -74,6 +94,8 @@ export interface PocUsageTotals {
   textOutTokens: number;
   ttsInTokens: number;
   ttsAudioSec: number;
+  ttsLiteInTokens: number;
+  ttsLiteAudioSec: number;
   turns: number;
 }
 
@@ -92,6 +114,8 @@ export function emptyPocUsage(): PocUsageTotals {
     textOutTokens: 0,
     ttsInTokens: 0,
     ttsAudioSec: 0,
+    ttsLiteInTokens: 0,
+    ttsLiteAudioSec: 0,
     turns: 0,
   };
 }
@@ -142,9 +166,19 @@ export function pocTtsRates(
   };
 }
 
+/** 2027 TTS lite rates apply from 2027-01-01 00:00 KST (= 2026-12-31T15:00:00Z). Source: ai.google.dev pricing, 2026-11-27. */
+export function pocTtsLiteRates(
+  nowMs: number,
+): { inPer1M: number; outAudioPer1M: number } {
+  return is2027(nowMs)
+    ? { inPer1M: POC_RATES.ttsLiteInPer1M_2027, outAudioPer1M: POC_RATES.ttsLiteOutAudioPer1M_2027 }
+    : { inPer1M: POC_RATES.ttsLiteInPer1M_2026, outAudioPer1M: POC_RATES.ttsLiteOutAudioPer1M_2026 };
+}
+
 /**
  * [cost] sttAudioSec*25*3.5/1M + sttOutTokens*21/1M + textIn*textInRate/1M + textOut*textOutRate/1M
- *        + ttsIn*ttsInRate/1M + ttsAudioSec*25*ttsOutRate/1M (text/TTS rates by date, see above).
+ *        + ttsIn*ttsInRate/1M + ttsAudioSec*25*ttsOutRate/1M
+ *        + ttsLiteIn*ttsLiteInRate/1M + ttsLiteAudioSec*25*ttsLiteOutRate/1M (text/TTS rates by date, see above).
  * Non-finite/negative inputs count as 0.
  */
 export function pocCostUsd(
@@ -156,6 +190,7 @@ export function pocCostUsd(
   const ts = Number.isFinite(nowMs) ? nowMs : Date.now();
   const text = pocTextRates(ts, pricing);
   const tts = pocTtsRates(ts, pricing);
+  const ttsLite = pocTtsLiteRates(ts);
 
   const sttAudioSec = nonNeg(u.sttAudioSec);
   const sttOutTokens = nonNeg(u.sttOutTokens);
@@ -163,6 +198,8 @@ export function pocCostUsd(
   const textOutTokens = nonNeg(u.textOutTokens);
   const ttsInTokens = nonNeg(u.ttsInTokens);
   const ttsAudioSec = nonNeg(u.ttsAudioSec);
+  const ttsLiteInTokens = nonNeg(u.ttsLiteInTokens);
+  const ttsLiteAudioSec = nonNeg(u.ttsLiteAudioSec);
 
   return (
     (sttAudioSec * POC_AUDIO_TOKENS_PER_SEC * POC_RATES.sttInAudioPer1M +
@@ -170,7 +207,9 @@ export function pocCostUsd(
       textInTokens * text.inPer1M +
       textOutTokens * text.outPer1M +
       ttsInTokens * tts.inPer1M +
-      ttsAudioSec * POC_AUDIO_TOKENS_PER_SEC * tts.outAudioPer1M) /
+      ttsAudioSec * POC_AUDIO_TOKENS_PER_SEC * tts.outAudioPer1M +
+      ttsLiteInTokens * ttsLite.inPer1M +
+      ttsLiteAudioSec * POC_AUDIO_TOKENS_PER_SEC * ttsLite.outAudioPer1M) /
     1_000_000
   );
 }
@@ -188,6 +227,8 @@ export function sanitizePocUsage(raw: unknown): PocUsageTotals {
     textOutTokens: nonNeg(r.textOutTokens),
     ttsInTokens: nonNeg(r.ttsInTokens),
     ttsAudioSec: nonNeg(r.ttsAudioSec),
+    ttsLiteInTokens: nonNeg(r.ttsLiteInTokens),
+    ttsLiteAudioSec: nonNeg(r.ttsLiteAudioSec),
     turns: Math.floor(nonNeg(r.turns)),
   };
 }

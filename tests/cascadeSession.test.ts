@@ -70,7 +70,7 @@ function makeFakeAi(
 ) {
   const stt: { cb: SttCb; sent: any[]; closed: boolean }[] = [];
   const textCalls: any[] = [];
-  const ttsCalls: { text: string; voiceName: string; signal: AbortSignal }[] = [];
+  const ttsCalls: { text: string; voiceName: string; model?: string; signal: AbortSignal }[] = [];
   const ttsRelease: (() => void)[] = [];
   const ai: CascadeAi = {
     connectStt(cb) {
@@ -105,7 +105,7 @@ function makeFakeAi(
       };
     },
     async streamSpeech(req) {
-      ttsCalls.push({ text: req.text, voiceName: req.voiceName, signal: req.signal });
+      ttsCalls.push({ text: req.text, voiceName: req.voiceName, model: req.model, signal: req.signal });
       const chunkCount = opts.ttsChunks ?? 2;
       const chunkBytes = opts.ttsBytes ?? 24000; // 0.5 s of 24 kHz 16-bit PCM per chunk
       const usage = opts.ttsUsage === undefined ? { inputTokens: 5 } : opts.ttsUsage;
@@ -133,13 +133,18 @@ function makeFakeAi(
   return { ai, stt, textCalls, ttsCalls, ttsRelease };
 }
 
-function makeSession(fake: ReturnType<typeof makeFakeAi>, history: unknown = [], textVariant?: string) {
+function makeSession(
+  fake: ReturnType<typeof makeFakeAi>,
+  history: unknown = [],
+  textVariant?: string,
+  firstTts?: unknown,
+) {
   const clock = new FakeClock();
   const sent: any[] = [];
   const logs: string[] = [];
   const session = new CascadeSession(
     { ai: fake.ai, send: (m) => sent.push(m), clock, log: (l) => logs.push(l) },
-    { systemInstruction: 'You are a tutor.', voiceName: 'Kore', history, textVariant }
+    { systemInstruction: 'You are a tutor.', voiceName: 'Kore', history, textVariant, firstTts }
   );
   return { session, clock, sent, logs };
 }
@@ -151,7 +156,18 @@ const interim = (text: string) => ({ serverContent: { interimInputTranscription:
 test('start: ready after STT connects; fallback_required when STT fails or times out', async () => {
   const ok = makeSession(makeFakeAi());
   await ok.session.start();
-  assert.deepEqual(ok.sent[0], { type: 'ready', model: 'cascade-poc', textVariant: 'a', models: { stt: 'gemini-3.5-transcribe-live', text: 'gemini-3.8-flash', tts: 'gemini-3.8-flash-tts' } });
+  assert.deepEqual(ok.sent[0], {
+    type: 'ready',
+    model: 'cascade-poc',
+    textVariant: 'a',
+    firstTts: 'full',
+    models: {
+      stt: 'gemini-3.5-transcribe-live',
+      text: 'gemini-3.8-flash',
+      tts: 'gemini-3.8-flash-tts',
+      ttsFirst: 'gemini-3.8-flash-tts',
+    },
+  });
 
   const bad = makeSession(makeFakeAi({ failStt: true }));
   await bad.session.start();
@@ -206,8 +222,8 @@ test('voice turn: waits 0.4 s after the final segment, then text → streamed au
   assert.equal(usage.textOutTokens, 12);
   assert.equal(usage.ttsInTokens, 5);
   assert.equal(usage.ttsAudioSec, 1);
-  assert.ok(logs.some((l) => /^\[poc-tts\] n=1 seg=1 chars=31 firstChunkMs=\d+ chunks=2 audioSec=1\.00 totalMs=\d+$/.test(l)));
-  assert.ok(logs.some((l) => /^\[poc-turn\] n=1 variant=a interimToFinal=\d+ms finalToToken=\d+ms tokenToAudio=\d+ms ttsFirstChunk=\d+ms finalToAudio=\d+ms$/.test(l)));
+  assert.ok(logs.some((l) => /^\[poc-tts\] n=1 seg=1 model=gemini-3\.8-flash-tts chars=31 firstChunkMs=\d+ chunks=2 audioSec=1\.00 totalMs=\d+$/.test(l)));
+  assert.ok(logs.some((l) => /^\[poc-turn\] n=1 variant=a interimToFinal=\d+ms finalToToken=\d+ms tokenToAudio=\d+ms ttsFirstChunk=\d+ms finalToAudio=\d+ms ttsModel=gemini-3\.8-flash-tts$/.test(l)));
 });
 
 test('barge-in: 2 non-echo words while the tutor speaks stop it and truncate history', async () => {
@@ -316,7 +332,7 @@ test('turn errors keep the session alive and summary is logged once on close', a
   session.close();
   session.close();
   assert.equal(logs.filter((l) => l.startsWith('[poc-summary]')).length, 1);
-  assert.match(logs.find((l) => l.startsWith('[poc-summary]'))!, /^\[poc-summary\] variant=a textModel=gemini-3\.8-flash turns=0 medianFinalToToken=0ms p90FinalToToken=0ms medianTtsFirstChunk=0ms medianFinalToAudio=0ms p90FinalToAudio=0ms bargeIns=0 echoDrops=0 ttsStreams=0 sttAudioSec=0\.00 ttsAudioSec=0\.00 usd=/);
+  assert.match(logs.find((l) => l.startsWith('[poc-summary]'))!, /^\[poc-summary\] variant=a textModel=gemini-3\.8-flash firstTts=full ttsFirstModel=gemini-3\.8-flash-tts turns=0 medianFinalToToken=0ms p90FinalToToken=0ms medianTtsFirstChunk=0ms medianFinalToAudio=0ms p90FinalToAudio=0ms bargeIns=0 textInterrupts=0 echoDrops=0 ttsStreams=0 sttAudioSec=0\.00 ttsAudioSec=0\.00 ttsLiteAudioSec=0\.00 usd=/);
 });
 
 test('reconnect history is sanitized and used as context', async () => {
@@ -1117,7 +1133,7 @@ test('cascade socket: textVariant "b" maps to gemini-3.5-flash-lite (minimal); a
     assert.equal(models.thinkingLevel, wantThinking);
     assert.equal(out[0].textVariant, wantVariant);
     assert.equal(out[0].models.text, wantModel);
-    assert.ok(logs.includes(`[poc] stage=init_received variant=${wantVariant} textModel=${wantModel}`));
+    assert.ok(logs.includes(`[poc] stage=init_received variant=${wantVariant} textModel=${wantModel} firstTts=full ttsFirstModel=gemini-3.8-flash-tts`));
     handlers.close();
   }
 });
@@ -1163,7 +1179,7 @@ test('[poc-summary] has variant, textModel, finalToToken median/p90 and TTS firs
   assert.ok(logs.some((l) => /^\[poc-turn\] n=1 variant=b .*ttsFirstChunk=\d+ms/.test(l)));
   session.close();
   const summary = logs.find((l) => l.startsWith('[poc-summary]'))!;
-  assert.match(summary, /^\[poc-summary\] variant=b textModel=gemini-3\.5-flash-lite turns=3 medianFinalToToken=\d+ms p90FinalToToken=\d+ms medianTtsFirstChunk=\d+ms medianFinalToAudio=\d+ms p90FinalToAudio=\d+ms bargeIns=0 echoDrops=0 ttsStreams=3 /);
+  assert.match(summary, /^\[poc-summary\] variant=b textModel=gemini-3\.5-flash-lite firstTts=full ttsFirstModel=gemini-3\.8-flash-tts turns=3 medianFinalToToken=\d+ms p90FinalToToken=\d+ms medianTtsFirstChunk=\d+ms medianFinalToAudio=\d+ms p90FinalToAudio=\d+ms bargeIns=0 textInterrupts=0 echoDrops=0 ttsStreams=3 /);
 });
 
 test('[poc-summary] numbers: finalToToken median/p90 and TTS first-chunk median from per-turn delays', async () => {
@@ -1216,5 +1232,182 @@ test('[poc-summary] numbers: finalToToken median/p90 and TTS first-chunk median 
   assert.deepEqual(turns.map((m) => m.ttsFirstChunkMs), [100, 500, 300]);
   assert.match(summary, / medianTtsFirstChunk=300ms /);
   const lastUsage = sent.filter((m) => m.type === 'poc_usage').at(-1);
-  assert.deepEqual(lastUsage.counters, { echoDrops: 0, ttsStreams: 3, bargeIns: 0 }, 'poc_usage carries the running counters');
+  assert.deepEqual(lastUsage.counters, { echoDrops: 0, ttsStreams: 3, bargeIns: 0, textInterrupts: 0 }, 'poc_usage carries the running counters');
+});
+
+test('firstTts lite: seg 1 uses flash-lite-tts and seg 2 uses flash-tts with same voiceName; usage splits into ttsLite* vs tts*', async () => {
+  const firstLong =
+    'I really enjoyed hearing about your weekend trip to the mountains with your whole family.';
+  assert.ok(firstLong.length >= 80);
+  const reply = `${firstLong} The weather sounded lovely. Did you take many photos?`;
+  const fake = makeFakeAi({ reply, ttsChunks: 2, ttsBytes: 24000, ttsUsage: { inputTokens: 8 } });
+  const { session, sent, logs, clock } = makeSession(fake, [], 'a', 'lite');
+  await session.start();
+  assert.equal(sent[0].firstTts, 'lite');
+  assert.equal(sent[0].models.ttsFirst, 'gemini-3.8-flash-lite-tts');
+
+  // Turn 1 (greeting / kickoff path)
+  session.handleClientMessage({ type: 'text_prompt', text: 'start' });
+  await flush();
+  clock.advance(60_000);
+  // Turn 2
+  session.handleClientMessage({ type: 'text_prompt', text: 'next' });
+  await flush();
+
+  assert.equal(fake.ttsCalls.length, 4);
+  assert.equal(fake.ttsCalls[0].model, 'gemini-3.8-flash-lite-tts');
+  assert.equal(fake.ttsCalls[1].model, 'gemini-3.8-flash-tts');
+  assert.equal(fake.ttsCalls[2].model, 'gemini-3.8-flash-lite-tts');
+  assert.equal(fake.ttsCalls[3].model, 'gemini-3.8-flash-tts');
+  assert.ok(fake.ttsCalls.every((c) => c.voiceName === 'Kore'));
+
+  const u = session.usage();
+  assert.equal(u.ttsLiteInTokens, 16, '2 turns × seg1 (8 tokens)');
+  assert.equal(u.ttsLiteAudioSec, 2, '2 turns × seg1 (1.0s)');
+  assert.equal(u.ttsInTokens, 16, '2 turns × seg2 (8 tokens)');
+  assert.equal(u.ttsAudioSec, 2, '2 turns × seg2 (1.0s)');
+
+  assert.ok(logs.some((l) => /^\[poc-tts\] n=1 seg=1 model=gemini-3\.8-flash-lite-tts chars=/.test(l)));
+  assert.ok(logs.some((l) => /^\[poc-tts\] n=1 seg=2 model=gemini-3\.8-flash-tts chars=/.test(l)));
+  assert.ok(logs.some((l) => /^\[poc-turn\] n=1 variant=a .* ttsModel=gemini-3\.8-flash-lite-tts$/.test(l)));
+  const turnMsg = sent.find((m) => m.type === 'poc_turn');
+  assert.equal(turnMsg.ttsFirstModel, 'gemini-3.8-flash-lite-tts');
+
+  session.close();
+  const summary = logs.find((l) => l.startsWith('[poc-summary]'))!;
+  assert.match(
+    summary,
+    /^\[poc-summary\] variant=a textModel=gemini-3\.8-flash firstTts=lite ttsFirstModel=gemini-3\.8-flash-lite-tts turns=2 .* bargeIns=0 textInterrupts=0 .* ttsAudioSec=2\.00 ttsLiteAudioSec=2\.00 usd=/,
+  );
+});
+
+test('firstTts full / omitted / raw model ID: all segments use gemini-3.8-flash-tts and ttsLite* stays 0', async () => {
+  const firstLong =
+    'I really enjoyed hearing about your weekend trip to the mountains with your whole family.';
+  const reply = `${firstLong} The weather sounded lovely. Did you take many photos?`;
+  for (const raw of ['full', undefined, 'gemini-3.8-flash-lite-tts']) {
+    const fake = makeFakeAi({ reply });
+    const { session } = makeSession(fake, [], 'a', raw);
+    await session.start();
+    session.handleClientMessage({ type: 'text_prompt', text: 'hi' });
+    await flush();
+    assert.equal(fake.ttsCalls.length, 2, String(raw));
+    assert.ok(
+      fake.ttsCalls.every((c) => c.model === 'gemini-3.8-flash-tts'),
+      `expected all flash-tts for ${String(raw)}`,
+    );
+    const u = session.usage();
+    assert.equal(u.ttsLiteInTokens, 0);
+    assert.equal(u.ttsLiteAudioSec, 0);
+    assert.ok(u.ttsInTokens > 0 && u.ttsAudioSec > 0);
+  }
+});
+
+test('text interrupt vs voice barge-in: text input increments textInterrupts (bargeIns=0); voice final increments bargeIns', async () => {
+  const fake = makeFakeAi({ ttsBytes: 240000, ttsChunks: 2, reply: 'Hello there friend.' }); // 10s audio
+  const { session, sent, logs, clock } = makeSession(fake);
+  await session.start();
+
+  // Turn 1 starts speaking
+  session.handleClientMessage({ type: 'text_prompt', text: 'first' });
+  await flush();
+  clock.advance(1000); // tutor still speaking (speakingUntil)
+
+  // Typed text interrupts tutor -> textInterrupts=1, bargeIns=0
+  session.handleClientMessage({ type: 'text_prompt', text: 'second' });
+  await flush();
+  const usageAfterText = sent.filter((m) => m.type === 'poc_usage').at(-1);
+  assert.equal(usageAfterText.counters.textInterrupts, 1);
+  assert.equal(usageAfterText.counters.bargeIns, 0);
+  const turnAfterText = sent.filter((m) => m.type === 'poc_turn').at(-1);
+  assert.equal(turnAfterText.textInterrupts, 1);
+  assert.equal(turnAfterText.bargeIns, 0);
+
+  // Voice final barge-in while tutor is speaking -> bargeIns=1, textInterrupts still 1
+  clock.advance(1000);
+  fake.stt[0].cb.onmessage(finalSeg('please stop talking now'));
+  await flush();
+  session.close();
+  const summary = logs.find((l) => l.startsWith('[poc-summary]'))!;
+  assert.ok(summary.includes('bargeIns=1 textInterrupts=1'), `expected bargeIns=1 textInterrupts=1 in ${summary}`);
+});
+
+test('cascade socket: firstTts init mapping ("lite" only; raw model ID falls back to "full")', async () => {
+  for (const [raw, wantFirstTts, wantModel] of [
+    ['lite', 'lite', 'gemini-3.8-flash-lite-tts'],
+    [' LITE ', 'lite', 'gemini-3.8-flash-lite-tts'],
+    ['full', 'full', 'gemini-3.8-flash-tts'],
+    [undefined, 'full', 'gemini-3.8-flash-tts'],
+    ['gemini-3.8-flash-lite-tts', 'full', 'gemini-3.8-flash-tts'],
+  ] as const) {
+    const handlers: Record<string, (x?: any) => void> = {};
+    const out: any[] = [];
+    const logs: string[] = [];
+    const ws = { readyState: 1, send: (d: string) => out.push(JSON.parse(d)), close() {}, on: (ev: string, fn: any) => (handlers[ev] = fn) };
+    const fake = makeFakeAi();
+    let models: any = null;
+    handleCascadeConnection(ws as any, {
+      getGenAI: () => ({}),
+      makeAi: (_g, m) => ((models = m), fake.ai),
+      log: (l) => logs.push(l),
+    });
+    handlers.message(JSON.stringify({ type: 'init', systemInstruction: 'x', voiceName: 'Kore', firstTts: raw }));
+    await flush();
+    assert.equal(models.ttsFirst, wantModel, String(raw));
+    assert.equal(out[0].firstTts, wantFirstTts);
+    assert.equal(out[0].models.ttsFirst, wantModel);
+    assert.ok(
+      logs.includes(
+        `[poc] stage=init_received variant=a textModel=gemini-3.8-flash firstTts=${wantFirstTts} ttsFirstModel=${wantModel}`,
+      ),
+    );
+    handlers.close();
+  }
+});
+
+test('Gemini adapter: streamSpeech uses explicit model when provided, else models.tts', async () => {
+  const calls: any[] = [];
+  const ttsGenai = {
+    interactions: {
+      create: async (req: any) => {
+        calls.push(req);
+        return (async function* () {
+          yield { event_type: 'step.delta', delta: { type: 'audio', data: Buffer.alloc(4).toString('base64') } };
+        })();
+      },
+    },
+  };
+  const ai = createGeminiCascadeAi({}, { stt: 's', text: 't', tts: 'default-tts' }, ttsGenai);
+  for await (const _ of await ai.streamSpeech({
+    text: 'Seg 1.',
+    voiceName: 'Kore',
+    model: 'gemini-3.8-flash-lite-tts',
+    signal: new AbortController().signal,
+  })) {
+    // drain
+  }
+  for await (const _ of await ai.streamSpeech({
+    text: 'Seg 2.',
+    voiceName: 'Kore',
+    signal: new AbortController().signal,
+  })) {
+    // drain
+  }
+  assert.equal(calls[0].model, 'gemini-3.8-flash-lite-tts');
+  assert.equal(calls[1].model, 'default-tts');
+});
+
+test('button (control_command) during tutor speech counts as textInterrupts, not bargeIns', async () => {
+  const fake = makeFakeAi({ ttsBytes: 240000, ttsChunks: 2, reply: 'Hello there friend.' }); // 10s audio
+  const { session, logs, clock } = makeSession(fake);
+  await session.start();
+  session.handleClientMessage({ type: 'text_prompt', text: 'first' });
+  await flush();
+  clock.advance(1000); // tutor still speaking
+  session.handleClientMessage({ type: 'control_command', command: 'Done' });
+  await flush();
+  clock.advance(60_000);
+  session.close();
+  const summary = logs.find((l) => l.startsWith('[poc-summary]'))!;
+  assert.ok(summary.includes('bargeIns=0 textInterrupts=1'), summary);
 });

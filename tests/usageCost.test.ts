@@ -42,6 +42,7 @@ test('priceUsage: empty doc returns 0 across all fields with calls=0 and no NaN'
     poc: 0,
     pocA: 0,
     pocB: 0,
+    pocTtsLite: 0,
     total: 0,
   });
 
@@ -437,6 +438,7 @@ test('USAGE_COST_COMPONENTS sum equals total for a sample month with all compone
     pocTtsAudioSec: 40,
     pocASttAudioSec: 60,
     pocBTtsAudioSec: 30,
+    pocTtsLiteAudioSec: 10,
     estCostUsd: 0,
   };
   const breakdown = priceUsage(sampleMonth);

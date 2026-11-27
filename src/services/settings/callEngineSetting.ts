@@ -2,8 +2,13 @@
  * Settings → 개발자 메뉴 「시험 통화 엔진: 구글 스트리밍(PoC)」 switch (default OFF).
  * Stored per browser only. Any value other than exactly "cascade_poc" means the normal engine.
  */
-import { POC_DEFAULT_TEXT_VARIANT, parsePocTextVariant } from "../../config/cascadePoc";
-import type { PocTextVariant } from "../../config/cascadePoc";
+import {
+  POC_DEFAULT_FIRST_TTS,
+  POC_DEFAULT_TEXT_VARIANT,
+  parsePocFirstTts,
+  parsePocTextVariant,
+} from "../../config/cascadePoc";
+import type { PocFirstTts, PocTextVariant } from "../../config/cascadePoc";
 
 export const CALL_ENGINE_KEY = "onecall_call_engine";
 export const CALL_ENGINE_POC = "cascade_poc";
@@ -115,4 +120,28 @@ export function resolvePocTextVariant(
     // ignore
   }
   return { variant: POC_DEFAULT_TEXT_VARIANT, source: "default" };
+}
+
+/** URL-only override: null when there is no pocTts param; an invalid value means "full". */
+export function parsePocTtsParam(search: string | null | undefined): PocFirstTts | null {
+  const raw = String(search || "");
+  const params = new URLSearchParams(raw.startsWith("?") ? raw.slice(1) : raw);
+  if (!params.has("pocTts")) return null;
+  return parsePocFirstTts(params.get("pocTts"));
+}
+
+/** URL param only (never saved); absent or invalid = "full". */
+export function resolvePocFirstTts(search?: string | null): PocFirstTts {
+  let s = search;
+  if (s === undefined) {
+    try {
+      s =
+        typeof globalThis !== "undefined" && (globalThis as any).location
+          ? String((globalThis as any).location.search || "")
+          : "";
+    } catch {
+      s = "";
+    }
+  }
+  return parsePocTtsParam(s) ?? POC_DEFAULT_FIRST_TTS;
 }
