@@ -203,7 +203,7 @@ test('8) synthesizeGemini retry policy: 404, QUOTA_DAILY, and 429 (QUOTA) stop a
       'Coach: hi',
       false,
       undefined,
-      { sleepFn: async (ms) => { sleeps404.push(ms); }, now: () => 1_000_000 }
+      { sleepFn: async (ms) => { sleeps404.push(ms); }, now: () => 1_000_000, flex: false }
     ),
     (err: any) => err?.attempts === 1
   );
@@ -226,7 +226,7 @@ test('8) synthesizeGemini retry policy: 404, QUOTA_DAILY, and 429 (QUOTA) stop a
       'Coach: hi',
       false,
       undefined,
-      { sleepFn: async (ms) => { sleepsDaily.push(ms); }, now: () => 1_000_000 }
+      { sleepFn: async (ms) => { sleepsDaily.push(ms); }, now: () => 1_000_000, flex: false }
     ),
     (err: any) => err?.attempts === 1
   );
@@ -251,7 +251,7 @@ test('8) synthesizeGemini retry policy: 404, QUOTA_DAILY, and 429 (QUOTA) stop a
       'Coach: hi',
       false,
       undefined,
-      { sleepFn: async (ms) => { sleeps429.push(ms); }, now: () => 1_000_000 }
+      { sleepFn: async (ms) => { sleeps429.push(ms); }, now: () => 1_000_000, flex: false }
     ),
     (err: any) => err?.attempts === 1
   );
@@ -274,7 +274,7 @@ test('8) synthesizeGemini retry policy: 404, QUOTA_DAILY, and 429 (QUOTA) stop a
       'Coach: hi',
       false,
       undefined,
-      { sleepFn: async (ms) => { sleepsGen.push(ms); }, now: () => 1_000_000 }
+      { sleepFn: async (ms) => { sleepsGen.push(ms); }, now: () => 1_000_000, flex: false }
     ),
     (err: any) => err?.attempts === 3
   );
@@ -598,7 +598,7 @@ test('12) synthesizeGemini 429 (QUOTA) always fails on 1st attempt with 0 sleep 
         'Coach: hi',
         false,
         undefined,
-        { sleepFn: async (ms) => { sleeps.push(ms); }, now: () => 1_000_000 }
+        { sleepFn: async (ms) => { sleeps.push(ms); }, now: () => 1_000_000, flex: false }
       ),
       (err: any) => err?.attempts === 1
     );
@@ -648,7 +648,7 @@ test('13) synthesizeGemini aborts per-attempt generateContent abortSignal on ste
     'Coach: timeout test',
     false,
     undefined,
-    { stepTimeoutMs: 25, sleepFn: async () => {} }
+    { stepTimeoutMs: 25, sleepFn: async () => {}, flex: false }
   );
   assert.equal(pcm.rate, 24000);
   assert.equal(capturedSignals.length, 2);
@@ -1087,6 +1087,7 @@ test('18) synthesizeGemini stepTimeoutMs AbortError normalizes to TimeoutError -
         sleepFn: async (ms) => {
           sleeps.push(ms);
         },
+        flex: false,
       }
     );
     assert.fail('expected synthesizeGemini to throw');
@@ -1129,6 +1130,7 @@ test('19) synthesizeGemini real GoogleGenAI SDK against unresponsive local serve
       await synthesizeGemini(sdkAi, 'Coach: hi', false, undefined, {
         stepTimeoutMs: 200,
         sleepFn: async () => {},
+        flex: false,
       });
       assert.fail('expected synthesizeGemini to throw');
     } catch (err) {
@@ -1169,7 +1171,7 @@ test('20) synthesizeGemini caller abort mid-call keeps superseded behavior (not 
       'Coach: hi',
       false,
       ac.signal,
-      { stepTimeoutMs: 5000, sleepFn: async () => {} }
+      { stepTimeoutMs: 5000, sleepFn: async () => {}, flex: false }
     );
     assert.fail('expected synthesizeGemini to throw');
   } catch (err) {
@@ -1198,7 +1200,7 @@ test('21) synthesizeGemini non-timeout generic error still classifies UNKNOWN wi
       'Coach: hi',
       false,
       undefined,
-      { stepTimeoutMs: 5000, sleepFn: async () => {} }
+      { stepTimeoutMs: 5000, sleepFn: async () => {}, flex: false }
     );
     assert.fail('expected synthesizeGemini to throw');
   } catch (err) {
@@ -1241,6 +1243,7 @@ test('22) synthesizeGemini 429 RESOURCE_EXHAUSTED after timeoutSig aborts preser
         sleepFn: async (ms) => {
           sleeps.push(ms);
         },
+        flex: false,
       }
     );
     assert.fail('expected synthesizeGemini to throw');

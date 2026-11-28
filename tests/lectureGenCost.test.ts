@@ -752,7 +752,7 @@ test('5) 429 & AUTH fail immediately with 0 retries, set 30m/6h cooldown in stat
         'Coach: hello',
         false,
         undefined,
-        { sleepFn: async (ms) => { sleeps.push(ms); } }
+        { sleepFn: async (ms) => { sleeps.push(ms); }, flex: false }
       )
     );
     assert.equal(genCalls, 1);

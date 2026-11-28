@@ -12,6 +12,8 @@ import {
 } from "../../services/providers/cascadeFallbackProvider";
 import { pocCostUsd, POC_TEXT_VARIANTS } from "../../config/cascadePoc";
 import { infoPoc } from "../../services/perf/pocQaLog";
+import { infoLiveUsage } from "../../services/perf/liveUsageQaLog";
+import { LIVE_COMPRESSION_TARGET_TOKENS, LIVE_COMPRESSION_TRIGGER_TOKENS } from "../../config/liveCompression";
 import { formatLiveUsageLog } from "../../services/providers/liveUsage";
 import React, { useState, useEffect, useRef } from "react";
 import { useDevMode } from "../../data/devMode";
@@ -413,16 +415,23 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
       );
     } else if (liveUsage && liveUsage.turns > 0) {
       const actualUsd = liveMeasuredCostUsd(liveUsage);
-      console.info(
-        formatLiveUsageLog(liveUsage, {
-          durationSec: callDuration,
-          actualUsd,
-          estUsd,
-          qa: qaCallRef.current ? 1 : 0,
-        })
-      );
+      const line = formatLiveUsageLog(liveUsage, {
+        durationSec: callDuration,
+        actualUsd,
+        estUsd,
+        qa: qaCallRef.current ? 1 : 0,
+        peakPrompt: providerRef.current.getLivePeakPromptTokens?.() ?? 0,
+        ctxTrigger: LIVE_COMPRESSION_TRIGGER_TOKENS,
+        ctxTarget: LIVE_COMPRESSION_TARGET_TOKENS,
+        path: stats.connectionPath,
+        // on = every connection this call sent contextWindowCompression; off = the relay fell back to the plain config.
+        ctx: providerRef.current.getLiveContextCompression?.() ?? "unknown",
+      });
+      infoLiveUsage(line);
     } else {
-      console.info("[live-usage] turns=0 (no usageMetadata received)");
+      infoLiveUsage(
+        `[live-usage] turns=0 (no usageMetadata received) path=${stats.connectionPath} ctx=${providerRef.current.getLiveContextCompression?.() ?? "unknown"}`
+      );
     }
 
     if (userId) {

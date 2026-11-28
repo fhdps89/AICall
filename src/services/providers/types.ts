@@ -47,6 +47,10 @@ export interface LiveProvider {
   getConnectionStats(): { connectionPath: "direct" | "proxy"; directFailCount: number };
   getLiveUsage?(): LiveUsageTotals;
   finalizeLiveUsage?(): LiveUsageTotals;
+  /** Largest single-turn promptTokenCount this call (Live engine only). */
+  getLivePeakPromptTokens?(): number;
+  /** Whether this call's Live connection(s) used contextWindowCompression. */
+  getLiveContextCompression?(): "on" | "off" | "unknown";
   disconnect(): Promise<void>;
 }
 

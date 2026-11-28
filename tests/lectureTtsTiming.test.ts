@@ -78,7 +78,7 @@ test('(a) synthesizeGemini records attemptMs deltas via opts.now, logs safe atte
         'Coach: hi',
         false,
         undefined,
-        { sleepFn: async () => {}, now: fakeNow }
+        { sleepFn: async () => {}, now: fakeNow, flex: false }
       );
       assert.fail('expected synthesizeGemini to throw');
     } catch (err) {
@@ -140,6 +140,7 @@ test('(b) synthesizeGemini real GoogleGenAI SDK body stall classifies STEP_TIMEO
       await synthesizeGemini(sdkAi, 'Coach: body stall', false, undefined, {
         stepTimeoutMs: 200,
         sleepFn: async () => {},
+        flex: false,
       });
       assert.fail('expected synthesizeGemini to throw');
     } catch (err) {
@@ -368,7 +369,7 @@ test('(e) synthesizeGemini generic error keeps 3 attempts and [1500, 3000] sleep
       'Coach: hi',
       false,
       undefined,
-      { sleepFn: async (ms) => { sleeps.push(ms); }, now: () => 1_000_000 }
+      { sleepFn: async (ms) => { sleeps.push(ms); }, now: () => 1_000_000, flex: false }
     ),
     (err: any) => err?.attempts === 3
   );
@@ -408,6 +409,7 @@ test('(f) superseded caller abort produces no TTS attempt failed console.warn', 
           sleepFn: async () => {},
           now: () => (clock += 250),
           loopDelayMonitor: () => ({ stop: () => 5 }),
+          flex: false,
         }
       );
       assert.fail('expected synthesizeGemini to throw');
@@ -447,6 +449,7 @@ test('(g) injected loopDelayMonitor values flow into error.loopDelayMaxMs (max a
           sleepFn: async () => {},
           now: () => 10_000,
           loopDelayMonitor: () => ({ stop: () => samples[monitorIdx++] ?? 0 }),
+          flex: false,
         }
       );
       assert.fail('expected synthesizeGemini to throw');

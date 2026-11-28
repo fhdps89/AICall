@@ -329,3 +329,27 @@ test('accumulator does not double count a repeated snapshot of the same request 
   assert.equal(t.inAudio, 2800);
   assert.equal(t.outAudio, 100);
 });
+
+test('peakPromptTokens tracks the largest single-turn promptTokenCount and resets', () => {
+  const acc = createLiveUsageAccumulator();
+  assert.equal(acc.peakPromptTokens(), 0);
+  acc.observe({ promptTokenCount: 5000 });
+  acc.commitTurn();
+  acc.observe({ promptTokenCount: 11800 });
+  acc.commitTurn();
+  acc.observe({ promptTokenCount: 6200 }); // after a compression the context drops back
+  acc.commitTurn();
+  acc.observe({ promptTokenCount: 'x' });
+  acc.observe(null);
+  assert.equal(acc.peakPromptTokens(), 11800);
+  assert.equal(acc.finalize().promptTokens, 5000 + 11800 + 6200);
+  acc.reset();
+  assert.equal(acc.peakPromptTokens(), 0);
+});
+
+test('formatLiveUsageLog carries peakPrompt/ctxTrigger/ctxTarget extras', () => {
+  const acc = createLiveUsageAccumulator();
+  acc.observe({ promptTokenCount: 100, responseTokenCount: 10 });
+  const line = formatLiveUsageLog(acc.finalize(), { peakPrompt: 100, ctxTrigger: 12000, ctxTarget: 6000 });
+  assert.match(line, /peakPrompt=100 ctxTrigger=12000 ctxTarget=6000$/);
+});

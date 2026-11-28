@@ -85,7 +85,7 @@ test('direct setup is byte-identical to SDK live.connect setup (handle 없음/�
         sessionResumption: { handle: resumeHandle || undefined },
         inputAudioTranscription: {},
         outputAudioTranscription: {},
-        contextWindowCompression: { slidingWindow: {} },
+        contextWindowCompression: { triggerTokens: '12000', slidingWindow: { targetTokens: '6000' } },
       },
       callbacks: {
         onmessage: () => {},

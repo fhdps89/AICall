@@ -146,7 +146,8 @@ test('priceUsage: additive across components when Sq is present', () => {
 
 test('priceUsage: mixed legacy + new month uses max(liveMinutesSq, liveMinutes^2/calls) lower bound', () => {
   // 2 calls totaling 10 min: one legacy 8m (Sq not stored) + one new 2m (Sq=4).
-  // liveMinutesSq=4 < 10^2/2=50 -> lower bound 50 applies.
+  // liveMinutesSq=4 < lower bound 2 × liveContextMinutesSq(5) = 2 × (2·4·5 − 4²) = 48 (12k/6k cap = 4 min) -> 48 applies.
+  // The lower bound uses the same window as new recordings, so a legacy-only month is now estimated lower than before.
   const mixed = priceUsage({
     liveMinutes: 10,
     liveMinutesSq: 4,
@@ -158,7 +159,7 @@ test('priceUsage: mixed legacy + new month uses max(liveMinutesSq, liveMinutes^2
   });
   const lowerBound = priceUsage({
     liveMinutes: 10,
-    liveMinutesSq: 50,
+    liveMinutesSq: 48,
     calls: 2,
     sttMinutes: 0,
     textTokens: 0,
@@ -167,7 +168,7 @@ test('priceUsage: mixed legacy + new month uses max(liveMinutesSq, liveMinutes^2
   });
   assert.ok(Math.abs(mixed.live - lowerBound.live) < 1e-12);
 
-  // When actual Sq > liveMinutes^2/calls (e.g. 9m + 1m => Sq=82 > 50), stored Sq is kept.
+  // When actual Sq > liveMinutes^2/calls (e.g. 9m + 1m => Sq=82 > 48), stored Sq is kept.
   const skewed = priceUsage({
     liveMinutes: 10,
     liveMinutesSq: 82,
@@ -333,7 +334,10 @@ test('live context re-billing is capped by the sliding context window for very l
   const { USAGE_ASSUMPTIONS } = await import('../src/config/models.ts');
   const a = USAGE_ASSUMPTIONS;
   const capMin = a.liveContextWindowTokens / (a.audioTokensPerSec * 60 * (1 + a.liveModelTalkShare));
-  assert.equal(liveContextMinutesSq(10), 100);
+  // 12k/6k compression: average history 9k tokens = 4 minutes at 2,250 tok/min, so a 10-minute call is 2·4·10 − 4² = 64.
+  assert.equal(capMin, 4);
+  assert.equal(liveContextMinutesSq(3), 9);
+  assert.equal(liveContextMinutesSq(10), 64);
   assert.equal(liveContextMinutesSq(0), 0);
   assert.equal(liveContextMinutesSq(-5), 0);
   assert.equal(liveContextMinutesSq(Number.NaN), 0);
@@ -663,9 +667,20 @@ test('QA measured tokens are priced into qaLive only and never leak into live', 
 
 test('liveContextMinutesSq custom windowTokens shrinks cap for long calls while default is unchanged', () => {
   const def = liveContextMinutesSq(120);
-  const custom = liveContextMinutesSq(120, 45_000);
+  const custom = liveContextMinutesSq(120, 4_500);
   assert.ok(custom < def);
   assert.equal(liveContextMinutesSq(120, 0), def);
   assert.equal(liveContextMinutesSq(120, -1), def);
   assert.equal(liveContextMinutesSq(120, Number.NaN), def);
+});
+
+test('a new unmeasured 10-minute call (12k/6k compression) is priced at ~$1.04, not the old $1.53', async () => {
+  const { callUsageDelta } = await import('../src/services/usage/learningLog.ts');
+  const d = callUsageDelta(600, false) as any;
+  assert.equal(d.liveMinutesSq, 64);
+  const priced = priceUsage({ ...d, sttMinutes: 0, textTokens: 0, ttsChars: 0, estCostUsd: 0 });
+  assert.ok(Math.abs(priced.live - 1.044) < 1e-9, `live=${priced.live}`);
+  // A legacy 10-minute call that stored T² keeps its old price.
+  const legacy = priceUsage({ liveMinutes: 10, liveMinutesSq: 100, calls: 1, sttMinutes: 0, textTokens: 0, ttsChars: 0, estCostUsd: 0 });
+  assert.ok(Math.abs(legacy.live - 1.53) < 1e-9, `legacy=${legacy.live}`);
 });

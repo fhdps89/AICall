@@ -1,5 +1,6 @@
 import { Modality } from '@google/genai';
 import { LIVE_LANGUAGE_CODE, normalizeVoiceName } from '../src/config/voices.ts';
+import { buildLiveContextWindowCompression } from '../src/config/liveCompression.ts';
 
 export interface LiveConfigAttemptInput {
   voiceName?: unknown;
@@ -11,6 +12,8 @@ export interface LiveConfigAttempt {
   desc: string;
   config: Record<string, unknown>;
   lock: string | null;
+  /** True when this attempt sends contextWindowCompression (reported to the client in 'ready'). */
+  contextCompression: boolean;
 }
 
 /**
@@ -53,13 +56,12 @@ export function buildLiveConfigAttempts({
         sessionResumption: {
           handle: resumeHandle || undefined,
         },
-        contextWindowCompression: {
-          slidingWindow: {},
-        },
+        contextWindowCompression: buildLiveContextWindowCompression(),
         speechConfig: buildSpeechConfig(voiceName),
         systemInstruction,
       },
       lock: LIVE_LANGUAGE_CODE,
+      contextCompression: true,
     },
     {
       desc: 'gemini-3.8-live standard audio session',
@@ -71,6 +73,7 @@ export function buildLiveConfigAttempts({
         systemInstruction,
       },
       lock: LIVE_LANGUAGE_CODE,
+      contextCompression: false,
     },
   ];
 }

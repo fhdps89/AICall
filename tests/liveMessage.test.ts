@@ -1082,3 +1082,29 @@ test('GeminiLiveProvider tracks usageMetadata across direct turns, GoAway reconn
     }
   });
 });
+
+test('proxy ready.contextCompression is tracked per call: false -> off, true -> on, missing -> unknown', async () => {
+  for (const [field, expected] of [[false, 'off'], [true, 'on'], [undefined, 'unknown']] as const) {
+    await withFakeBrowserEnv(async () => {
+      (globalThis as any).fetch = async () =>
+        new Response(JSON.stringify({ ok: false, error: 'no token' }), { status: 200 });
+      const provider = new GeminiLiveProvider();
+      const connectPromise = provider.connect({
+        sessionId: `sess-ctx-${String(field)}`,
+        systemPrompt: 'System prompt',
+        onAudioData: () => {},
+        onTranscript: () => {},
+        onStatusChange: () => {},
+      });
+      await waitFor(() => FakeWebSocket.instances.length === 1 && FakeWebSocket.instances[0].sent.length >= 1);
+      const ws = FakeWebSocket.instances[0];
+      const ready: Record<string, unknown> = { type: 'ready', model: 'gemini-3.8-live' };
+      if (field !== undefined) ready.contextCompression = field;
+      ws.emitMessage(new Blob([JSON.stringify(ready)]));
+      await connectPromise;
+      assert.equal(provider.getConnectionStats().connectionPath, 'proxy');
+      assert.equal(provider.getLiveContextCompression(), expected);
+      await provider.disconnect(false);
+    });
+  }
+});
