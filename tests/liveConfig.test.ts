@@ -95,7 +95,7 @@ test("live compression config: 12k/6k as int64 strings, fresh object, target < t
 
 test("direct setup sends the same compression config as the server relay", async () => {
   const { buildDirectSetup } = await import("../src/services/providers/liveWire.ts");
-  const setup = buildDirectSetup({ model: "gemini-3.8-live", voiceName: "Kore", systemInstruction: "s" }) as any;
+  const setup = buildDirectSetup({ model: "gemini-3.8-live", voiceName: "Kore", systemInstruction: "s", resumeHandle: null }) as any;
   const attempts = buildLiveConfigAttempts({ voiceName: "Kore", systemInstruction: "s" });
   assert.deepEqual(setup.setup.contextWindowCompression, attempts[0].config.contextWindowCompression);
 });

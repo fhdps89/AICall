@@ -13,6 +13,7 @@
 - **QA 신호**: `[live-usage]`에 `peakPrompt= ctxTrigger= ctxTarget= path= ctx=on|off|unknown`(서버 중계가 압축 없는 2차 설정으로 내려가면 `ready.contextCompression=false` → `ctx=off`), `?qa=1`이면 `<html data-live-usage>`.
 - **넣지 않은 것**: 1분 임시 받아쓰기 끔(#62에서 반영됨), 무음 차단(제안서 조건 = 무음 과금 실측 미확인).
 - **테스트 수리**: `lectureFailedScriptBackup.test.ts`의 고정 시각(2026-11-27 21:00 KST)이 지나 실패하던 것을 `Date.now()` 기준으로.
+- **CI 수리(11/28)**: `tests/liveConfig.test.ts`의 직연결 압축 비교가 `resumeHandle`을 빠뜨려 `npx tsc -p tsconfig.server.json --noEmit`(워크플로 서버 타입 검사)가 실패했다. 다른 테스트와 같이 `resumeHandle: null`을 넣었다. 동작 변경 없음.
 
 ---
 
