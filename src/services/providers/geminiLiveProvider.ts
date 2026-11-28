@@ -1124,6 +1124,7 @@ export class GeminiLiveProvider implements LiveProvider {
     this.maybeInjectCorrectionMemo(reason);
   }
 
+  /** Runs on direct serverContent.turnComplete and proxy type=turnComplete. Text calls land in transcriptItems via appendUserText. */
   private harvestCorrectionMemo(): void {
     if (!isCorrectionMemoEnabled()) return;
     const items = this.transcriptItems;

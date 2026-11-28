@@ -8,7 +8,12 @@ import {
   detectCompression,
   estimateMemoTokens,
   extractCorrections,
+  extractRecastBySimilarity,
+  extractUnquotedCues,
   formatCorrectionMemo,
+  isQuestionSentence,
+  tokenSimilarity,
+  tokenizePhrase,
   mergeCorrections,
   memoSignature,
   shouldReinjectMemo,
@@ -54,6 +59,118 @@ test("ignores greetings and identical quotes (no false correction)", () => {
   assert.deepEqual(extractCorrections("Hi", "Hello! How was your day? Let's start lesson 2."), []);
   assert.deepEqual(extractCorrections("", 'You said "okay" and I also said "okay".'), []);
   assert.deepEqual(extractCorrections("", "Hi"), []);
+});
+
+test("QA recast (aee7997 live text call): unquoted 'I went to the park...' is a correction", () => {
+  const user = "I go to park with my friend yesterday.";
+  const tutor = "I went to the park with my friend yesterday.";
+  const items = extractCorrections(user, tutor);
+  assert.equal(items.length, 1, `expected a recast, got ${JSON.stringify(items)}`);
+  assert.equal(items[0].myPhrase, user);
+  assert.match(items[0].naturalPhrase, /went to the park with my friend yesterday/i);
+  const u = tokenizePhrase(user);
+  const t = tokenizePhrase(tutor);
+  assert.ok(tokenSimilarity(u, t) >= 0.6, `similarity ${tokenSimilarity(u, t)}`);
+  assert.ok(tokenSimilarity(u, t) < 1);
+});
+
+test("voice-style recast: unpunctuated tutor turn plus a short explanation still matches", () => {
+  const user = "I go to park with my friend yesterday";
+  const tutor =
+    "I went to the park with my friend yesterday we use the past tense went and we say the park";
+  const items = extractCorrections(user, tutor);
+  assert.equal(items.length, 1);
+  assert.match(items[0].naturalPhrase, /went to the park with my friend yesterday/i);
+});
+
+test("voice-style recast in a punctuated tutor turn with praise around it", () => {
+  const items = extractCorrections(
+    "She have two brother",
+    "Good try. She has two brothers. We add s for more than one brother.",
+  );
+  assert.equal(items.length, 1);
+  assert.equal(items[0].myPhrase, "She have two brother");
+  assert.match(items[0].naturalPhrase, /She has two brothers/i);
+});
+
+test("unquoted cue phrases: you can say, try saying, better to say, we say X instead of Y, Korean 라고 하면 돼요", () => {
+  const can = extractUnquotedCues(
+    "I go yesterday",
+    "You can say I went yesterday because it is past.",
+  );
+  assert.equal(can.length, 1);
+  assert.match(can[0].naturalPhrase, /I went yesterday/i);
+
+  const trySay = extractCorrections("I go to park", "Try saying I went to the park.");
+  assert.equal(trySay.length, 1);
+  assert.match(trySay[0].naturalPhrase, /I went to the park/i);
+
+  const better = extractCorrections(
+    "I have 20 years",
+    "It's better to say I am 20 years old.",
+  );
+  assert.equal(better.length, 1);
+  assert.match(better[0].naturalPhrase, /I am 20 years old/i);
+
+  const instead = extractCorrections("", "We say I went yesterday instead of I go yesterday.");
+  assert.equal(instead.length, 1);
+  assert.match(instead[0].myPhrase, /I go yesterday/i);
+  assert.match(instead[0].naturalPhrase, /I went yesterday/i);
+
+  const ko = extractCorrections(
+    "나는 어제 공원에 가다",
+    "나는 어제 공원에 갔어요라고 하면 돼요.",
+  );
+  assert.equal(ko.length, 1);
+  assert.match(ko[0].naturalPhrase, /갔어요/);
+});
+
+test("recast detector ignores echoes, short lines, and questions that only reuse words", () => {
+  const user = "I go to park with my friend yesterday.";
+  assert.deepEqual(extractRecastBySimilarity(user, user), []);
+  assert.deepEqual(extractRecastBySimilarity(user, "I go to park with my friend yesterday."), []);
+  assert.deepEqual(extractCorrections("ok yes", "Okay, yes, let's continue with the next sentence."), []);
+  assert.equal(isQuestionSentence("Did you go to the park with your friend yesterday?"), true);
+  assert.deepEqual(
+    extractRecastBySimilarity(user, "Did you go to the park with your friend yesterday?"),
+    [],
+  );
+  assert.deepEqual(
+    extractCorrections(user, "Did you go to the park with your friend yesterday?"),
+    [],
+  );
+  assert.deepEqual(extractCorrections("Hi there", "How was your day at the park yesterday?"), []);
+  // A short praise plus a question must not leak a recast from the question's words.
+  assert.deepEqual(
+    extractCorrections(user, "Great! Did you go to the park with your friend yesterday?"),
+    [],
+  );
+  // Exact echo plus a follow-up must not treat "… yesterday tell" as a correction.
+  assert.deepEqual(
+    extractRecastBySimilarity(user, "I go to park with my friend yesterday. Tell me more about it!"),
+    [],
+  );
+  assert.deepEqual(
+    extractRecastBySimilarity(user, "I go to park with my friend yesterday tell me more about it"),
+    [],
+  );
+});
+
+test("recast helpers reject empty and too-short lines, and keep the 0.6 / 3-token bars", () => {
+  assert.deepEqual(extractCorrections("", ""), []);
+  assert.deepEqual(extractRecastBySimilarity("", "I went to the park yesterday."), []);
+  assert.deepEqual(extractUnquotedCues("", ""), []);
+  // 2 tokens: below RECAST_MIN_TOKENS
+  assert.deepEqual(extractRecastBySimilarity("I go", "I went"), []);
+  // 3 tokens, one substitution (go→went): similarity 2/3 ≈ 0.67, should match
+  const three = extractCorrections("I go yesterday", "I went yesterday.");
+  assert.equal(three.length, 1);
+  assert.match(three[0].naturalPhrase, /I went yesterday/i);
+  // Clearly different sentences stay unmatched
+  assert.deepEqual(
+    extractRecastBySimilarity("I like apples", "She enjoys swimming every morning."),
+    [],
+  );
 });
 
 test("merge caps at 8 items, updates in place, and stays within the character budget", () => {
