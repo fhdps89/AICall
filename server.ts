@@ -22,6 +22,7 @@ import { assemblyAvailable, transcribeGemini, transcribeAssembly, transcribeLive
 import { LIVE_MODEL, TEXT_MODEL, GEMINI_STT_MODEL, GEMINI_TTS_LITE_MODEL } from './src/config/models.ts';
 import { LIVE_LANGUAGE_CODE, normalizeVoiceName } from './src/config/voices.ts';
 import { buildLiveConfigAttempts } from './server/liveConfig.ts';
+import { buildLiveMemoClientContent } from './src/services/call/correctionMemo.ts';
 import { handleCascadeConnection } from './server/cascadeWs.ts';
 import { POC_WS_PATH } from './src/config/cascadePoc.ts';
 import { userRecordingPath as userRecordingPathIn } from './server/recordingPath.ts';
@@ -1996,6 +1997,21 @@ async function startServer() {
             });
           } catch (sendErr) {
             console.error('Error forwarding text to Live session:', sendErr);
+          }
+        } else if (msg.type === 'correction_memo' && liveSession) {
+          // clientContent + turnComplete=false: append to history, do not start a spoken turn
+          // (https://ai.google.dev/api/live#BidiGenerateContentClientContent).
+          const payload = buildLiveMemoClientContent(msg.text);
+          if (payload) {
+            try {
+              if (typeof liveSession.sendClientContent === 'function') {
+                liveSession.sendClientContent(payload);
+              } else if (typeof liveSession.send === 'function') {
+                liveSession.send({ clientContent: payload });
+              }
+            } catch (memoErr) {
+              console.error('Error forwarding correction memo to Live session:', memoErr);
+            }
           }
         } else if (msg.type === 'control_command' && liveSession) {
           const commandPrompts: Record<string, string> = {

@@ -131,6 +131,9 @@ export class PocFallbackProvider implements LiveProvider {
   getLiveContextCompression(): "on" | "off" | "unknown" {
     return this.p?.getLiveContextCompression?.() ?? "unknown";
   }
+  getCorrectionMemoStats(): { memoItems: number; memoInjects: number; memoChars: number } {
+    return this.p?.getCorrectionMemoStats?.() ?? { memoItems: 0, memoInjects: 0, memoChars: 0 };
+  }
   disconnect(): Promise<void> {
     this.connectGen++;
     return this.p ? this.p.disconnect() : Promise.resolve();

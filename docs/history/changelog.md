@@ -4,6 +4,16 @@
 
 ---
 
+### [2026-11-28 KST] 통화 교정 메모: 압축 뒤에도 이번 통화의 교정을 튜터에게 다시 알려 준다
+- **배경**: 찬식님 12:41 「2번먼저 해보자」(EL-21). PR #69의 Live 대화 기록 압축(12k/6k)이 앞 턴을 버리면, 같은 통화에서 이미 고친 표현을 튜터가 잊을 수 있다.
+- **동작**: 추가 모델 호출 없이 Live 받아쓰기에서 교정 쌍을 고른다(You said… / not X but Y / "X" -> "Y" 등). 최근 8개, 약 200~300토큰만 남긴다. 튜터 턴이 끝난 뒤, 또는 압축이 감지되면 `clientContent`(`turnComplete: false`)로 짧은 메모를 다시 넣는다. 재연결 때는 시스템 지시문에도 같은 블록을 붙인다.
+- **검증(공식 Live API, 2026-11-28)**: Setup은 연결의 첫 메시지뿐이라 통화 중간에 `systemInstruction`을 바꿀 수 없다. SlidingWindow는 시스템 지시문을 남긴다. `clientContent`는 대화에 붙고, `turnComplete: false`면 바로 답을 생성하지 않는다. 생성 중인 턴을 끊지 않도록 튜터 턴이 끝난 뒤에만 보낸다.
+- **스위치**: 기본 켜짐. 설정 → AI 목소리에서 끄거나, 주소 `?correctionMemo=off`. 직연결·서버 중계 모두 동작. 시험 엔진 경로는 대상이 아님.
+- **QA**: `[live-usage]`에 `memoItems=`·`memoInjects=`, `?qa=1`이면 `data-live-usage`에도 포함.
+- **비용**: 10분 통화에서 메모를 몇 번 넣어도 텍스트 입력 수백 토큰 × $0.75/1M라 1센트 미만(추정). 별도 모델 호출 없음.
+
+---
+
 ### [2026-11-27 KST] 통화 비용 절감 H1-보수: Live 대화 기록 압축 12k/6k, 수업 지시서 경량화, 강의 TTS Flex
 - **배경**: 찬식님 21:45 「Live 쓰면서 비용 줄이는 혼합안으로 가」, 21:46 「어제 다 기획한게있어」 → 제안서(PR #61 `docs/plan/live-cost-optimization-proposal.md`) 6장 2단계 H1-보수 그대로. Live 비용의 88%는 턴마다 이전 대화를 다시 청구하는 몫인데, 압축 기준을 비워 두면 API 기본값(창의 80%, 약 10만 토큰)이라 10분 통화(약 2만 2천 토큰)에서는 한 번도 줄지 않았다.
 - **압축**: `contextWindowCompression = { triggerTokens: "12000", slidingWindow: { targetTokens: "6000" } }`(직연결·서버 중계 같은 값, `src/config/liveCompression.ts`). 필드 이름·위치는 공식 Live API 레퍼런스 `ContextWindowCompressionConfig`/`SlidingWindow` 기준(int64는 문자열, SDK 타입과 같음). 시스템 지시문은 항상 남고 가장 오래된 턴부터 버린다.

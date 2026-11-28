@@ -426,11 +426,14 @@ export const NewCallScreen: React.FC<NewCallScreenProps> = ({
         path: stats.connectionPath,
         // on = every connection this call sent contextWindowCompression; off = the relay fell back to the plain config.
         ctx: providerRef.current.getLiveContextCompression?.() ?? "unknown",
+        memoItems: providerRef.current.getCorrectionMemoStats?.()?.memoItems ?? 0,
+        memoInjects: providerRef.current.getCorrectionMemoStats?.()?.memoInjects ?? 0,
+        memoChars: providerRef.current.getCorrectionMemoStats?.()?.memoChars ?? 0,
       });
       infoLiveUsage(line);
     } else {
       infoLiveUsage(
-        `[live-usage] turns=0 (no usageMetadata received) path=${stats.connectionPath} ctx=${providerRef.current.getLiveContextCompression?.() ?? "unknown"}`
+        `[live-usage] turns=0 (no usageMetadata received) path=${stats.connectionPath} ctx=${providerRef.current.getLiveContextCompression?.() ?? "unknown"} memoItems=${providerRef.current.getCorrectionMemoStats?.()?.memoItems ?? 0} memoInjects=${providerRef.current.getCorrectionMemoStats?.()?.memoInjects ?? 0} memoChars=${providerRef.current.getCorrectionMemoStats?.()?.memoChars ?? 0}`
       );
     }
 

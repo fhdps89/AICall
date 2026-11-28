@@ -23,11 +23,28 @@ import {
   buildProxyInit,
   buildAudioInput,
   buildTextInput,
+  buildCorrectionMemoInput,
   validateClientMessage,
   describeClientMessage,
   redactSocketUrl,
 } from "./liveWire";
 import { MAX_KICKOFF_ATTEMPTS, shouldSendKickoff, isTutorOutput } from "./liveKickoff";
+import { isCorrectionMemoEnabled } from "../settings/correctionMemoSetting";
+import {
+  appendMemoToSystemPrompt,
+  detectCompression,
+  extractCorrections,
+  formatCorrectionMemo,
+  mergeCorrections,
+  memoSignature,
+  shouldReinjectMemo,
+  type CallCorrection,
+  type CorrectionMemoStats,
+} from "../call/correctionMemo";
+import {
+  LIVE_COMPRESSION_TARGET_TOKENS,
+  LIVE_COMPRESSION_TRIGGER_TOKENS,
+} from "../../config/liveCompression";
 import {
   PlaybackSchedulerState,
   createScheduler,
@@ -109,6 +126,13 @@ export class GeminiLiveProvider implements LiveProvider {
   private contextCompression: LiveContextCompressionState = "unknown";
   private directFailCount = 0;
   private liveUsage = createLiveUsageAccumulator();
+  private correctionMemo: CallCorrection[] = [];
+  private memoInjects = 0;
+  private lastMemoSignature = "";
+  private lastMemoSentAt = 0;
+  private lastMemoPromptTokens = 0;
+  private memoCompressionPending = false;
+  private memoResumePending = false;
 
   // Audio contexts
   private inputAudioCtx: AudioContext | null = null;
@@ -166,8 +190,17 @@ export class GeminiLiveProvider implements LiveProvider {
       this.kickoffAttempts = 0;
       this.liveUsage.reset();
       this.contextCompression = "unknown";
+      this.correctionMemo = [];
+      this.memoInjects = 0;
+      this.lastMemoSignature = "";
+      this.lastMemoSentAt = 0;
+      this.lastMemoPromptTokens = 0;
+      this.memoCompressionPending = false;
+      this.memoResumePending = false;
     } else {
       this.liveUsage.commitTurn();
+      // New Live RPC: previous clientContent may be gone, and a new systemInstruction may be ignored.
+      this.memoResumePending = this.correctionMemo.length > 0;
     }
 
     console.log("[Live] stage=connect_start");
@@ -387,7 +420,7 @@ export class GeminiLiveProvider implements LiveProvider {
               }
               if (raw.setupComplete && !setupCompleted) {
                 if (raw.usageMetadata) {
-                  this.liveUsage.observe(raw.usageMetadata);
+                  this.observeLiveUsage(raw.usageMetadata);
                 }
                 setupCompleted = true;
                 clearTimeout(setupTimer);
@@ -426,7 +459,7 @@ export class GeminiLiveProvider implements LiveProvider {
           buildDirectSetup({
             model: LIVE_MODEL,
             voiceName: normalizeVoiceName(this.options?.voiceName),
-            systemInstruction: this.activeSystemPrompt || this.options?.systemPrompt || "",
+            systemInstruction: this.systemPromptForSetup(),
             resumeHandle: this.resumeHandle,
             languageCode: LIVE_LANGUAGE_CODE,
           })
@@ -578,7 +611,7 @@ export class GeminiLiveProvider implements LiveProvider {
         this.sendOn(
           c,
           buildProxyInit({
-            systemInstruction: this.activeSystemPrompt || this.options?.systemPrompt || "",
+            systemInstruction: this.systemPromptForSetup(),
             voiceName: normalizeVoiceName(this.options?.voiceName),
             resumeHandle: this.resumeHandle,
             languageCode: "en-US",
@@ -699,6 +732,7 @@ export class GeminiLiveProvider implements LiveProvider {
   private maybeSendKickoff(trigger: "connect" | "reconnect"): void {
     const c = this.conn;
     if (!c?.ready || !this.isConnected) return;
+    if (trigger === "reconnect" && this.correctionMemo.length) this.memoResumePending = true;
     const startedFresh = !this.options?.resumeToken;
     if (
       !shouldSendKickoff({
@@ -715,6 +749,8 @@ export class GeminiLiveProvider implements LiveProvider {
       } else {
         console.log(`[Live] stage=kickoff_skipped trigger=${trigger} tutorSpoke=${this.tutorSpoke}`);
       }
+      // No greeting this turn, so a resume can take the memo immediately (turnComplete=false).
+      if (trigger === "reconnect") this.maybeInjectCorrectionMemo("resume");
       return;
     }
     console.log(`[Live] stage=kickoff_greeting trigger=${trigger} wire=${c.wire}`);
@@ -801,7 +837,7 @@ export class GeminiLiveProvider implements LiveProvider {
 
     if (wire === "direct") {
       if (msg.usageMetadata) {
-        this.liveUsage.observe(msg.usageMetadata);
+        this.observeLiveUsage(msg.usageMetadata);
       }
 
       // Standard Direct BidiGenerateContent messages
@@ -846,6 +882,7 @@ export class GeminiLiveProvider implements LiveProvider {
             `[Live] stage=playback_stats ${describeScheduler(this.playbackScheduler)} interrupts=${this.interruptCount}`
           );
           this.options?.onTurnComplete?.();
+          this.onTutorTurnCompleteForMemo();
         }
       }
 
@@ -875,7 +912,7 @@ export class GeminiLiveProvider implements LiveProvider {
         this.appendTranscript("model", msg.text);
         this.options?.onTranscript(msg.text, false);
       } else if (msg.type === "usage_metadata" && msg.usageMetadata) {
-        this.liveUsage.observe(msg.usageMetadata);
+        this.observeLiveUsage(msg.usageMetadata);
       } else if (msg.type === "interrupted") {
         this.liveUsage.commitTurn();
         this.interruptCount += 1;
@@ -887,6 +924,7 @@ export class GeminiLiveProvider implements LiveProvider {
           `[Live] stage=playback_stats ${describeScheduler(this.playbackScheduler)} interrupts=${this.interruptCount}`
         );
         this.options?.onTurnComplete?.();
+        this.onTutorTurnCompleteForMemo();
       } else if (msg.type === "session_resumption_update" && msg.handle) {
         this.resumeHandle = msg.handle;
         console.log("[GeminiLiveProvider] Proxy session resume handle updated:", this.resumeHandle);
@@ -983,7 +1021,10 @@ export class GeminiLiveProvider implements LiveProvider {
       .map((item) => `${item.role === "user" ? "Student" : "Tutor"}: ${item.text}`)
       .join("\n");
 
-    return `${basePrompt}\n\n[이전 대화 맥락 복원: 이전 세션 연결이 끊겨 새 세션으로 자동 전환되었습니다. 아래 이전 대화 내용을 숙지하고 학생에게 끊김 없이 자연스럽게 대화를 이어가세요]:\n${summary}`;
+    const withHistory = `${basePrompt}\n\n[이전 대화 맥락 복원: 이전 세션 연결이 끊겨 새 세션으로 자동 전환되었습니다. 아래 이전 대화 내용을 숙지하고 학생에게 끊김 없이 자연스럽게 대화를 이어가세요]:\n${summary}`;
+    return isCorrectionMemoEnabled()
+      ? appendMemoToSystemPrompt(withHistory, this.correctionMemo)
+      : withHistory;
   }
 
   private appendTranscript(role: "user" | "model", text: string): void {
@@ -1040,6 +1081,99 @@ export class GeminiLiveProvider implements LiveProvider {
   public getLiveContextCompression(): LiveContextCompressionState {
     return this.contextCompression;
   }
+
+  public getCorrectionMemoStats(): CorrectionMemoStats {
+    const text = formatCorrectionMemo(this.correctionMemo);
+    return {
+      memoItems: this.correctionMemo.length,
+      memoInjects: this.memoInjects,
+      memoChars: text.length,
+    };
+  }
+
+
+  private systemPromptForSetup(): string {
+    const base = this.activeSystemPrompt || this.options?.systemPrompt || "";
+    if (!isCorrectionMemoEnabled() || this.correctionMemo.length === 0) return base;
+    return appendMemoToSystemPrompt(base, this.correctionMemo);
+  }
+
+  private observeLiveUsage(usageMetadata: unknown): void {
+    const prev = this.lastMemoPromptTokens;
+    this.liveUsage.observe(usageMetadata);
+    let next = 0;
+    if (usageMetadata && typeof usageMetadata === "object" && !Array.isArray(usageMetadata)) {
+      const n = (usageMetadata as Record<string, unknown>).promptTokenCount;
+      if (typeof n === "number" && Number.isFinite(n) && n > 0) next = n;
+    }
+    if (next > 0) {
+      if (detectCompression(prev, next, LIVE_COMPRESSION_TRIGGER_TOKENS, LIVE_COMPRESSION_TARGET_TOKENS)) {
+        this.memoCompressionPending = true;
+      }
+      this.lastMemoPromptTokens = next;
+    }
+  }
+
+  private onTutorTurnCompleteForMemo(): void {
+    this.harvestCorrectionMemo();
+    const reason = this.memoCompressionPending
+      ? "compression"
+      : this.memoResumePending
+        ? "resume"
+        : "changed";
+    this.maybeInjectCorrectionMemo(reason);
+  }
+
+  private harvestCorrectionMemo(): void {
+    if (!isCorrectionMemoEnabled()) return;
+    const items = this.transcriptItems;
+    if (!items.length) return;
+    let tutor = "";
+    let user = "";
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (!tutor && items[i].role === "model") {
+        tutor = items[i].text;
+      } else if (tutor && items[i].role === "user") {
+        user = items[i].text;
+        break;
+      }
+    }
+    const found = extractCorrections(user, tutor);
+    if (found.length) this.correctionMemo = mergeCorrections(this.correctionMemo, found);
+  }
+
+  /** Inject the memo via clientContent (turnComplete=false). Safe only when the tutor is not generating. */
+  private maybeInjectCorrectionMemo(reason: "changed" | "compression" | "resume"): void {
+    if (!isCorrectionMemoEnabled()) return;
+    const c = this.conn;
+    if (!c?.ready) return;
+    const compressed = reason === "compression" || this.memoCompressionPending;
+    if (
+      !shouldReinjectMemo({
+        items: this.correctionMemo,
+        lastSentSignature: this.lastMemoSignature,
+        lastSentAtMs: this.lastMemoSentAt,
+        nowMs: Date.now(),
+        compressed,
+        reason,
+      })
+    ) {
+      return;
+    }
+    const text = formatCorrectionMemo(this.correctionMemo);
+    if (!text) return;
+    const sent = this.sendOn(c, buildCorrectionMemoInput(c.wire, text));
+    if (!sent) return;
+    this.lastMemoSignature = memoSignature(this.correctionMemo);
+    this.lastMemoSentAt = Date.now();
+    this.memoInjects += 1;
+    this.memoCompressionPending = false;
+    this.memoResumePending = false;
+    console.log(
+      `[live-memo] items=${this.correctionMemo.length} injects=${this.memoInjects} reason=${reason} chars=${text.length}`
+    );
+  }
+
 
   public sendAudioChunk(pcm16kChunk: ArrayBuffer): void {
     const c = this.conn;
