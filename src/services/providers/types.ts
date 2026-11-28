@@ -51,6 +51,7 @@ export interface LiveProvider {
   getLivePeakPromptTokens?(): number;
   /** Whether this call's Live connection(s) used contextWindowCompression. */
   getLiveContextCompression?(): "on" | "off" | "unknown";
+  getCorrectionMemoStats?(): { memoItems: number; memoInjects: number; memoChars: number };
   disconnect(): Promise<void>;
 }
 

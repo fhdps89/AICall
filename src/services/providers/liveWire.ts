@@ -3,6 +3,7 @@
  */
 
 import { normalizeVoiceName } from "../../config/voices";
+import { buildLiveMemoClientContent } from "../call/correctionMemo";
 import { buildLiveContextWindowCompression } from "../../config/liveCompression";
 
 export type LiveWireKind = "direct" | "proxy";
@@ -30,7 +31,8 @@ export type ProxyClientMessage =
       languageCode: string;
     }
   | { type: "realtime_audio"; audio: string; mimeType: string }
-  | { type: "text_prompt"; text: string };
+  | { type: "text_prompt"; text: string }
+  | { type: "correction_memo"; text: string };
 
 export type LiveClientMessage = DirectClientMessage | ProxyClientMessage;
 
@@ -69,6 +71,7 @@ const ALLOWED_PROXY_TYPES = new Set([
   "init",
   "realtime_audio",
   "text_prompt",
+  "correction_memo",
   "control_command",
   "interrupt",
 ]);
@@ -169,6 +172,24 @@ export function buildTextInput(wire: LiveWireKind, text: string): LiveClientMess
 }
 
 /**
+ * Mid-session correction memo (https://ai.google.dev/api/live#BidiGenerateContentClientContent).
+ * turnComplete is false so the note is appended to history without starting a spoken turn.
+ */
+export function buildCorrectionMemoInput(wire: LiveWireKind, text: string): LiveClientMessage {
+  const payload = buildLiveMemoClientContent(text);
+  const memoText = payload?.turns[0].parts[0].text ?? "";
+  if (wire === "direct") {
+    return {
+      clientContent: payload ?? { turns: [{ role: "user", parts: [{ text: "" }] }], turnComplete: false },
+    };
+  }
+  return {
+    type: "correction_memo",
+    text: memoText || text,
+  };
+}
+
+/**
  * wire 규격에 맞는지 검증한다.
  * @returns null = 통과, 문자열 = 거부 사유(키 이름만 담고 데이터는 넣지 않음)
  */
@@ -242,6 +263,10 @@ export function validateClientMessage(wire: LiveWireKind, msg: unknown): string 
   } else if (msg.type === "text_prompt") {
     if (typeof msg.text !== "string") {
       return "invalid_proxy_text_prompt";
+    }
+  } else if (msg.type === "correction_memo") {
+    if (typeof msg.text !== "string" || !msg.text.trim()) {
+      return "invalid_proxy_correction_memo";
     }
   }
   return null;

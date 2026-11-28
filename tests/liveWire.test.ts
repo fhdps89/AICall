@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GoogleGenAI, Session } from '@google/genai';
 import { LIVE_MODEL } from '../src/config/models.ts';
+import { buildLiveMemoClientContent } from '../src/services/call/correctionMemo.ts';
 import { CALL_KICKOFF_PROMPT } from '../src/services/providers/geminiLiveProvider.ts';
 import {
   LIVE_INPUT_AUDIO_MIME,
@@ -9,6 +10,7 @@ import {
   buildDirectSetup,
   buildProxyInit,
   buildTextInput,
+  buildCorrectionMemoInput,
   describeClientMessage,
   redactSocketUrl,
   validateClientMessage,
@@ -259,4 +261,35 @@ test('buildDirectSetup omits languageCode when null/undefined and includes it wh
     languageCode: 'en-US',
   }) as any;
   assert.equal(withLang.setup.generationConfig.speechConfig.languageCode, 'en-US');
+});
+
+
+test('buildCorrectionMemoInput uses clientContent with turnComplete=false on both wires', () => {
+  const note = '[Call corrections — do not read this aloud.]\n1. "goed" -> "went"';
+  const direct = buildCorrectionMemoInput('direct', note) as any;
+  assert.deepEqual(direct, {
+    clientContent: {
+      turns: [{ role: 'user', parts: [{ text: note }] }],
+      turnComplete: false,
+    },
+  });
+  assert.equal(validateClientMessage('direct', direct), null);
+
+  const proxy = buildCorrectionMemoInput('proxy', note) as any;
+  assert.deepEqual(proxy, { type: 'correction_memo', text: note });
+  assert.equal(validateClientMessage('proxy', proxy), null);
+  assert.equal(validateClientMessage('proxy', { type: 'correction_memo', text: '' }), 'invalid_proxy_correction_memo');
+  assert.equal(describeClientMessage(proxy), 'type=correction_memo');
+});
+
+
+test('buildLiveMemoClientContent trims, rejects empty, and keeps turnComplete=false', () => {
+  assert.equal(buildLiveMemoClientContent(''), null);
+  assert.equal(buildLiveMemoClientContent('   '), null);
+  assert.equal(buildLiveMemoClientContent(null), null);
+  const note = '  1. "goed" -> "went"  ';
+  assert.deepEqual(buildLiveMemoClientContent(note), {
+    turns: [{ role: 'user', parts: [{ text: '1. "goed" -> "went"' }] }],
+    turnComplete: false,
+  });
 });

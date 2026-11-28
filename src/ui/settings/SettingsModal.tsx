@@ -35,6 +35,10 @@ import {
   getStoredPocTextVariant,
   setStoredPocTextVariant,
 } from "../../services/settings/callEngineSetting";
+import {
+  isCorrectionMemoEnabled,
+  setCorrectionMemoEnabled,
+} from "../../services/settings/correctionMemoSetting";
 import { ALLOWED_USER_EMAIL } from "../../services/firebase/auth";
 import { friendlyError } from "../common/friendlyError";
 import { FeedSettingsPanel } from "./FeedSettingsPanel";
@@ -98,6 +102,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [coachNudges, setCoachNudges] = useState<string[]>(["weekly", "absence2d"]);
   const [enablePartialStt, setEnablePartialStt] = useState<boolean>(() =>
     isPartialTranscribeEnabled()
+  );
+  const [enableCorrectionMemo, setEnableCorrectionMemo] = useState<boolean>(() =>
+    isCorrectionMemoEnabled()
   );
   const [enableCascadePoc, setEnableCascadePoc] = useState<boolean>(() => isCascadePocEnabled());
   const [pocTextVariant, setPocTextVariant] = useState<PocTextVariant>(() => getStoredPocTextVariant());
@@ -363,7 +370,33 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           ) : activeTab === "geminiKey" ? (
             devMode ? <GeminiKeyPanel userId={userId} /> : null
           ) : activeTab === "models" && !devMode ? null : activeTab === "voice" ? (
-            <VoicePanel userId={userId} />
+            <div className="space-y-4">
+              <VoicePanel userId={userId} />
+              <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2.5 text-xs">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="font-bold text-slate-200 block">통화 중 교정 메모</span>
+                    <span className="text-[11px] text-slate-400">긴 통화에서 앞부분 교정을 튜터가 잊지 않게 짧게 다시 알려 줍니다. 기본은 켜져 있습니다.</span>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={enableCorrectionMemo}
+                      onChange={(e) => {
+                        const val = e.target.checked;
+                        setEnableCorrectionMemo(val);
+                        setCorrectionMemoEnabled(val);
+                      }}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-amber-500"></div>
+                  </label>
+                </div>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  꺼도 통화와 교정 품질은 그대로입니다. 주소에 <span className="font-mono">?correctionMemo=off</span>를 붙여도 이번 페이지만 꺼집니다.
+                </p>
+              </div>
+            </div>
           ) : activeTab === "usage" ? (
             <UsagePanel userId={userId} />
           ) : activeTab === "feed" ? (
